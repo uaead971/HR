@@ -1549,6 +1549,7 @@ def initialize_database(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_FILE.read_text(encoding="utf-8")
     db = open_db(db_path)
+    production = os.environ.get("HR_ENV", "development").strip().lower() in {"prod", "production"}
     try:
         with db:
             db.executescript(schema)
@@ -1812,7 +1813,10 @@ def initialize_database(db_path: Path) -> None:
                 "INSERT OR IGNORE INTO shifts(name,start_time,end_time,break_minutes,working_days,rest_days,grace_minutes,daily_limit_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 ("الدوام الإداري", "08:00", "17:00", 60, "[0,1,2,3,4]", "[5,6]", 10, 480, stamp, stamp),
             )
-            employee_seed = [
+            # Demo identities are local fixtures only. Never create them in a
+            # production database; the first administrator is bootstrapped
+            # explicitly from secret environment variables below.
+            employee_seed = [] if production else [
                 ("EMP-1001", "خالد المنصوري", "gm@demo.ae", "المدير العام", "G-15", gm_dept, None, 45000),
                 ("EMP-1002", "مريم الهاشمي", "manager@demo.ae", "مديرة العمليات", "G-12", ops_dept, None, 28000),
                 ("EMP-1003", "ليلى الحمادي", "hr@demo.ae", "مديرة الموارد البشرية", "G-12", hr_dept, None, 26000),
@@ -1831,30 +1835,31 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("UPDATE employees SET job_title_id=COALESCE(job_title_id,?),job_grade_id=COALESCE(job_grade_id,?) WHERE employee_no=?", (title_id, grade_id, employee_no))
             for title_row in db.execute("SELECT id,name FROM job_titles").fetchall():
                 seed_job_goal_templates(db, int(title_row["id"]), str(title_row["name"]), stamp)
-            gm_emp = employee_ids["EMP-1001"]
-            manager_emp = employee_ids["EMP-1002"]
-            hr_emp = employee_ids["EMP-1003"]
-            regular_emp = employee_ids["EMP-1024"]
-            db.execute("UPDATE employees SET manager_id=? WHERE id IN (?,?)", (gm_emp, manager_emp, hr_emp))
-            db.execute("UPDATE employees SET manager_id=? WHERE id=?", (manager_emp, regular_emp))
-            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (gm_emp, gm_dept))
-            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (manager_emp, ops_dept))
-            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (hr_emp, hr_dept))
-            db.execute("UPDATE branches SET manager_employee_id=? WHERE id=?", (manager_emp, branch_id))
-            admin_user = seed_user(db, "admin@demo.ae", "Admin@123", "مدير النظام", "admin", None)
-            db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (admin_user,))
-            seed_user(db, "hr@demo.ae", "HR@12345", "ليلى الحمادي", "hr", hr_emp)
-            seed_user(db, "employee@demo.ae", "Emp@12345", "أحمد الراشدي", "employee", regular_emp)
-            seed_user(db, "manager@demo.ae", "Manager@12345", "مريم الهاشمي", "manager", manager_emp)
-            seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "general_manager", gm_emp)
-            shift_id = db.execute("SELECT id FROM shifts WHERE name='الدوام الإداري'").fetchone()[0]
-            for emp_id in employee_ids.values():
-                exists = db.execute("SELECT 1 FROM employee_shift_assignments WHERE employee_id=?", (emp_id,)).fetchone()
-                if not exists:
-                    db.execute(
-                        "INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,created_by,created_at) VALUES(?,?,?,?,?)",
-                        (emp_id, shift_id, "2023-01-01", admin_user, stamp),
-                    )
+            if employee_ids:
+                gm_emp = employee_ids["EMP-1001"]
+                manager_emp = employee_ids["EMP-1002"]
+                hr_emp = employee_ids["EMP-1003"]
+                regular_emp = employee_ids["EMP-1024"]
+                db.execute("UPDATE employees SET manager_id=? WHERE id IN (?,?)", (gm_emp, manager_emp, hr_emp))
+                db.execute("UPDATE employees SET manager_id=? WHERE id=?", (manager_emp, regular_emp))
+                db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (gm_emp, gm_dept))
+                db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (manager_emp, ops_dept))
+                db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (hr_emp, hr_dept))
+                db.execute("UPDATE branches SET manager_employee_id=? WHERE id=?", (manager_emp, branch_id))
+                admin_user = seed_user(db, "admin@demo.ae", "Admin@123", "مدير النظام", "admin", None)
+                db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (admin_user,))
+                seed_user(db, "hr@demo.ae", "HR@12345", "ليلى الحمادي", "hr", hr_emp)
+                seed_user(db, "employee@demo.ae", "Emp@12345", "أحمد الراشدي", "employee", regular_emp)
+                seed_user(db, "manager@demo.ae", "Manager@12345", "مريم الهاشمي", "manager", manager_emp)
+                seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "general_manager", gm_emp)
+                shift_id = db.execute("SELECT id FROM shifts WHERE name='الدوام الإداري'").fetchone()[0]
+                for emp_id in employee_ids.values():
+                    exists = db.execute("SELECT 1 FROM employee_shift_assignments WHERE employee_id=?", (emp_id,)).fetchone()
+                    if not exists:
+                        db.execute(
+                            "INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,created_by,created_at) VALUES(?,?,?,?,?)",
+                            (emp_id, shift_id, "2023-01-01", admin_user, stamp),
+                        )
             leave_seed = [
                 ("annual", "إجازة سنوية", 30, 0, 0, 1),
                 ("sick", "إجازة مرضية", 90, 0, 1, 1),
@@ -1872,6 +1877,20 @@ def initialize_database(db_path: Path) -> None:
                         "INSERT OR IGNORE INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)",
                         (emp_id, leave["id"], current_year, leave["annual_entitlement"]),
                     )
+            if production and db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+                bootstrap_email = os.environ.get("HR_BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+                bootstrap_password = os.environ.get("HR_BOOTSTRAP_ADMIN_PASSWORD", "")
+                bootstrap_name = os.environ.get("HR_BOOTSTRAP_ADMIN_NAME", "مدير النظام").strip() or "مدير النظام"
+                if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", bootstrap_email):
+                    raise RuntimeError("Production database has no users. Set HR_BOOTSTRAP_ADMIN_EMAIL to a valid email address for the first start.")
+                if not bootstrap_password:
+                    raise RuntimeError("Production database has no users. Set HR_BOOTSTRAP_ADMIN_PASSWORD for the first start.")
+                try:
+                    validate_password_strength(bootstrap_password)
+                except APIError as exc:
+                    raise RuntimeError(f"HR_BOOTSTRAP_ADMIN_PASSWORD is too weak: {exc.message}") from exc
+                bootstrap_id = seed_user(db, bootstrap_email, bootstrap_password, bootstrap_name, "admin", None)
+                db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (bootstrap_id,))
             db.execute(
                 "INSERT OR IGNORE INTO evaluation_cycles(year,name,starts_on,ends_on,active) VALUES(?,?,?,?,1)",
                 (current_year, f"تقييم الأداء {current_year}", f"{current_year}-01-01", f"{current_year}-12-31"),

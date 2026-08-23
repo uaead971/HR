@@ -1,0 +1,13 @@
+.git
+.github
+.DS_Store
+__pycache__/
+tests/
+data/*
+!data/.gitkeep
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+*.db
+.env
+.env.*
