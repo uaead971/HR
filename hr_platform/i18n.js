@@ -92,6 +92,22 @@
     'طلب شهادة راتب':'Request salary certificate','الجهة المستلمة للشهادة':'Certificate recipient','إرسال الطلب':'Submit request','سيتم إرسال الطلب إلى الموارد البشرية. لا تظهر لك تفاصيل الراتب ضمن الطلب.':'The request is sent to HR; salary details are not shown in the request.','تم إرسال طلب شهادة الراتب إلى الموارد البشرية':'Salary certificate request sent to HR','طلبات شهادات الراتب':'Salary certificate requests','سجل التحقق والإصدار':'Verification and issue history','اعتماد وإرسال PDF':'Approve and send PDF','مراجعة واعتماد PDF':'Review and approve PDF','رفض طلب شهادة الراتب':'Reject salary certificate request','اعتماد شهادة الراتب':'Approve salary certificate','تم اعتماد شهادة الراتب':'Salary certificate approved','تم رفض طلب شهادة الراتب':'Salary certificate request rejected','قيد مراجعة الموارد البشرية':'Under HR review','معتمد وتم إرساله للبريد':'Approved and emailed','سجل محفوظ':'Archived record','سيتم حفظ قرار الرفض ضمن السجل غير القابل للحذف.':'The rejection decision is retained in the non-deletable audit record.','تم الاعتماد وإرسال PDF بالبريد':'Approved and PDF emailed','تم حفظ القرار؛ سيُرسل PDF عند توفر SMTP','طلب شهادة راتب جديد':'New salary certificate request','يوجد طلب شهادة راتب جديد يحتاج مراجعة الموارد البشرية.':'A new salary certificate request needs HR review.'
   };
 
+  Object.assign(english, {
+    'العهد':'Custody', 'العهد والأصول':'Employee custody & assets', 'الأصول المسلّمة':'Assigned assets',
+    'سجل استلام وتسليم العهدة مع الرقم التسلسلي وحالة الأصل.':'Receipt and return history with serial number and asset condition.',
+    'إضافة عهدة':'Add custody item', 'تعديل العهدة':'Edit custody item', 'بيانات الأصل':'Asset details',
+    'اسم العهدة':'Asset name', 'النوع / الموديل':'Type / model', 'الرقم التسلسلي':'Serial number',
+    'تاريخ الاستلام':'Received on', 'حالة الأصل عند الاستلام':'Condition at receipt', 'تاريخ تسليم العهدة':'Returned on',
+    'حالة الأصل عند التسليم':'Condition at return', 'لا يمكن تسجيل تاريخ التسليم قبل تاريخ الاستلام، ويجب وصف حالة الأصل عند الإرجاع.':'The return date cannot precede receipt, and the return condition is required.',
+    'جديدة':'New', 'مستعملة - نظيفة':'Used - clean', 'مستعملة - حالة متوسطة':'Used - average', 'مستعملة - تالفة':'Used - damaged',
+    'إجمالي السجلات':'Total records', 'على عهدة الموظف':'Assigned to employee', 'تم التسليم':'Returned', 'على العهدة':'Assigned',
+    'طباعة استلام':'Print receipt', 'طباعة تسليم':'Print return', 'سجل استلام عهدة / Custody Receipt Record':'Custody Receipt Record',
+    'سجل تسليم عهدة / Custody Return Record':'Custody Return Record', 'وثيقة داخلية محفوظة ضمن ملف الموظف':'Internal record stored in the employee file',
+    'توقيع الموظف':'Employee signature', 'مسؤول الموارد البشرية':'HR representative', 'طباعة السجل':'Print record',
+    'لا توجد عهد مسجلة لهذا الموظف.':'No custody records for this employee.', 'جارٍ تحميل سجل العهد…':'Loading custody records…',
+    'حفظ العهدة':'Save custody', 'حفظ التعديل':'Save changes', 'إلغاء':'Cancel'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();
