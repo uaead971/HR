@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#102d38">
+  <meta name="description" content="منصة خيشة لإدارة الموارد البشرية">
+  <script>try{const l=localStorage.getItem('khaisha.ui.locale');if(l==='en'){document.documentElement.lang='en';document.documentElement.dir='ltr'}}catch(_){}</script>
+  <title>خيشة - Khaisha | الموارد البشرية</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="styles.css?v=5.7.0">
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">
+    <symbol id="icon-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="4" rx="1"/><rect x="14" y="11" width="7" height="10" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 11 9-8 9 8"/><path d="M5 10v11h14V10M9 21v-7h6v7"/></symbol>
+    <symbol id="icon-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="icon-org" viewBox="0 0 24 24"><rect x="8" y="2" width="8" height="5" rx="1"/><rect x="2" y="17" width="7" height="5" rx="1"/><rect x="15" y="17" width="7" height="5" rx="1"/><path d="M12 7v5M5.5 17v-5h13v5"/></symbol>
+    <symbol id="icon-map" viewBox="0 0 24 24"><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+    <symbol id="icon-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="icon-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 17h.01M12 17h.01"/></symbol>
+    <symbol id="icon-shift" viewBox="0 0 24 24"><path d="M17 3h4v4M21 3l-6 6M7 21H3v-4M3 21l6-6"/><path d="M14 4H9a6 6 0 0 0-6 6M10 20h5a6 6 0 0 0 6-6"/></symbol>
+    <symbol id="icon-overtime" viewBox="0 0 24 24"><circle cx="11" cy="12" r="8"/><path d="M11 8v4l2 2M19 5v5M16.5 7.5h5"/></symbol>
+    <symbol id="icon-wallet" viewBox="0 0 24 24"><path d="M3 7a3 3 0 0 1 3-3h12v4H6a3 3 0 0 0 0 6h15v6H6a3 3 0 0 1-3-3Z"/><path d="M17 11h4v3h-4a1.5 1.5 0 0 1 0-3Z"/></symbol>
+    <symbol id="icon-certificate" viewBox="0 0 24 24"><path d="M5 3h14v13H5z"/><path d="M8 7h8M8 10h5M9 16v5l3-2 3 2v-5"/></symbol>
+    <symbol id="icon-loan" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M15 8.5a4 4 0 1 0 0 7M8 11h6M8 13h5"/></symbol>
+    <symbol id="icon-target" viewBox="0 0 24 24"><circle cx="11" cy="13" r="8"/><circle cx="11" cy="13" r="4"/><path d="m14 10 7-7M17 3h4v4"/></symbol>
+    <symbol id="icon-recruitment" viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M2 21v-2a5 5 0 0 1 5-5h4a5 5 0 0 1 4 2M19 14v6M16 17h6"/></symbol>
+    <symbol id="icon-onboarding" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h5M8 16h3M16 14l1.5 1.5L21 12"/></symbol>
+    <symbol id="icon-learning" viewBox="0 0 24 24"><path d="m2 9 10-5 10 5-10 5Z"/><path d="M6 11v5c3 2 9 2 12 0v-5M22 9v6"/></symbol>
+    <symbol id="icon-benefits" viewBox="0 0 24 24"><path d="M20.8 4.6a5.4 5.4 0 0 0-7.6 0L12 5.8l-1.2-1.2a5.4 5.4 0 1 0-7.6 7.6L12 21l8.8-8.8a5.4 5.4 0 0 0 0-7.6Z"/></symbol>
+    <symbol id="icon-offboarding" viewBox="0 0 24 24"><path d="M10 17l5-5-5-5M15 12H3M15 3h5a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1h-5"/></symbol>
+    <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></symbol>
+    <symbol id="icon-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></symbol>
+    <symbol id="icon-report" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></symbol>
+    <symbol id="icon-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-5"/></symbol>
+    <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.6v-.2h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
+    <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+    <symbol id="icon-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></symbol>
+    <symbol id="icon-print" viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 14h12v7H6z"/></symbol>
+    <symbol id="icon-expand" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></symbol>
+    <symbol id="icon-archive" viewBox="0 0 24 24"><path d="M4 7h16v14H4zM2 3h20v4H2zM9 11h6"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20ZM12 9v5M12 18h.01"/></symbol>
+    <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 20"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
+  </svg>
+  <section class="login" id="loginView" aria-label="تسجيل الدخول">
+    <aside class="login-identity">
+      <section class="visual-runtime login-visual-runtime" id="loginVisualIdentity" data-identity-surface="login" aria-live="polite" hidden></section>
+      <div class="brand brand-light"><span class="brand-mark logo-slot">خ</span><span><b class="org-name">خيشة - Khaisha</b><small>إدارة رأس المال البشري</small></span></div>
+      <div class="login-copy"><span class="eyebrow">بيئة عمل واحدة</span><h1>الموظف في المركز.<br>والقرار في مكانه.</h1><p>الحضور والإجازات والمناوبات والأداء والاتصال المؤسسي في نظام عربي تشغيلي موحد.</p></div>
+      <div class="login-facts"><span><b>موقع موثّق</b>تسجيل حضور بالنطاق</span><span><b>مسار واضح</b>اعتمادات متسلسلة</span><span><b>هوية موحدة</b>بطاقات وشهادات</span></div>
+    </aside>
+    <main class="login-form-wrap">
+      <form class="login-card" id="loginForm">
+        <div class="locale-switch locale-switch-login" role="group" aria-label="اختيار لغة الواجهة">
+          <button type="button" data-locale="ar" aria-pressed="true">العربية</button><button type="button" data-locale="en" aria-pressed="false">English</button>
+        </div>
+        <span class="eyebrow">بوابة المؤسسة الآمنة</span><h2>تسجيل الدخول</h2><p>استخدم حسابك للوصول إلى مساحة العمل والصلاحيات المخصصة لك.</p>
+        <div class="alert error" id="loginError" role="alert" hidden></div>
+        <label>البريد الإلكتروني<input id="loginEmail" type="email" autocomplete="username" required placeholder="name@organization.ae"></label>
+        <label>كلمة المرور<span class="password-wrap"><input id="loginPassword" type="password" autocomplete="current-password" required><button type="button" class="text-btn" id="togglePassword">إظهار</button></span></label>
+        <div class="login-help"><button class="primary wide" type="submit">الدخول إلى المنصة</button><button class="text-btn" id="forgotPassword" type="button">نسيت كلمة المرور؟</button></div>
+        <div class="demo-accounts"><small>حسابات التشغيل الأولي</small><button type="button" data-demo="admin@demo.ae|Admin@123">مدير النظام</button><button type="button" data-demo="hr@demo.ae|HR@12345">الموارد البشرية</button><button type="button" data-demo="employee@demo.ae|Emp@12345">الموظف</button></div>
+      </form>
+    </main>
+  </section>
+
+  <div class="shell" id="appView" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="brand brand-light"><span class="brand-mark logo-slot">خ</span><span><b class="org-name">خيشة - Khaisha</b><small>الموارد البشرية</small></span><button class="sidebar-collapse" id="collapseSidebar" type="button" aria-label="طي القائمة"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></button></div>
+      <nav id="mainNav" aria-label="التنقل الرئيسي">
+        <span class="nav-label">الرئيسية</span>
+        <a href="#dashboard" data-page="dashboard" data-permission="dashboard.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg></i><span>لوحة القيادة</span></a>
+        <a href="#my-space" data-page="my-space"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg></i><span>مساحتي</span></a>
+        <span class="nav-label">الأشخاص والهيكل</span>
+        <a href="#employees" data-page="employees" data-permission-any="employee.view,employee.team"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-users"></use></svg></i><span>الموظفون والملفات</span></a>
+        <a href="#employee-report" data-page="employee-report" data-permission="employee_report.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></i><span>تقرير الموظف الشامل</span></a>
+        <a href="#organization" data-page="organization" data-permission="employee.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-org"></use></svg></i><span>المخطط الشبكي</span></a>
+        <a href="#branches" data-page="branches" data-permission="branch.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-map"></use></svg></i><span>الفروع والنطاقات</span></a>
+        <span class="nav-label">الوقت والإجازات</span>
+        <a href="#attendance" data-page="attendance"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-clock"></use></svg></i><span>الحضور والانصراف</span></a>
+        <a href="#shifts" data-page="shifts" data-permission="shift.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-shift"></use></svg></i><span>المناوبات والراحة</span></a>
+        <a href="#leaves" data-page="leaves"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-calendar"></use></svg></i><span>الإجازات</span></a>
+        <a href="#overtime" data-page="overtime"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-overtime"></use></svg></i><span>العمل الإضافي</span></a>
+        <span class="nav-label">الرواتب والمزايا</span>
+        <a href="#payroll" data-page="payroll"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg></i><span>الرواتب والقسائم</span></a>
+        <a href="#certificate-verification" data-page="certificate-verification" data-permission="salary_certificate.verify"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-certificate"></use></svg></i><span>التحقق من الشهادات</span></a>
+        <a href="#advances" data-page="advances"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-loan"></use></svg></i><span>السلف والأقساط</span></a>
+        <span class="nav-label">الأداء والتطوير</span>
+        <a href="#evaluations" data-page="evaluations"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-target"></use></svg></i><span>التقييم السنوي</span></a>
+        <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="recruitment" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-recruitment"></use></svg></i><span>التوظيف</span></a>
+        <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="onboarding" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-onboarding"></use></svg></i><span>التهيئة والعقود</span></a>
+        <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="learning" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-learning"></use></svg></i><span>التعلم والتطوير</span></a>
+        <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="benefits" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-benefits"></use></svg></i><span>المزايا</span></a>
+        <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="offboarding" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-offboarding"></use></svg></i><span>إنهاء الخدمة</span></a>
+        <span class="nav-label">التواصل</span>
+        <a href="#notifications" data-page="notifications"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-bell"></use></svg></i><span>الإشعارات الداخلية</span><em id="navUnread" hidden>0</em></a>
+        <a href="#communications" data-page="communications" data-permission="communications.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-mail"></use></svg></i><span>البريد المؤسسي</span></a>
+        <span class="nav-label">الإدارة والامتثال</span>
+        <a href="#reports" data-page="reports" data-permission="report.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></i><span>التقارير الحية</span></a>
+        <a href="#access-control" data-page="access-control" data-permission="security.manage_permissions"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-shield"></use></svg></i><span>المستخدمون والصلاحيات</span></a>
+        <a href="#settings" data-page="settings" data-permission-any="org.manage,smtp.manage,reference.manage"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg></i><span>إعدادات المؤسسة</span></a>
+      </nav>
+      <div class="server-state"><span id="serverDot"></span><b id="serverLabel">جارٍ الاتصال</b><small>قاعدة البيانات المحلية</small></div>
+    </aside>
+    <button class="scrim" id="scrim" aria-label="إغلاق القائمة"></button>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="menuButton" aria-label="فتح القائمة"><svg class="ui-icon" aria-hidden="true"><use href="#icon-menu"></use></svg></button>
+        <div class="page-context"><small>مساحة العمل</small><b id="contextTitle">مساحتي</b></div>
+        <label class="command-search" aria-label="بحث سريع"><span><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg></span><input id="commandSearch" type="search" placeholder="ابحث أو افتح وحدة…"></label>
+        <span class="top-spacer"></span>
+        <div class="locale-switch locale-switch-topbar" role="group" aria-label="اختيار لغة الواجهة"><span aria-hidden="true"><svg class="ui-icon"><use href="#icon-globe"></use></svg></span><button type="button" data-locale="ar" aria-pressed="true">AR</button><button type="button" data-locale="en" aria-pressed="false">EN</button></div>
+        <button class="icon-button" id="bellButton" aria-label="الإشعارات"><svg class="ui-icon" aria-hidden="true"><use href="#icon-bell"></use></svg><span class="dot" id="bellDot" hidden></span></button>
+        <button class="user-chip" id="userMenuButton" type="button" aria-label="إعدادات الحساب"><span class="avatar" id="userAvatar">م</span><span><b id="userName">—</b><small id="userRole">—</small></span></button>
+        <button class="logout" id="logoutButton">خروج</button>
+      </header>
+      <div class="global-alert" id="globalAlert" role="status" aria-live="polite" hidden></div>
+
+      <section class="page" id="dashboard">
+        <div class="executive-head"><div><span class="eyebrow">نبض المؤسسة · بيانات حية</span><h1>لوحة القيادة التنفيذية</h1><p>صورة تشغيلية موحدة للقوة العاملة والوقت والطلبات والامتثال.</p></div><div class="executive-asof"><span>آخر تحديث</span><b id="dashboardAsOf">—</b></div></div>
+        <form class="dashboard-filters" id="dashboardFilters"><label>من<input name="date_from" type="date"></label><label>إلى<input name="date_to" type="date"></label><label>الفرع<select name="branch_id"><option value="">كل الفروع المتاحة</option></select></label><label>القسم<select name="department_id"><option value="">كل الأقسام المتاحة</option></select></label><button class="secondary" type="submit">تطبيق النطاق</button></form>
+        <section class="visual-runtime dashboard-visual-runtime" id="dashboardVisualIdentity" data-identity-surface="dashboard" aria-live="polite" hidden></section>
+        <div class="pulse-bar" id="dashboardPulse" aria-label="نبض المؤسسة"></div>
+        <div class="executive-layout"><div class="executive-main"><div class="executive-metrics" id="executiveMetrics"></div><div class="dashboard-panels"><article class="card"><div class="section-head"><div><span class="eyebrow">توزيع القوة</span><h2>حسب الأقسام</h2></div></div><div class="distribution-bars" id="departmentDistribution"></div></article><article class="card"><div class="section-head"><div><span class="eyebrow">الانتشار</span><h2>حسب الفروع</h2></div></div><div class="distribution-bars" id="branchDistribution"></div></article></div></div><aside class="executive-side"><article class="health-card"><span class="eyebrow">مؤشر صحة الموارد البشرية</span><strong id="healthScore">—</strong><b id="healthStatus">جارٍ الحساب</b><small id="healthContext" class="health-context">يحتسب الغياب بعد موعد المناوبة فقط</small><div class="health-track"><span id="healthProgress"></span></div></article><article class="card"><div class="section-head"><h2>إجراءات سريعة</h2></div><div class="quick-actions" id="dashboardActions"></div></article><article class="card event-stream-card"><div class="section-head"><div><span class="eyebrow">بث مباشر</span><h2>آخر النشاطات</h2></div></div><div class="event-stream" id="dashboardActivity"></div></article></aside></div>
+      </section>
+
+      <section class="page" id="access-denied">
+        <div class="denied-state"><span class="denied-mark"><svg class="ui-icon" aria-hidden="true"><use href="#icon-shield"></use></svg></span><span class="eyebrow">وحدة مقيدة</span><h1>هذه الصفحة غير متاحة لحسابك</h1><p>طبّق النظام صلاحيات العرض من الخادم. يمكنك العودة إلى مساحتك أو التواصل مع مدير النظام عند الحاجة.</p><button class="primary" type="button" data-goto="my-space">العودة إلى مساحتي</button></div>
+      </section>
+
+      <section class="page active" id="my-space">
+        <div class="page-head"><div><span class="eyebrow">الخدمة الذاتية</span><h1 id="welcomeTitle">مرحباً</h1><p>كل ما يخص يومك الوظيفي في مساحة آمنة واحدة.</p></div><button class="primary" data-punch="in">تسجيل دخول</button></div>
+        <div class="metric-grid" id="myMetrics"></div>
+        <div class="content-grid wide-side">
+          <article class="card"><div class="section-head"><div><h2>بطاقتي الوظيفية</h2><p>تستخدم هوية المؤسسة وبيانات ملفك المعتمدة.</p></div><button class="secondary" id="myCardButton">عرض وطباعة البطاقة</button></div><div id="myCardSummary" class="employee-summary loading-block">جارٍ تحميل الملف…</div></article>
+          <aside class="card punch-card"><span class="eyebrow">الحضور اليوم</span><h2 id="punchHeadline">تحقق من موقعك للتسجيل</h2><p id="punchDetail">سيطلب المتصفح إذن الموقع، ثم يتحقق الخادم من نطاق فرعك.</p><div class="punch-actions"><button class="primary" data-punch="in">تسجيل دخول</button><button class="secondary" data-punch="out">تسجيل خروج</button></div><small id="lastPunch">لا يوجد تسجيل اليوم</small></aside>
+        </div>
+        <div class="content-grid" style="margin-top:16px"><article class="card"><div class="section-head"><h2>طلباتي الأخيرة</h2><button class="text-btn" data-goto="leaves">فتح الإجازات</button></div><div id="myRequests" class="stack"></div></article><article class="card"><div class="section-head"><h2>آخر الإشعارات</h2><button class="text-btn" data-goto="notifications">عرض الكل</button></div><div id="myNotifications" class="stack"></div></article></div>
+        <article class="card evaluation-history-card" id="myEvaluationHistoryCard"><div class="section-head"><div><span class="eyebrow">الأداء المنشور</span><h2>سجل تقييماتي</h2><p>لا تظهر النتيجة والتقرير إلا بعد تاريخ الإفصاح المعتمد.</p></div><button class="text-btn" type="button" data-goto="evaluations">فتح التقييم السنوي</button></div><div id="myEvaluationHistory" class="evaluation-history-list"><div class="loading-block">جارٍ تحميل السجل…</div></div></article>
+      </section>
+
+      <section class="page" id="employees">
+        <div class="page-head"><div><span class="eyebrow">الأفراد</span><h1 id="employeesPageTitle">الموظفون والملفات</h1><p id="employeesPageDescription">ملف موحد، فرع ومناوبة وبطاقة عمل قابلة للطباعة.</p></div><div class="button-row"><button class="secondary" id="openEmployeeReport" type="button" data-permission="employee_report.view"><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg><span>تقرير موظف شامل</span></button><button class="primary" id="addEmployee" data-permission="employee.manage">+ إضافة موظف</button></div></div>
+        <article class="card"><div class="toolbar"><input id="employeeSearch" type="search" placeholder="ابحث بالاسم أو الرقم الوظيفي"><select id="employeeBranchFilter"><option value="">كل الفروع</option></select><button class="secondary" id="refreshEmployees">تحديث</button></div><div class="table-wrap"><table><thead id="employeesHead"><tr><th>الموظف</th><th>الرقم</th><th>المسمى</th><th>القسم</th><th>الفرع</th><th>المناوبة</th><th></th></tr></thead><tbody id="employeesRows"></tbody></table></div></article>
+      </section>
+
+      <section class="page employee-report-page" id="employee-report">
+        <div class="page-head employee-report-page-head"><div><span class="eyebrow">ملف تحليلي تنفيذي</span><h1>تقرير الموظف الشامل</h1><p>ساعات العمل والالتزام والإجازات والإضافي والسلف من السجلات الفعلية خلال فترة تحددها.</p></div><button class="secondary" type="button" data-goto="employees"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron"></use></svg><span>العودة إلى الموظفين</span></button></div>
+        <section class="report-builder card" aria-labelledby="employeeReportBuilderTitle">
+          <header class="report-builder-head"><div><span class="report-step">01</span><div><h2 id="employeeReportBuilderTitle">تحديد الموظف والفترة</h2><p>ابحث بالاسم أو الرقم الوظيفي؛ لا تظهر نتائج البحث أي راتب أو بيانات هوية.</p></div></div><span class="status neutral">SQLite · لحظة الإصدار</span></header>
+          <form id="employeeReportForm" class="report-builder-form" novalidate>
+            <div class="employee-report-search"><label for="employeeReportQuery">اسم الموظف أو رقمه الوظيفي</label><div class="report-combobox"><span aria-hidden="true"><svg class="ui-icon"><use href="#icon-search"></use></svg></span><input id="employeeReportQuery" name="query" type="search" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="employeeReportSearchResults" aria-expanded="false" placeholder="اكتب الاسم أو الرقم الوظيفي" required><input id="employeeReportEmployeeId" name="employee_id" type="hidden"><button class="icon-button" id="clearEmployeeReportSearch" type="button" aria-label="مسح اختيار الموظف" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></div><div class="report-search-results" id="employeeReportSearchResults" role="listbox" hidden></div><small id="employeeReportSearchStatus" role="status" aria-live="polite">ابدأ بكتابة اسم الموظف أو رقمه الوظيفي.</small></div>
+            <label for="employeeReportFrom">من<input id="employeeReportFrom" name="date_from" type="date" required></label>
+            <label for="employeeReportTo">إلى<input id="employeeReportTo" name="date_to" type="date" required></label>
+            <button class="primary report-generate-button" type="submit"><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg><span>إنشاء التقرير</span></button>
+          </form>
+          <p class="field-error" id="employeeReportError" role="alert" hidden></p>
+        </section>
+        <div class="employee-report-workspace" id="employeeReportWorkspace">
+          <section class="employee-report-empty" id="employeeReportEmpty"><span class="empty-icon"><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></span><span class="eyebrow">02 · المعاينة</span><h2>اختر موظفاً لإنشاء ملفه التحليلي</h2><p>سيظهر التقرير هنا كورقة A4 رسمية، مع تفاصيل الفترة ومصادر كل رقم وخيار الطباعة أو الحفظ PDF.</p></section>
+          <section class="employee-report-loading" id="employeeReportLoading" role="status" aria-live="polite" hidden><span class="report-loading-mark"></span><h2>جارٍ احتساب التقرير من السجلات…</h2><p>نراجع المناوبات الفعالة والحضور والإجازات والإضافي والأقساط لكل يوم في الفترة.</p></section>
+          <section class="employee-report-result" id="employeeReportResult" hidden>
+            <div class="report-result-toolbar"><div><span class="eyebrow">معاينة الوثيقة</span><b id="employeeReportReferenceToolbar">—</b></div><div class="button-row"><button class="secondary" id="changeEmployeeReport" type="button">تغيير الموظف</button><button class="primary" id="printEmployeeReport" type="button" data-permission="employee_report.export"><svg class="ui-icon" aria-hidden="true"><use href="#icon-print"></use></svg><span>طباعة / حفظ PDF</span></button></div><small id="employeeReportPrintHint">اختر «حفظ كملف PDF» من نافذة الطباعة.</small></div>
+            <article class="employee-comprehensive-report" id="employeeComprehensiveReport" aria-label="تقرير الموظف الشامل"></article>
+          </section>
+        </div>
+      </section>
+
+      <section class="page" id="branches">
+        <div class="page-head"><div><span class="eyebrow">الانتشار التشغيلي</span><h1>الفروع والنطاقات الجغرافية</h1><p>مركز الفرع ونصف قطر فعلي يفرضه الخادم عند تسجيل الحضور.</p></div><button class="primary" id="addBranch" data-permission="branch.manage">+ إضافة فرع</button></div>
+        <div class="metric-grid compact" id="branchMetrics"></div>
+        <div class="branch-layout"><div class="branch-list" id="branchCards"></div><aside class="card geofence-inspector"><div class="section-head"><div><h2>خريطة النطاق التشغيلي</h2><p>انقر فرعاً لمعاينة مركزه وحدوده.</p></div><span class="status" id="mapStatus">خريطة حية</span></div><div class="map" id="branchesMap"><div class="map-fallback">يتم تحميل الخريطة…</div></div><div class="geo-readout" id="branchGeoReadout">اختر فرعاً من القائمة.</div></aside></div>
+      </section>
+
+      <section class="page" id="attendance">
+        <div class="page-head"><div><span class="eyebrow">الوقت</span><h1>الحضور والانصراف</h1><p>نتيجة الموقع، المسافة، ودقائق الدوام وفق المناوبة الفعلية.</p></div><div class="button-row"><button class="secondary" data-punch="in">دخول</button><button class="primary" data-punch="out">خروج</button></div></div>
+        <article class="card attendance-range-card">
+          <header class="attendance-command-head"><div><span class="eyebrow">فترة الكشف</span><h2>كشف يومي قابل للتصفية</h2><p>ابدأ من الاختصارات أو حدد فترة مخصصة؛ الافتراضي من بداية الشهر حتى اليوم.</p></div><span class="status neutral" id="attendanceRangeStatus">فترة مخصصة</span></header>
+          <form class="attendance-range-toolbar" id="attendanceRangeForm"><input type="hidden" id="attendanceDate">
+            <div class="attendance-presets" role="group" aria-label="اختصارات فترة الحضور"><button type="button" class="secondary" data-attendance-preset="today">اليوم</button><button type="button" class="secondary" data-attendance-preset="week">هذا الأسبوع</button><button type="button" class="secondary active" data-attendance-preset="month">هذا الشهر</button><button type="button" class="secondary" data-attendance-preset="custom">فترة مخصصة</button></div>
+            <div class="attendance-filter-grid">
+              <label for="attendanceEmployeeFilter" data-attendance-filter="employee">الموظف<input type="search" id="attendanceEmployeeFilter" name="q" placeholder="الاسم أو الرقم الوظيفي" autocomplete="off"></label>
+              <label for="attendanceDepartmentFilter" data-attendance-filter="department">القسم<select id="attendanceDepartmentFilter" name="department_id"><option value="">كل الأقسام</option></select></label>
+              <label for="attendanceBranchFilter" data-attendance-filter="branch">الفرع<select id="attendanceBranchFilter" name="branch_id"><option value="">كل الفروع</option></select></label>
+              <label for="attendanceStatusFilter" data-attendance-filter="status">الحالة<select id="attendanceStatusFilter" name="status"><option value="">كل الحالات</option><option value="present">حاضر</option><option value="open">تسجيل مفتوح</option><option value="late">متأخر</option><option value="absent">غياب مستحق</option><option value="weekly_rest">راحة أسبوعية</option><option value="approved_leave">إجازة معتمدة</option></select></label>
+              <label for="attendanceFrom">من<input type="date" id="attendanceFrom" name="date_from" required></label><label for="attendanceTo">إلى<input type="date" id="attendanceTo" name="date_to" required></label>
+            </div>
+            <div class="attendance-filter-actions"><button class="primary" type="submit" id="refreshAttendance">تطبيق الفلاتر</button><button class="secondary" type="reset" id="resetAttendance">إعادة ضبط</button></div>
+          </form><p class="field-error" id="attendanceRangeError" role="alert" hidden></p>
+        </article>
+        <div class="attendance-period-summary" id="attendanceSummary" aria-live="polite"></div>
+        <article class="card attendance-ledger" id="attendanceLedger"><div class="section-head"><div><h2>الكشف اليومي</h2><p id="attendancePeriodLabel">—</p></div><div class="attendance-ledger-actions"><span class="status" id="attendanceScopeLabel">—</span><button class="secondary" type="button" data-print-target="attendanceLedger"><svg class="ui-icon" aria-hidden="true"><use href="#icon-print"></use></svg><span>طباعة الكشف</span></button><button class="secondary" type="button" id="exportAttendanceCsv" data-permission="attendance.export"><svg class="ui-icon" aria-hidden="true"><use href="#icon-download"></use></svg><span>تصدير CSV</span></button></div></div><div class="table-wrap attendance-table-wrap"><table><caption class="sr-only">كشف الحضور والانصراف حسب الفترة المحددة</caption><thead id="attendanceHead"><tr><th>التاريخ</th><th>الموظف</th><th>المناوبة</th><th>الدخول</th><th>الخروج</th><th>الصافي</th><th>التأخير</th><th>الإضافي</th><th>الموقع</th><th>الحالة</th></tr></thead><tbody id="attendanceRows"></tbody></table></div></article>
+      </section>
+
+      <section class="page" id="shifts">
+        <div class="page-head"><div><span class="eyebrow">تخطيط الوقت</span><h1>المناوبات والراحة الأسبوعية</h1><p>مناوبات نهارية أو عابرة لمنتصف الليل مع راحة مختلفة لكل فريق.</p></div><button class="primary" id="addShift" data-permission="shift.manage">+ إنشاء مناوبة</button></div>
+        <div class="shift-grid" id="shiftCards"></div>
+        <article class="card" style="margin-top:16px"><div class="section-head"><div><h2>تعيينات المناوبات</h2><p>يحتفظ النظام بتاريخ السريان لكل تعيين.</p></div><button class="secondary" id="assignShift" data-permission="shift.manage">تعيين موظف</button></div><div class="table-wrap"><table><thead><tr><th>الموظف</th><th>المناوبة</th><th>تاريخ السريان</th><th>أيام الراحة</th><th>الحالة</th></tr></thead><tbody id="shiftAssignmentsRows"></tbody></table></div></article>
+      </section>
+
+      <section class="page" id="leaves">
+        <div class="page-head"><div><span class="eyebrow">الاستحقاقات</span><h1>الإجازات والأرصدة</h1><p>يحسب النظام الاستحقاق من مدة الخدمة، ويمنع الإجازة السنوية المدفوعة قبل إتمام ستة أشهر.</p></div><div class="button-row"><button class="secondary" id="requestLeaveSale">+ طلب بيع رصيد</button><button class="primary" id="requestLeave">+ طلب إجازة</button></div></div>
+        <div class="balance-grid" id="leaveBalances"></div>
+        <article class="card" style="margin-top:16px"><div class="section-head"><h2 id="leaveListTitle">طلبات الإجازة</h2><span class="status" id="leaveQueueCount">—</span></div><div class="stack" id="leaveRequests"></div></article>
+        <article class="card" style="margin-top:16px"><div class="section-head"><div><h2>طلبات بيع رصيد الإجازة</h2><p>يعتمدها مسؤول الموارد البشرية، وعند الاعتماد تخصم الأيام من الرصيد ويثبت المقابل المالي.</p></div><button class="secondary" id="refreshLeaveSales" type="button">تحديث</button></div><div class="stack" id="leaveSaleRequests"></div></article>
+      </section>
+
+      <section class="page" id="overtime">
+        <div class="page-head"><div><span class="eyebrow">الساعات الإضافية</span><h1>طلبات العمل الإضافي</h1><p>يقدم الموظف الطلب، ولا يعتمد إلا من الموارد البشرية أو صاحب الصلاحية.</p></div><button class="primary" id="requestOvertime">+ تقديم طلب إضافي</button></div>
+        <div class="metric-grid compact" id="overtimeMetrics"></div>
+        <article class="card"><div class="stack" id="overtimeRequests"></div></article>
+      </section>
+
+      <section class="page" id="evaluations">
+        <div class="page-head"><div><span class="eyebrow">الأداء</span><h1>التقييم السنوي</h1><p>دورة مؤرخة تبدأ بالتقييم الذاتي، ثم نقاط المسؤول المباشر، ثم قرار الموارد البشرية والإفصاح.</p></div><button class="primary" id="openEvaluation">فتح تقييمي المسند</button></div>
+        <section class="cycle-console card" id="evaluationCycleConsole" data-permission-any="evaluation.cycle.manage,evaluation.review" hidden>
+          <div class="section-head cycle-command-head"><div><span class="eyebrow">برج التحكم بالأداء</span><h2>إدارة دورات التقييم</h2><p>النطاق والمواعيد وحالة كل موظف في مسار واحد.</p></div><div class="button-row"><button class="secondary" id="editEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">تعديل الدورة</button><button class="primary" id="createEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">+ دورة جديدة</button></div></div>
+          <div class="cycle-selector-row"><label>الدورة<select id="evaluationCycleSelect" aria-label="اختيار دورة التقييم"></select></label><div class="button-row"><button class="secondary" id="remindEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">تذكير غير المرسلين</button><button class="primary" id="announceEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">إعلان الدورة</button></div></div>
+          <div id="evaluationCycleTower" class="cycle-control-tower loading-block">جارٍ تحميل الدورة…</div>
+          <div id="evaluationCyclePopulation" class="cycle-population"></div>
+        </section>
+        <section class="evaluation-announcement" id="evaluationAnnouncement" aria-live="polite" hidden></section>
+        <div class="evaluation-workflow" id="evaluationWorkflowRibbon" aria-label="مراحل التقييم"></div>
+        <div class="evaluation-privacy" id="evaluationPrivacyGate" hidden></div>
+        <div class="content-grid wide-side evaluation-layout"><article class="card evaluation-main"><div class="section-head"><div><h2 id="evaluationPanelTitle">الأهداف والمعايير</h2><p id="evaluationPanelHint">يجب أن يساوي مجموع أوزان أهداف الموظف ١٠٠ تماماً.</p></div><span class="weight-badge" id="weightBadge">٠ / ١٠٠</span></div><div class="weight-track"><span id="weightProgress"></span></div><div id="evaluationGoals" class="goals"></div><div class="button-row" id="evaluationEmployeeActions"><button class="secondary" id="addGoal">+ كتابة هدف مخصص</button><button class="primary" id="submitEvaluation">إرسال للمسؤول المباشر</button></div></article><aside class="card evaluation-side"><div class="section-head"><div><h2>حالة السجل</h2><p>الإجراء المتاح يتغير حسب صاحب المرحلة.</p></div><span class="status" id="evaluationStatus">مسودة</span></div><div class="timeline" id="evaluationTimeline"></div><div id="evaluationApprovalActions"></div></aside></div>
+        <article class="card evaluation-history-card"><div class="section-head"><div><h2>السجل السنوي المنشور</h2><p>نتائج مفصح عنها فقط، مع حالة التظلم إن وجدت.</p></div></div><div id="evaluationHistory" class="evaluation-history-list"></div></article>
+      </section>
+
+      <section class="page" id="notifications">
+        <div class="page-head"><div><span class="eyebrow">الاتصال الداخلي</span><h1>الإشعارات والرسائل</h1><p>قوانين وتنبيهات وتهاني تصل فقط إلى الجمهور المحدد.</p></div><button class="primary" id="composeNotification" data-permission="notification.send">+ رسالة جماعية</button></div>
+        <div class="notice-layout"><aside class="card notice-filters"><button class="active" data-notice-filter="all">كل الرسائل</button><button data-notice-filter="unread">غير المقروءة</button><button data-notice-filter="law">قوانين</button><button data-notice-filter="notice">إشعارات</button><button data-notice-filter="congratulation">تهنئة</button><button class="text-btn" id="markAllRead">تعليم الكل مقروءاً</button></aside><article class="card"><div class="stack" id="notificationsList"></div></article></div>
+      </section>
+
+      <section class="page" id="communications">
+        <div class="page-head"><div><span class="eyebrow">التواصل المؤسسي</span><h1>حملات البريد للموظفين</h1><p>مستلمون محسوبون من الملفات النشطة، مع سجل تسليم وإعادة محاولة واضحة.</p></div><button class="primary" id="composeCampaign" type="button" data-permission="communications.send">+ رسالة بريدية</button></div>
+        <div class="metric-grid compact" id="campaignMetrics"></div>
+        <article class="card"><div class="section-head"><div><h2>الحملات الأخيرة</h2><p>الحالة الفعلية لكل رسالة: في الانتظار، مرسلة أو متعثرة.</p></div><button class="secondary" id="refreshCampaigns" type="button">تحديث</button></div><div id="campaignList" class="stack loading-block">جارٍ تحميل سجل الحملات…</div></article>
+      </section>
+
+      <section class="page" id="organization">
+        <div class="page-head"><div><span class="eyebrow">الأشخاص والهيكل</span><h1>المخطط الشبكي للمؤسسة</h1><p>المدير العام في المركز، ثم الأقسام وفرقها في شبكة قابلة للبحث والطباعة.</p></div><div class="button-row"><button class="secondary" id="assignDepartment" data-permission="department.manage">نقل موظف</button><button class="primary" id="addDepartment" data-permission="department.manage">+ إضافة قسم</button></div></div>
+        <article class="card org-workspace">
+          <div class="org-viewbar" aria-label="طريقة عرض الهيكل">
+            <div class="view-switch" role="group" aria-label="تبديل طريقة العرض"><button type="button" data-org-view="grid">المخطط الشبكي</button><button type="button" data-org-view="hierarchical">هرمي</button><button type="button" data-org-view="sequential">تسلسلي</button></div>
+            <div class="org-tools"><input id="orgSearch" type="search" placeholder="ابحث بالاسم أو الرقم أو المسمى" aria-label="بحث في المخطط"><select id="orgBranchFilter" aria-label="تصفية الفرع"><option value="">كل الفروع</option></select><select id="orgDepartmentFilter" aria-label="تصفية القسم"><option value="">كل الأقسام</option></select><button class="secondary" id="collapseDepartments" type="button">طي الأقسام</button><button class="secondary" id="zoomOrganization" type="button">ملاءمة</button><button class="secondary" id="printOrganization" type="button">طباعة</button></div>
+          </div>
+          <div class="org-summary"><div><span class="eyebrow">طريقة العرض</span><h2 id="orgViewTitle">المخطط الشبكي</h2></div><span class="status" id="orgPeopleCount">—</span></div>
+          <div id="organizationTree" class="org-tree loading-block" aria-live="polite">جارٍ تحميل الهيكل…</div>
+        </article>
+        <article class="card department-directory"><div class="section-head"><div><h2>دليل الأقسام</h2><p>إدارة الأقسام ومسؤوليها دون مغادرة الهيكل.</p></div><span class="status" id="departmentCount">—</span></div><div id="departmentList" class="department-list"></div></article>
+      </section>
+
+      <section class="page" id="payroll">
+        <div class="page-head"><div><span class="eyebrow">التعويضات</span><h1 id="payrollTitle">مسيرات الرواتب والقسائم</h1><p>مسير محفوظ واعتماد متسلسل وقسيمة خاصة بكل موظف وتصدير CSV فعلي.</p></div><button class="primary" id="createPayroll" data-permission="payroll.manage">+ إنشاء مسير شهر</button></div>
+        <div class="metric-grid compact" id="payrollMetrics"></div><article class="card"><div id="payrollList" class="stack loading-block">جارٍ تحميل بيانات الرواتب…</div></article>
+      </section>
+
+      <section class="page" id="certificate-verification">
+        <div class="page-head"><div><span class="eyebrow">الأصالة والاعتماد</span><h1>التحقق من شهادة راتب</h1><p>أدخل رقم التحقق الموجود أسفل الشهادة لمطابقة بياناتها مع سجل الإصدار المحمي.</p></div><span class="status">لموظفي الموارد البشرية المخولين</span></div>
+        <div class="verification-layout">
+          <form class="card verification-form" id="certificateVerificationForm">
+            <span class="verification-symbol" aria-hidden="true"><svg class="ui-icon"><use href="#icon-certificate"></use></svg></span>
+            <h2>رقم التحقق أو رقم الإصدار</h2>
+            <p>يمكن استخدام قارئ الباركود أو إدخال الرمز يدوياً كما هو مطبوع.</p>
+            <label>رقم الشهادة<input id="certificateVerificationCode" name="code" dir="ltr" inputmode="text" autocomplete="off" maxlength="48" pattern="[A-Za-z0-9-]{8,48}" placeholder="VRF-2026-XXXX-XXXX-XXXX" required></label>
+            <button class="primary wide" type="submit">التحقق من الشهادة</button>
+            <small class="form-hint">كل عملية تحقق تسجل باسم المستخدم والوقت ضمن سجل التدقيق.</small>
+          </form>
+          <article class="card verification-result" id="certificateVerificationResult" aria-live="polite">
+            <div class="empty"><b>بانتظار رقم التحقق</b><p>ستظهر هنا حالة الشهادة والبيانات الأصلية الصادرة من النظام.</p></div>
+          </article>
+        </div>
+        <div class="certificate-workflow-grid">
+          <article class="card"><div class="section-head"><div><h2>طلبات شهادات الراتب</h2><p>يفتحها مسؤول الموارد البشرية ويعتمدها أو يرفضها مع حفظ القرار.</p></div><button class="secondary" type="button" id="refreshSalaryCertificateRequests">تحديث</button></div><div id="salaryCertificateRequestsList" class="stack loading-block">جارٍ تحميل الطلبات…</div></article>
+          <article class="card"><div class="section-head"><div><h2>سجل التحقق والإصدار</h2><p>سجل تدقيق محفوظ ولا يتضمن خيار حذف لأي شهادة.</p></div></div><div id="salaryCertificateHistoryList" class="stack loading-block">جارٍ تحميل السجل…</div></article>
+        </div>
+      </section>
+
+      <section class="page" id="advances">
+        <div class="page-head"><div><span class="eyebrow">السلف</span><h1>طلبات السلف وجدول الأقساط</h1><p>مدة من شهر إلى ٦ أشهر، مع توزيع فرق السنت على القسط الأخير.</p></div><button class="primary" id="requestAdvance">+ طلب سلفة</button></div>
+        <div class="metric-grid compact" id="advanceMetrics"></div><article class="card"><div id="advanceList" class="stack loading-block">جارٍ تحميل السلف…</div></article>
+      </section>
+
+      <section class="page" id="lifecycle">
+        <div class="page-head"><div><span class="eyebrow">دورة الموظف</span><h1 id="lifecycleTitle">التوظيف</h1><p>قوائم عمل حقيقية محفوظة للتوظيف والتهيئة والتعلم والمزايا وإنهاء الخدمة.</p></div><button class="primary" id="addLifecycleCase" data-permission="lifecycle.manage">+ إضافة عنصر</button></div>
+        <div class="lifecycle-tabs"><button data-lifecycle-filter="recruitment">التوظيف</button><button data-lifecycle-filter="onboarding">التهيئة والعقود</button><button data-lifecycle-filter="learning">التعلم</button><button data-lifecycle-filter="benefits">المزايا</button><button data-lifecycle-filter="offboarding">إنهاء الخدمة</button></div>
+        <article class="card"><div class="toolbar"><select id="lifecycleStatus"><option value="">كل الحالات</option><option value="open">مفتوح</option><option value="in_progress">قيد التنفيذ</option><option value="closed">مغلق</option></select><button class="secondary" id="refreshLifecycle">تحديث</button></div><div id="lifecycleList" class="stack"></div></article>
+      </section>
+
+      <section class="page" id="reports">
+        <div class="page-head"><div><span class="eyebrow">التحليل التشغيلي</span><h1>التقارير الحية</h1><p>مؤشرات مشتقة لحظياً من قاعدة بيانات الموظفين والفروع والحضور والطلبات والرواتب.</p></div><div class="button-row"><a class="secondary report-download" href="/api/reports/summary.csv" download>تصدير CSV</a><button class="primary" id="printReports">طباعة</button></div></div>
+        <div class="metric-grid" id="reportMetrics"></div><article class="card"><div class="section-head"><h2>مصادر المؤشرات</h2><span class="status" id="reportAsOf">—</span></div><p class="report-note">كل قيمة أعلاه محسوبة من السجلات الفعلية في لحظة فتح التقرير. لا توجد أرقام ثابتة أو تكاملات وهمية.</p></article>
+      </section>
+
+      <section class="page" id="access-control">
+        <div class="page-head"><div><span class="eyebrow">الإدارة والأمان</span><h1>المستخدمون والصلاحيات</h1><p>دور أساسي مع منح أو منع صريح؛ المنع يتقدم دائماً ويظهر سببه قبل الحفظ.</p></div></div>
+        <div class="access-layout"><aside class="card user-directory"><label class="permission-search">بحث المستخدمين<input id="accessUserSearch" type="search" placeholder="الاسم أو البريد أو الدور"></label><div id="accessUserList" class="stack loading-block">جارٍ تحميل المستخدمين…</div></aside><article class="card permission-workbench"><div id="permissionEmpty" class="empty">اختر مستخدماً لمعاينة صلاحياته الفعّالة.</div><div id="permissionEditor" hidden><div class="permission-user-head" id="permissionUserHead"></div><div class="permission-toolbar"><input id="permissionSearch" type="search" placeholder="ابحث في الصلاحيات"><select id="permissionGroupFilter"><option value="">كل مجموعات الصلاحيات</option></select><button class="secondary" id="grantVisible" type="button">منح الظاهر</button><button class="secondary" id="denyVisible" type="button">منع الظاهر</button></div><form id="permissionForm"><div id="permissionMatrix" class="permission-matrix"></div><div class="sticky-save"><span id="effectivePermissionCount">—</span><button class="primary" type="submit">حفظ الصلاحيات</button></div></form></div></article></div>
+      </section>
+
+      <section class="page" id="settings">
+        <div class="page-head"><div><span class="eyebrow">تهيئة النظام</span><h1>هوية المؤسسة والوثائق</h1><p>الاسم والشعار والختم ينعكسون فوراً على الواجهة والبطاقة وشهادة الراتب.</p></div></div>
+        <div class="content-grid wide-side"><form class="card" id="organizationForm"><div class="section-head"><div><h2>بيانات المؤسسة</h2><p>تخزن الإعدادات في قاعدة البيانات.</p></div><span class="status">مفعلة</span></div><div class="form-grid"><label>اسم العرض<input name="display_name" required></label><label>الاسم القانوني<input name="legal_name" required></label><label>البريد<input name="email" type="email"></label><label>الهاتف<input name="phone"></label><label class="span-2">العنوان<input name="address"></label><label>اللون الأساسي<input name="primary_color" type="color" value="#123f35"></label><label>لون الإبراز<input name="accent_color" type="color" value="#c48a3a"></label></div><div class="upload-grid"><label class="upload-box">شعار المؤسسة<input name="logo" type="file" accept="image/png,image/jpeg,image/webp"><span id="logoUploadState">PNG/JPEG/WebP حتى ١٫٥ م.ب</span></label><label class="upload-box">ختم الشهادات<input name="stamp" type="file" accept="image/png,image/jpeg,image/webp"><span id="stampUploadState">صورة شفافة موصى بها</span></label></div><button class="primary" type="submit">حفظ وتطبيق الهوية</button></form><aside class="card identity-preview"><div class="brand"><span class="brand-mark logo-slot">خ</span><span><b class="org-name">خيشة - Khaisha</b><small>ورقة المراسلات</small></span></div><div class="preview-paper"><b class="org-legal-name">اسم المؤسسة القانوني</b><p>تنعكس الهوية المحفوظة على شهادة الراتب وبطاقة العمل.</p><div class="preview-stamp stamp-slot">الختم</div></div></aside></div>
+        <section class="card visual-identity-studio" id="visualIdentityStudio" data-permission="org.manage">
+          <div class="visual-studio-head"><div><span class="eyebrow">استوديو العلامة المؤسسية</span><h2>الهوية البصرية وخلفيات المؤسسة</h2><p>خصص شاشة الدخول ولوحة التحكم برسائل وصور تعبر عن ثقافة مؤسستك.</p></div><span class="visual-studio-badge"><svg class="ui-icon" aria-hidden="true"><use href="#icon-image"></use></svg> حتى ٥ شرائح</span></div>
+          <div class="visual-studio-layout">
+            <form class="visual-identity-settings" id="visualIdentitySettingsForm">
+              <div class="studio-section-title"><span>01</span><div><h3>إعدادات التشغيل</h3><p>اختر طريقة العرض والسطح وسرعة الانتقال.</p></div></div>
+              <label class="identity-enable"><span><b>تفعيل الهوية المرئية</b><small>إظهار الخلفيات والرسائل للمستخدمين</small></span><input name="enabled" type="checkbox" role="switch"></label>
+              <div class="form-grid">
+                <label>نمط العرض<select name="mode"><option value="static" data-i18n-option>صورة ثابتة</option><option value="rotation" data-i18n-option>عرض متغير</option></select></label>
+                <label>سطح الظهور<select name="surface"><option value="both" data-i18n-option>شاشة الدخول ولوحة التحكم</option><option value="login" data-i18n-option>شاشة الدخول فقط</option><option value="dashboard" data-i18n-option>لوحة التحكم فقط</option></select></label>
+                <label>مدة التغيير بالثواني<input name="interval_seconds" type="number" min="5" max="300" value="20"></label>
+                <label>قوة التعتيم <output id="visualOverlayValue" for="visualOverlayRange" aria-live="polite" aria-atomic="true">٥٨٪</output><input id="visualOverlayRange" name="overlay" type="range" min="20" max="90" value="58" aria-describedby="visualOverlayValue"></label>
+              </div>
+              <div class="identity-color-note"><span class="identity-color-dot primary"></span><span class="identity-color-dot accent"></span><p>تستخدم المعاينة اللونين الأساسي والمساند من بيانات المؤسسة أعلاه، وتتغير فوراً قبل الحفظ.</p></div>
+              <button class="primary" type="submit">حفظ إعدادات العرض</button>
+            </form>
+            <div class="visual-preview-console">
+              <div class="studio-section-title"><span>02</span><div><h3>المعاينة الحية</h3><p>محاكاة لشاشة الدخول وبانر لوحة التحكم.</p></div></div>
+              <div class="visual-preview-tabs" role="tablist"><button type="button" role="tab" data-visual-preview-tab="login" aria-selected="true">شاشة الدخول</button><button type="button" role="tab" data-visual-preview-tab="dashboard" aria-selected="false">لوحة التحكم</button></div>
+              <div class="visual-preview-stage"><section class="visual-runtime studio-visual-runtime" id="visualIdentityPreview" data-identity-surface="preview" aria-live="polite"></section></div>
+            </div>
+          </div>
+          <div class="visual-library-head"><div class="studio-section-title"><span>03</span><div><h3>مكتبة الشرائح</h3><p>PNG أو JPEG أو WebP؛ تضغط الصورة تلقائياً قبل الرفع.</p></div></div><button class="secondary action-with-icon" id="addVisualSlide" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>إضافة شريحة</span></button></div>
+          <div class="visual-slide-library" id="visualIdentitySlides"><div class="loading-block">جارٍ تحميل مكتبة الهوية…</div></div>
+        </section>
+        <section class="card smtp-settings" id="smtpSettings" data-permission="smtp.manage"><div class="section-head"><div><span class="eyebrow">قناة البريد الآمنة</span><h2>إعدادات SMTP وصندوق التطوير</h2><p>كلمة المرور مشفرة ومقنّعة ولا تعاد من الخادم.</p></div><button class="secondary" id="testSmtp" type="button" data-permission="smtp.test">اختبار الاتصال</button></div><form id="smtpForm"><div class="form-grid"><label>خادم SMTP<input name="smtp_host" placeholder="smtp.organization.ae"></label><label>المنفذ<input name="smtp_port" type="number" min="1" max="65535" value="587"></label><label>اسم المستخدم<input name="smtp_username" autocomplete="off"></label><label>كلمة المرور<input name="smtp_password" type="password" autocomplete="new-password" placeholder="اتركها دون تغيير للاحتفاظ بالمحفوظة"></label><label>اسم المرسل<input name="smtp_from_name"></label><label>بريد المرسل<input name="smtp_from_email" type="email"></label><label class="check-row"><input name="smtp_tls" type="checkbox" checked> TLS / STARTTLS</label><label class="check-row"><input name="smtp_ssl" type="checkbox"> SSL مباشر</label></div><div class="button-row"><button class="primary" type="submit">حفظ إعدادات البريد</button><button class="text-btn" id="viewOutbox" type="button">عرض صندوق التطوير</button></div></form></section>
+        <section class="card card-template-settings" id="cardTemplateSettings"><div class="section-head"><div><span class="eyebrow">بطاقة الموظف</span><h2>قالب الوجهين والطباعة</h2><p>اختر قالباً مؤسسياً، واضبط الألوان وتعليمات العثور على البطاقة.</p></div><span class="status">CR80</span></div><div class="card-settings-layout"><form id="cardSettingsForm"><input type="hidden" name="card_template" value="portrait_orbit"><div class="template-selector" role="radiogroup" aria-label="قوالب بطاقة الموظف"><button type="button" role="radio" data-card-template-choice="portrait_orbit"><b>العمودية الدائرية</b><small>صورة بارزة وهوية قوية</small></button><button type="button" role="radio" data-card-template-choice="executive_horizontal"><b>التنفيذية الأفقية</b><small>معلومات كثيفة ومنظمة</small></button><button type="button" role="radio" data-card-template-choice="minimal_vertical"><b>العمودية الهادئة</b><small>مساحة بيضاء وخطوط مستقيمة</small></button></div><div class="form-grid"><label>لون البطاقة الأساسي<input name="card_primary_color" type="color" value="#123d34"></label><label>اللون المساند<input name="card_accent_color" type="color" value="#c6a15b"></label><label class="span-2">تعليمات الوجه الخلفي<textarea name="card_back_instructions" rows="4" maxlength="1200"></textarea></label><label>هاتف العثور على البطاقة<input name="card_contact_phone" placeholder="يستخدم هاتف المؤسسة عند تركه فارغاً"></label><label>بريد التواصل<input name="card_contact_email" type="email" placeholder="يستخدم بريد المؤسسة عند تركه فارغاً"></label></div><button class="primary" type="submit">حفظ قالب البطاقة</button></form><aside class="card-template-preview"><div class="preview-toolbar"><b>معاينة فورية</b><small id="cardPreviewHint">بيانات أول موظف متاح</small></div><div id="cardTemplatePreview" class="card-preview-stage loading-block">جارٍ إعداد المعاينة…</div></aside></div></section>
+        <div class="content-grid" style="margin-top:16px"><article class="card"><div class="section-head"><div><h2>الدرجات الوظيفية</h2><p>مرجع موحد ينعكس على الملفات والوثائق.</p></div><button class="secondary" id="addJobGrade">+ درجة</button></div><div id="jobGradeList" class="stack"></div></article><article class="card"><div class="section-head"><div><h2>المسميات الوظيفية</h2><p>مرجع قابل للربط بالقسم والموظف.</p></div><button class="secondary" id="addJobTitle">+ مسمى</button></div><div id="jobTitleList" class="stack"></div></article></div>
+        <section class="card goal-template-settings" id="goalTemplateSettings" data-permission="reference.manage"><div class="section-head"><div><span class="eyebrow">معايير الأداء</span><h2>مكتبة الأهداف الرئيسية حسب الوظيفة</h2><p>حدد الأهداف الجاهزة ومؤشرات القياس والأوزان التي يستطيع موظفو كل مسمى الاختيار منها.</p></div><button class="primary" id="addGoalTemplate" type="button">+ هدف رئيسي</button></div><div class="goal-template-toolbar"><label>المسمى الوظيفي<select id="goalTemplateJobTitle"></select></label><span class="weight-badge" id="goalTemplateWeightTotal">٠ / ١٠٠ وزن نشط</span></div><div id="goalTemplateList" class="goal-template-admin-list loading-block">جارٍ تحميل مكتبة الأهداف…</div></section>
+        <section class="card leave-holiday-settings" id="leaveHolidaySettings" data-permission="leave.approve"><div class="section-head"><div><span class="eyebrow">تقويم الإجازات</span><h2>العطل الرسمية المستثناة من الرصيد</h2><p>أضف التواريخ المعتمدة سنوياً؛ لا تُحتسب هذه الأيام ضمن طلب الإجازة السنوية.</p></div><span class="status">UAE calendar</span></div><form id="leaveHolidayForm" class="inline-form"><label>التاريخ<input name="holiday_date" type="date" required></label><label class="span-2">اسم العطلة<input name="name" maxlength="160" required placeholder="مثال: اليوم الوطني"></label><button class="primary" type="submit">إضافة عطلة</button></form><div id="leaveHolidayList" class="stack loading-block">جارٍ تحميل تقويم العطل…</div></section>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <section class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <header><h2 id="modalTitle">التفاصيل</h2><button class="icon-button" id="closeModal" aria-label="إغلاق"><svg class="ui-icon" aria-hidden="true"><use href="#icon-x"></use></svg></button></header>
+      <div class="modal-body" id="modalBody"></div>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="i18n.js?v=5.7.0"></script>
+  <script src="app.js?v=5.7.0"></script>
+</body>
+</html>
