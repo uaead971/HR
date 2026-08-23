@@ -1349,7 +1349,32 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertFalse(closed["can_print"])
         hr.request("POST", f"/api/employees/{employee['id']}/card/print", {}, expected=409)
 
-    def test_15_v58_contract_window_and_employee_custody_records(self):
+    def test_15_profile_contract_dates_create_and_update_card_window(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        start = date.today() - timedelta(days=5)
+        end = date.today() + timedelta(days=365)
+        employee = hr.request(
+            "POST", "/api/employees",
+            {"employee_no": f"EMP-CON-{suffix}", "full_name": "موظف عقد", "email": f"contract-{suffix}@demo.ae",
+             "job_title": "أخصائي عمليات", "job_grade": "G-07", "salary": 12000,
+             "contract_start_on": start.isoformat(), "contract_end_on": end.isoformat()}, expected=201,
+        )["employee"]
+        self.assertEqual(employee["contract_start_on"], start.isoformat())
+        self.assertEqual(employee["contract_end_on"], end.isoformat())
+        card = hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]
+        self.assertTrue(card["can_print"])
+        self.assertEqual(card["valid_from"], start.isoformat())
+        self.assertEqual(card["valid_until"], end.isoformat())
+        documents = hr.request("GET", f"/api/employees/{employee['id']}/documents")["items"]
+        contract = next(row for row in documents if row["document_type"] == "contract")
+        self.assertEqual(contract["expires_on"], end.isoformat())
+        revised_end = date.today() + timedelta(days=730)
+        updated = hr.request("PATCH", f"/api/employees/{employee['id']}", {"contract_end_on": revised_end.isoformat()})["employee"]
+        self.assertEqual(updated["contract_end_on"], revised_end.isoformat())
+        self.assertEqual(hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]["valid_until"], revised_end.isoformat())
+
+    def test_16_v58_contract_window_and_employee_custody_records(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         employee = hr.request(
             "POST", "/api/employees",

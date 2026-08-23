@@ -1359,6 +1359,8 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
                e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
                e.manager_id,m.full_name AS manager_name,e.hire_date,e.qualification,e.nationality,{salary},e.photo_data,e.active{sensitive}{emergency_count},
+               (SELECT ed.issued_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_start_on,
+               (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
                e.created_at,e.updated_at,
                (SELECT COUNT(*) FROM employee_documents ed WHERE ed.employee_id=e.id) AS document_count,
                (SELECT COUNT(*) FROM employee_actions ea WHERE ea.employee_id=e.id AND ea.action_type='violation') AS violation_count,
@@ -3249,10 +3251,62 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 result["active"] = 1
             return result
 
+        def parse_contract_dates(self, data: dict[str, Any], current: sqlite3.Row | None = None) -> tuple[str, str] | None:
+            """Validate the contract window supplied by the employee form.
+
+            Contract dates live on the contract document so the card, document
+            expiry alerts, and audit trail all use one source of truth.  The
+            employee profile still exposes the dates as convenient form fields.
+            """
+            if not any(key in data for key in ("contract_start_on", "contract_end_on")):
+                return None
+            start_value = data.get("contract_start_on") if "contract_start_on" in data else (current["issued_on"] if current else None)
+            end_value = data.get("contract_end_on") if "contract_end_on" in data else (current["expires_on"] if current else None)
+            if not start_value or not end_value:
+                raise APIError(422, "تاريخ بداية ونهاية عقد العمل مطلوبان معاً.", "contract_dates_required")
+            start = parse_date(start_value, "contract_start_on").isoformat()
+            end = parse_date(end_value, "contract_end_on").isoformat()
+            if end < start:
+                raise APIError(422, "تاريخ انتهاء العقد لا يمكن أن يسبق تاريخ بدايته.", "validation_error", {"field": "contract_end_on"})
+            return start, end
+
+        def sync_employee_contract(self, employee_id: int, dates: tuple[str, str], user_id: int, stamp: str) -> int:
+            """Create or update the active contract record used by card validity."""
+            start, end = dates
+            row = self.db.execute(
+                "SELECT id FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC LIMIT 1",
+                (employee_id,),
+            ).fetchone()
+            if row:
+                self.db.execute(
+                    "UPDATE employee_documents SET issued_on=?,expires_on=?,no_expiry=0,updated_at=? WHERE id=?",
+                    (start, end, stamp, row["id"]),
+                )
+                document_id = int(row["id"])
+            else:
+                # A contract document is allowed to be created from the profile
+                # dates alone.  The optional upload field can later replace it
+                # with the signed PDF/image without losing the validity window.
+                self.db.execute(
+                    """INSERT INTO employee_documents(
+                           employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,
+                           file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        employee_id, "contract", "عقد العمل", "", "", start, end, 0,
+                        "contract-record.txt", "text/plain", "data:text/plain;base64,Q29udHJhY3QgZGF0YSByZWNvcmQ=",
+                        "سجل عقد العمل أُنشئ من حقول بيانات الموظف.", 0, 1, user_id, stamp, stamp,
+                    ),
+                )
+                document_id = int(self.db.execute("SELECT last_insert_rowid()").fetchone()[0])
+            audit(self.db, user_id, "employee_contract.sync", "employee", employee_id, {"document_id": document_id, "issued_on": start, "expires_on": end})
+            return document_id
+
         def api_employees_post(self) -> None:
             user = self.require_permission("employee.manage")
             data = self.read_json()
             values = self.parse_employee(data)
+            contract_dates = self.parse_contract_dates(data)
             languages = self.parse_languages(data["languages"]) if "languages" in data else []
             stamp = now_iso()
             columns = list(values) + ["created_at", "updated_at"]
@@ -3263,6 +3317,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         (*values.values(), stamp, stamp),
                     )
                     employee_id = int(cursor.lastrowid)
+                    if contract_dates:
+                        self.sync_employee_contract(employee_id, contract_dates, user["id"], stamp)
                     if data.get("create_user"):
                         email = values.get("email")
                         if not email:
@@ -3381,16 +3437,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             data = self.read_json()
             values = self.parse_employee(data, partial=True)
+            current_contract = None
+            if any(key in data for key in ("contract_start_on", "contract_end_on")):
+                current_contract = self.db.execute(
+                    "SELECT issued_on,expires_on FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC LIMIT 1",
+                    (employee_id,),
+                ).fetchone()
+            contract_dates = self.parse_contract_dates(data, current_contract)
             languages = self.parse_languages(data["languages"]) if "languages" in data else None
             profile_editor = has_permission(self.db, user, "employee.profile.edit")
             reference_only = set(values).issubset({"job_title_id", "job_title", "job_grade_id", "job_grade"}) and has_permission(self.db, user, "reference.manage")
+            if contract_dates and not profile_editor:
+                raise APIError(403, "لا تملك صلاحية تعديل عقد الموظف.", "forbidden", {"permission": "employee.profile.edit"})
             if not profile_editor and not reference_only:
                 raise APIError(403, "لا تملك صلاحية تعديل ملف الموظف.", "forbidden", {"permission": "employee.profile.edit"})
             if "salary" in values and not has_permission(self.db, user, "salary.view"):
                 raise APIError(403, "لا تملك صلاحية تعديل الراتب.", "forbidden", {"permission": "salary.view"})
             if values.get("manager_id") == employee_id:
                 raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
-            if not values and languages is None:
+            if not values and languages is None and contract_dates is None:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
             stamp = now_iso()
             if values:
@@ -3401,7 +3466,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         self.db.execute("UPDATE employees SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), employee_id))
                     if languages is not None:
                         self.replace_employee_languages(employee_id, languages, stamp)
-                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
+                    if contract_dates:
+                        self.sync_employee_contract(employee_id, contract_dates, user["id"], stamp)
+                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
             include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")

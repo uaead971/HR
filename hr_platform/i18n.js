@@ -93,6 +93,10 @@
   };
 
   Object.assign(english, {
+    'عقد العمل':'Employment contract', 'تاريخ بداية العقد':'Contract start date', 'تاريخ نهاية العقد':'Contract end date',
+    'ترتبط صلاحية بطاقة العمل بتاريخ بداية ونهاية عقد العمل.':'The employee-card validity follows the contract start and end dates.',
+    'تاريخ انتهاء العقد لا يمكن أن يسبق تاريخ بدايته.':'The contract end date cannot precede its start date.',
+    'بداية عقد العمل':'Contract start', 'نهاية عقد العمل':'Contract end',
     'العهد':'Custody', 'العهد والأصول':'Employee custody & assets', 'الأصول المسلّمة':'Assigned assets',
     'سجل استلام وتسليم العهدة مع الرقم التسلسلي وحالة الأصل.':'Receipt and return history with serial number and asset condition.',
     'إضافة عهدة':'Add custody item', 'تعديل العهدة':'Edit custody item', 'بيانات الأصل':'Asset details',
