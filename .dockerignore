@@ -1,0 +1,14 @@
+.git
+.github
+.DS_Store
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.sqlite3-*
+*.db
+.env
+.env.*
+hr_platform/data/*
+!hr_platform/data/.gitkeep
+hr_platform/tests/
+hr_platform/uploads/

@@ -139,6 +139,12 @@ CREATE TABLE IF NOT EXISTS employees (
   address_po_box TEXT NOT NULL DEFAULT '',
   address_notes TEXT NOT NULL DEFAULT '',
   salary REAL NOT NULL DEFAULT 0 CHECK (salary >= 0),
+  basic_salary REAL NOT NULL DEFAULT 0 CHECK (basic_salary >= 0),
+  housing_allowance REAL NOT NULL DEFAULT 0 CHECK (housing_allowance >= 0),
+  transport_allowance REAL NOT NULL DEFAULT 0 CHECK (transport_allowance >= 0),
+  profession_allowance REAL NOT NULL DEFAULT 0 CHECK (profession_allowance >= 0),
+  other_allowance REAL NOT NULL DEFAULT 0 CHECK (other_allowance >= 0),
+  manual_allowances_json TEXT NOT NULL DEFAULT '[]',
   photo_data TEXT,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at TEXT NOT NULL,
@@ -378,6 +384,38 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (manager_decided_by) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS leave_sale_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  days REAL NOT NULL CHECK (days > 0),
+  daily_rate_cents INTEGER NOT NULL DEFAULT 0 CHECK (daily_rate_cents >= 0),
+  amount_cents INTEGER NOT NULL DEFAULT 0 CHECK (amount_cents >= 0),
+  reason TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','approved','rejected')),
+  decision_note TEXT NOT NULL DEFAULT '',
+  decided_by INTEGER,
+  decided_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- The calendar is intentionally data driven because UAE public-holiday dates
+-- that follow the Hijri calendar change each year.  HR can maintain the
+-- confirmed dates from the settings screen; annual-leave requests exclude
+-- active dates in this table from their day count.
+CREATE TABLE IF NOT EXISTS public_holidays (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  holiday_date TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS evaluation_cycles (

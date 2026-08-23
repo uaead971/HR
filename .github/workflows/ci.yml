@@ -24,3 +24,12 @@ jobs:
       - name: Run integration tests
         working-directory: hr_platform
         run: python -m unittest -v tests.test_api
+
+  docker-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build production image
+        run: docker build --tag khaisha-hr:ci .

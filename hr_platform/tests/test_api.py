@@ -1191,6 +1191,38 @@ class HRAPIEndToEndTests(unittest.TestCase):
         approved = hr.request("POST", f"/api/advances/{advance['id']}/decision", {"action": "approve"})["advance"]
         self.assertEqual(approved["status"], "approved")
 
+        # Each approved installment is deducted exactly once from the matching
+        # payroll month.  After the final paid installment, the next payroll
+        # has no advance deduction and returns to the full gross salary.
+        employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
+        due_months = [item["due_month"] for item in approved["installments"]]
+        due_runs = []
+        for month, installment in zip(due_months, approved["installments"]):
+            run = hr.request("POST", "/api/payroll/runs", {"payroll_month": month}, expected=201)["run"]
+            item = next(row for row in run["items"] if row["employee_id"] == employee_id)
+            self.assertEqual(item["advance"], installment["amount"])
+            self.assertEqual(item["advance_label"], "سلفة")
+            self.assertEqual(item["total_deductions"], installment["amount"])
+            self.assertEqual(item["net"], max(0, item["gross"] - installment["amount"]))
+            for status in ("review", "approved", "paid"):
+                run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": status})["run"]
+            due_runs.append(run)
+
+        completed = hr.request("GET", f"/api/advances")["items"]
+        finished = next(row for row in completed if row["id"] == advance["id"])
+        self.assertEqual(finished["status"], "completed")
+        self.assertEqual(finished["remaining"], 0)
+
+        year, month = map(int, due_months[-1].split("-"))
+        month = month + 1
+        if month == 13:
+            year, month = year + 1, 1
+        following_month = f"{year:04d}-{month:02d}"
+        following = hr.request("POST", "/api/payroll/runs", {"payroll_month": following_month}, expected=201)["run"]
+        following_item = next(row for row in following["items"] if row["employee_id"] == employee_id)
+        self.assertEqual(following_item["advance"], 0)
+        self.assertEqual(following_item["net"], following_item["gross"])
+
     def test_10_job_grade_title_propagate_card_and_certificate(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         employee_id = next(x["id"] for x in hr.request("GET", "/api/employees")["items"] if x["employee_no"] == "EMP-1024")
@@ -1369,6 +1401,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         documents = hr.request("GET", f"/api/employees/{employee['id']}/documents")["items"]
         contract = next(row for row in documents if row["document_type"] == "contract")
         self.assertEqual(contract["expires_on"], end.isoformat())
+        self.assertEqual(contract["mime_type"], "application/pdf")
+        self.assertTrue(contract["file_name"].endswith(".pdf"))
+        contract_detail = hr.request("GET", f"/api/documents/{contract['id']}")["document"]
+        self.assertTrue(contract_detail["data_url"].startswith("data:application/pdf;base64,"))
         revised_end = date.today() + timedelta(days=730)
         updated = hr.request("PATCH", f"/api/employees/{employee['id']}", {"contract_end_on": revised_end.isoformat()})["employee"]
         self.assertEqual(updated["contract_end_on"], revised_end.isoformat())
@@ -1952,7 +1988,43 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('data-permission="salary_certificate.verify"', index)
         self.assertIn("function code39Markup", app)
         self.assertIn("/api/salary-certificates/verify", app)
+        self.assertIn("const cert=created.certificate||created", app)
         self.assertIn("certificate-verification-seal", styles)
+
+    def test_31a_salary_certificate_request_appears_in_payslips_and_emails_employee(self):
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
+        requested = employee.request(
+            "POST", "/api/salary-certificates/request",
+            {"purpose": "بنك الاختبار — شهادة راتب"}, expected=201,
+        )["request"]
+        self.assertEqual(requested["request_status"], "requested")
+        approved = hr.request(
+            "POST", f"/api/salary-certificates/{requested['id']}/decision",
+            {"action": "approve", "decision_note": "تمت المراجعة"}, expected=200,
+        )["request"]
+        self.assertEqual(approved["request_status"], "approved")
+        self.assertEqual(approved["email_status"], "queued")
+
+        slips = employee.request("GET", "/api/me/payslips")
+        certificates = slips["salary_certificates"]
+        certificate = next(item for item in certificates if item["id"] == requested["id"])
+        self.assertEqual(certificate["employee_id"], employee_id)
+        self.assertTrue(certificate["integrity_valid"])
+        self.assertEqual(certificate["employee"]["id"], employee_id)
+        printed = employee.request("POST", f"/api/salary-certificates/{certificate['id']}/print", {}, expected=200)
+        self.assertTrue(printed["print_authorized"])
+
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            outbox = db.execute(
+                "SELECT to_email,status,attachment_name,attachment_data FROM email_outbox WHERE id=(SELECT email_outbox_id FROM salary_certificates WHERE id=?)",
+                (certificate["id"],),
+            ).fetchone()
+        self.assertEqual(outbox[0], "employee@demo.ae")
+        self.assertEqual(outbox[1], "queued")
+        self.assertTrue(outbox[2].endswith(".pdf"))
+        self.assertTrue(outbox[3])
 
     def test_31_v48_strict_employee_privacy_team_attendance_and_two_stage_leave(self):
         employee = self.client("employee@demo.ae", "Emp@12345")
@@ -2784,6 +2856,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "alternate_phone": "+971500000002", "email": "private-contact@example.test", "notes": "ملاحظة سرية",
         }, expected=201)["contact"]
         self.assertTrue(first["is_primary"])
+        hr.request("POST", f"/api/employees/{target['id']}/emergency-contacts", {
+            "full_name": "رقم غير صالح", "relationship": "قريب", "phone": "٠٥٠١٢٣٤٥٦٧",
+        }, expected=422)
         second = hr.request("POST", f"/api/employees/{target['id']}/emergency-contacts", {
             "full_name": "جهة ثانية", "relationship": "شقيق", "phone": "+971500000003", "is_primary": True,
         }, expected=201)["contact"]
@@ -2797,10 +2872,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         target_self = self.client(f"v56-{suffix}@demo.ae", "Profile@12345")
         self.assertEqual(len(target_self.request("GET", f"/api/employees/{target['id']}/emergency-contacts")["items"]), 2)
         target_self.request("POST", f"/api/employees/{target['id']}/emergency-contacts", {"full_name": "ممنوع", "relationship": "قريب", "phone": "+971500000004"}, expected=403)
-        admin.request("DELETE", f"/api/emergency-contacts/{first['id']}")
+        admin.request("DELETE", f"/api/emergency-contacts/{first['id']}", expected=405)
         contacts = admin.request("GET", f"/api/employees/{target['id']}/emergency-contacts")["items"]
-        self.assertEqual(len(contacts), 1)
-        self.assertTrue(contacts[0]["is_primary"])
+        self.assertEqual(len(contacts), 2)
+        self.assertTrue(next(contact for contact in contacts if contact["id"] == first["id"])["is_primary"])
 
         admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": [{"permission": "employee.emergency.manage", "granted": False}]})
         hr.request("POST", f"/api/employees/{target['id']}/emergency-contacts", {"full_name": "ممنوع", "relationship": "قريب", "phone": "+971500000005"}, expected=403)
@@ -2811,7 +2886,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertNotIn("+971500000001", audit_details)
             self.assertNotIn("private-contact@example.test", audit_details)
             archived = db.execute("SELECT archived FROM employee_emergency_contacts WHERE id=?", (first["id"],)).fetchone()["archived"]
-            self.assertEqual(archived, 1)
+            self.assertEqual(archived, 0)
 
     def test_58_v56_attendance_range_calculations_and_privacy_scopes(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -3014,6 +3089,22 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('font-family:var(--font-ar)', styles)
         self.assertIn('attendance.export', server_source)
         self.assertIn(r'/api/attendance/range\.csv', server_source)
+
+    def test_62_v58_annual_leave_accrual_and_sale_contract(self):
+        today = date(2026, 8, 23)
+        self.assertEqual(hr_server.annual_leave_accrued_to("2026-08-23", today), 0)
+        self.assertEqual(hr_server.annual_leave_accrued_to("2026-02-23", today), 12)
+        self.assertEqual(hr_server.annual_leave_accrued_to("2025-12-23", today), 16)
+        self.assertEqual(hr_server.annual_leave_accrued_to("2025-08-23", today), 30)
+        self.assertEqual(hr_server.annual_leave_accrued_to("2024-08-23", today), 60)
+        schema = (Path(__file__).parents[1] / "schema.sql").read_text(encoding="utf-8")
+        server_source = (Path(__file__).parents[1] / "server.py").read_text(encoding="utf-8")
+        app_source = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        self.assertIn("leave_sale_requests", schema)
+        self.assertIn("annual_leave_before_eligibility", server_source)
+        self.assertIn("annual_leave_entitlement_for_year", server_source)
+        self.assertIn("/api/leaves/sales", server_source)
+        self.assertIn("requestLeaveSale", app_source)
 
 
 if __name__ == "__main__":

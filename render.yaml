@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: khaisha-hr
+    runtime: docker
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: HR_ENV
+        value: production
+      - key: HR_HOST
+        value: 0.0.0.0
+      - key: HR_SECRET_KEY
+        generateValue: true
+      - key: HR_DB_PATH
+        value: /var/data/hr.sqlite3
+      - key: HR_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: HR_BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: HR_BOOTSTRAP_ADMIN_NAME
+        sync: false
+    disk:
+      name: khaisha-hr-data
+      mountPath: /var/data
+      sizeGB: 1

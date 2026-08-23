@@ -22,6 +22,9 @@ import sqlite3
 import sys
 import csv
 import io
+import struct
+import zlib
+import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, time, timedelta, timezone
 from email.utils import formatdate
@@ -84,6 +87,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
     },
     "performance": {
         "evaluation.view": "عرض التقييمات", "evaluation.review": "مراجعة الموارد البشرية وحل التظلمات",
+        "evaluation.override_manager": "استكمال تقييمات المسؤولين الغائبين",
         "evaluation.cycle.manage": "إنشاء دورات التقييم وإعلانها وإرسال تذكيراتها", "lifecycle.view": "عرض دورة الموظف",
         "lifecycle.manage": "إدارة دورة الموظف",
     },
@@ -108,6 +112,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "salary.view", "attendance.view", "attendance.export", "shift.view", "shift.manage", "overtime.view",
         "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "evaluation.review", "evaluation.cycle.manage",
         "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
+        "evaluation.override_manager",
         "employee_document.manage", "employee_action.manage", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.manage", "payroll.approve", "payroll.pay",
         "advance.view", "advance.approve", "reference.manage", "lifecycle.view", "lifecycle.manage", "report.view",
         "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
@@ -357,6 +362,566 @@ def _pdf_text(value: Any) -> str:
     return text.encode("ascii", "ignore").decode("ascii") or "-"
 
 
+_PDF_FONT_CACHE: tuple[bytes, dict[int, int]] | None = None
+
+
+def _ttf_cmap(font_data: bytes) -> dict[int, int]:
+    """Read the Unicode cmap from a TrueType font without external packages."""
+    if len(font_data) < 12:
+        return {}
+    table_count = struct.unpack_from(">H", font_data, 4)[0]
+    cmap_offset = None
+    for index in range(table_count):
+        record_offset = 12 + index * 16
+        if record_offset + 16 > len(font_data):
+            break
+        tag, _, offset, length = struct.unpack_from(">4sLLL", font_data, record_offset)
+        if tag == b"cmap" and offset + length <= len(font_data):
+            cmap_offset = offset
+            break
+    if cmap_offset is None or cmap_offset + 4 > len(font_data):
+        return {}
+    _, record_count = struct.unpack_from(">HH", font_data, cmap_offset)
+    candidates: list[tuple[int, int, int]] = []
+    for index in range(record_count):
+        offset = cmap_offset + 4 + index * 8
+        if offset + 8 > len(font_data):
+            break
+        platform, encoding, sub_offset = struct.unpack_from(">HHL", font_data, offset)
+        subtable = cmap_offset + sub_offset
+        if subtable + 2 > len(font_data):
+            continue
+        format_code = struct.unpack_from(">H", font_data, subtable)[0]
+        preference = 0 if format_code == 12 and platform == 3 and encoding == 10 else 1 if format_code == 12 else 2 if format_code == 4 and platform in {0, 3} else 9
+        candidates.append((preference, format_code, subtable))
+    for _, format_code, subtable in sorted(candidates):
+        mapping: dict[int, int] = {}
+        if format_code == 12 and subtable + 16 <= len(font_data):
+            groups = struct.unpack_from(">L", font_data, subtable + 12)[0]
+            for index in range(groups):
+                current = subtable + 16 + index * 12
+                if current + 12 > len(font_data):
+                    break
+                start, end, glyph = struct.unpack_from(">LLL", font_data, current)
+                # Contract text uses BMP Arabic/Latin characters; avoid
+                # expanding supplementary-plane ranges into a huge mapping.
+                for codepoint in range(start, min(end, 0xFFFF) + 1):
+                    mapping[codepoint] = glyph + codepoint - start
+            if mapping:
+                return mapping
+        elif format_code == 4 and subtable + 16 <= len(font_data):
+            segment_count = struct.unpack_from(">H", font_data, subtable + 6)[0] // 2
+            end_codes = subtable + 14
+            start_codes = end_codes + segment_count * 2 + 2
+            deltas = start_codes + segment_count * 2
+            range_offsets = deltas + segment_count * 2
+            for index in range(segment_count):
+                end = struct.unpack_from(">H", font_data, end_codes + index * 2)[0]
+                start = struct.unpack_from(">H", font_data, start_codes + index * 2)[0]
+                delta = struct.unpack_from(">h", font_data, deltas + index * 2)[0]
+                range_offset = struct.unpack_from(">H", font_data, range_offsets + index * 2)[0]
+                if start > end or start == 0xFFFF:
+                    continue
+                for codepoint in range(start, end + 1):
+                    if range_offset:
+                        glyph_address = range_offsets + index * 2 + range_offset + (codepoint - start) * 2
+                        glyph = struct.unpack_from(">H", font_data, glyph_address)[0] if glyph_address + 2 <= len(font_data) else 0
+                        mapping[codepoint] = (glyph + delta) & 0xFFFF if glyph else 0
+                    else:
+                        mapping[codepoint] = (codepoint + delta) & 0xFFFF
+            if mapping:
+                return mapping
+    return {}
+
+
+def _pdf_unicode_font() -> tuple[bytes, dict[int, int]] | None:
+    """Load a local Unicode font when available; fall back to Helvetica elsewhere."""
+    global _PDF_FONT_CACHE
+    if _PDF_FONT_CACHE is not None:
+        return _PDF_FONT_CACHE
+    paths = (
+        Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
+        Path("/Library/Fonts/Arial Unicode.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+        Path("/System/Library/Fonts/Supplemental/Tahoma.ttf"),
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    )
+    for path in paths:
+        try:
+            data = path.read_bytes()
+            cmap = _ttf_cmap(data)
+            if cmap:
+                _PDF_FONT_CACHE = (data, cmap)
+                return _PDF_FONT_CACHE
+        except (OSError, ValueError, struct.error):
+            continue
+    return None
+
+
+def _ttf_glyph_widths(font_data: bytes) -> dict[int, int]:
+    """Return glyph advance widths in PDF's 1000-unit coordinate system."""
+    if len(font_data) < 12:
+        return {}
+    table_count = struct.unpack_from(">H", font_data, 4)[0]
+    tables: dict[bytes, tuple[int, int]] = {}
+    for index in range(table_count):
+        record_offset = 12 + index * 16
+        if record_offset + 16 > len(font_data):
+            break
+        tag, _, offset, length = struct.unpack_from(">4sLLL", font_data, record_offset)
+        if offset + length <= len(font_data):
+            tables[tag] = (offset, length)
+    head = tables.get(b"head")
+    hhea = tables.get(b"hhea")
+    hmtx = tables.get(b"hmtx")
+    maxp = tables.get(b"maxp")
+    if not all((head, hhea, hmtx, maxp)):
+        return {}
+    head_offset, head_length = head
+    hhea_offset, hhea_length = hhea
+    hmtx_offset, hmtx_length = hmtx
+    maxp_offset, maxp_length = maxp
+    if head_length < 20 or hhea_length < 36 or maxp_length < 6:
+        return {}
+    units_per_em = struct.unpack_from(">H", font_data, head_offset + 18)[0]
+    metric_count = struct.unpack_from(">H", font_data, hhea_offset + 34)[0]
+    glyph_count = struct.unpack_from(">H", font_data, maxp_offset + 4)[0]
+    if not units_per_em or not metric_count or not glyph_count:
+        return {}
+    widths: dict[int, int] = {}
+    available_metrics = min(metric_count, glyph_count, hmtx_length // 4)
+    last_advance = 0
+    for glyph in range(available_metrics):
+        advance = struct.unpack_from(">H", font_data, hmtx_offset + glyph * 4)[0]
+        last_advance = advance
+        widths[glyph] = max(1, round(advance * 1000 / units_per_em))
+    for glyph in range(available_metrics, glyph_count):
+        widths[glyph] = max(1, round(last_advance * 1000 / units_per_em))
+    return widths
+
+
+def _pdf_utf16_codepoint(codepoint: int) -> str:
+    if codepoint <= 0xFFFF:
+        return f"{codepoint:04X}"
+    codepoint -= 0x10000
+    high = 0xD800 + (codepoint >> 10)
+    low = 0xDC00 + (codepoint & 0x3FF)
+    return f"{high:04X}{low:04X}"
+
+
+_ARABIC_PRESENTATION_FORMS: dict[int, dict[str, str]] | None = None
+
+
+def _arabic_presentation_forms() -> dict[int, dict[str, str]]:
+    global _ARABIC_PRESENTATION_FORMS
+    if _ARABIC_PRESENTATION_FORMS is None:
+        forms: dict[int, dict[str, str]] = {}
+        for codepoint in range(0xFE70, 0xFEFF + 1):
+            decomposition = unicodedata.decomposition(chr(codepoint)).split()
+            if len(decomposition) >= 2 and decomposition[1] != "0020" and decomposition[0] in {"<isolated>", "<final>", "<initial>", "<medial>"}:
+                forms.setdefault(int(decomposition[1], 16), {})[decomposition[0][1:-1]] = chr(codepoint)
+        _ARABIC_PRESENTATION_FORMS = forms
+    return _ARABIC_PRESENTATION_FORMS
+
+
+def _shape_arabic_for_pdf(value: str) -> str:
+    """Shape Arabic letters and apply a small bidi pass for the PDF writer.
+
+    The PDF generator writes glyphs in the order supplied to ``Tj`` and does
+    not have a paragraph bidi engine.  Reversing each word (the old behavior)
+    left Arabic sentences with their words in the wrong order.  Shape in
+    logical order first, then reverse complete RTL runs while keeping Latin
+    and numeric runs readable.
+    """
+    forms = _arabic_presentation_forms()
+    source = list(str(value or ""))
+
+    def is_arabic(character: str) -> bool:
+        if not character:
+            return False
+        codepoint = ord(character)
+        return (
+            codepoint in forms
+            or 0x0600 <= codepoint <= 0x06FF
+            or 0x0750 <= codepoint <= 0x077F
+            or 0x08A0 <= codepoint <= 0x08FF
+            or 0xFB50 <= codepoint <= 0xFDFF
+            or 0xFE70 <= codepoint <= 0xFEFF
+        )
+
+    # Shape while the string is still in logical order. Joining decisions must
+    # inspect logical neighbors, not the eventual visual order.
+    shaped: list[str] = []
+    for index, character in enumerate(source):
+        available = forms.get(ord(character))
+        if not available:
+            shaped.append(character)
+            continue
+        previous = source[index - 1] if index else ""
+        following = source[index + 1] if index + 1 < len(source) else ""
+        previous_forms = forms.get(ord(previous), {}) if is_arabic(previous) else {}
+        following_forms = forms.get(ord(following), {}) if is_arabic(following) else {}
+        joins_previous = bool(previous_forms.get("initial") or previous_forms.get("medial")) and bool(available.get("final") or available.get("medial"))
+        joins_following = bool(available.get("initial") or available.get("medial")) and bool(following_forms.get("final") or following_forms.get("medial"))
+        form = "medial" if joins_previous and joins_following else "final" if joins_previous else "initial" if joins_following else "isolated"
+        shaped.append(available.get(form, available.get("isolated", character)))
+
+    def direction(character: str) -> str | None:
+        if is_arabic(character):
+            return "R"
+        bidi = unicodedata.bidirectional(character)
+        return "L" if bidi in {"L", "EN", "AN"} else None
+
+    visual: list[str] = []
+    segment: list[str] = []
+    segment_direction: str | None = None
+
+    def flush_segment() -> None:
+        nonlocal segment, segment_direction
+        if segment:
+            visual.extend(reversed(segment) if segment_direction == "R" else segment)
+        segment = []
+        segment_direction = None
+
+    for character in shaped:
+        current_direction = direction(character)
+        if current_direction and segment_direction and current_direction != segment_direction:
+            flush_segment()
+        if current_direction and segment_direction is None:
+            segment_direction = current_direction
+        segment.append(character)
+    flush_segment()
+    return "".join(visual)
+
+
+def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
+    """Create the professional, framed Arabic employment-contract form."""
+    employee = contract.get("employee") or {}
+    organization = contract.get("organization") or {}
+    start = contract.get("contract_start_on") or "-"
+    end = contract.get("contract_end_on") or "-"
+    name = employee.get("full_name") or employee.get("name") or "-"
+    employer = organization.get("legal_name") or organization.get("display_name") or "خيشة - Khaisha"
+    display_name = organization.get("display_name") or employer
+    address = organization.get("address") or organization.get("emirate") or "-"
+    license_no = organization.get("license_no") or "-"
+    representative = organization.get("representative_name") or organization.get("manager_name") or "-"
+    contract_number = contract.get("contract_number") or "-"
+    issued_at = contract.get("issued_at") or "-"
+    salary = employee.get("salary")
+    salary_text = f"{float(salary):,.2f} درهم إماراتي" if salary not in (None, "") else "-"
+    font_bundle = _pdf_unicode_font()
+    use_unicode = bool(font_bundle)
+    used_glyphs: dict[int, int] = {}
+    page_streams: list[bytes] = []
+
+    def color(hex_value: str) -> tuple[float, float, float]:
+        value = hex_value.lstrip("#")
+        return tuple(int(value[index:index + 2], 16) / 255 for index in (0, 2, 4))  # type: ignore[return-value]
+
+    teal = color("#0d3d3b")
+    teal_light = color("#eaf2ef")
+    gold = color("#c49a52")
+    ink = color("#23322f")
+    muted = color("#64746e")
+    line = color("#d2dbd5")
+    white = (1.0, 1.0, 1.0)
+
+    def add_fill(commands: list[str], x: float, y: float, width: float, height: float, fill: tuple[float, float, float]) -> None:
+        r, g, b = fill
+        commands.append(f"q {r:.4f} {g:.4f} {b:.4f} rg {x:.2f} {y:.2f} {width:.2f} {height:.2f} re f Q")
+
+    def add_stroke(commands: list[str], x: float, y: float, width: float, height: float, stroke: tuple[float, float, float], weight: float = 0.7) -> None:
+        r, g, b = stroke
+        commands.append(f"q {r:.4f} {g:.4f} {b:.4f} RG {weight:.2f} w {x:.2f} {y:.2f} {width:.2f} {height:.2f} re S Q")
+
+    def add_line(commands: list[str], x1: float, y1: float, x2: float, y2: float, stroke: tuple[float, float, float], weight: float = 0.7) -> None:
+        r, g, b = stroke
+        commands.append(f"q {r:.4f} {g:.4f} {b:.4f} RG {weight:.2f} w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S Q")
+
+    def add_text(commands: list[str], value: Any, x: float, y: float, size: float = 9.0, fill: tuple[float, float, float] = ink) -> None:
+        text = str(value or "-")
+        r, g, b = fill
+        if use_unicode:
+            assert font_bundle is not None
+            _, cmap = font_bundle
+            encoded = bytearray()
+            for character in _shape_arabic_for_pdf(text):
+                codepoint = ord(character)
+                glyph = int(cmap.get(codepoint, 0))
+                if not glyph:
+                    decomposition = unicodedata.decomposition(character).split()
+                    if len(decomposition) >= 2 and decomposition[0].startswith("<"):
+                        codepoint = int(decomposition[1], 16)
+                        glyph = int(cmap.get(codepoint, 0))
+                encoded.extend(struct.pack(">H", glyph))
+                if glyph:
+                    used_glyphs[glyph] = codepoint
+            commands.extend([
+                "BT", f"{r:.4f} {g:.4f} {b:.4f} rg", f"/F2 {size:.2f} Tf",
+                f"1 0 0 1 {x:.2f} {y:.2f} Tm", f"<{encoded.hex().upper()}> Tj", "ET",
+            ])
+        else:
+            commands.extend([
+                "BT", f"{r:.4f} {g:.4f} {b:.4f} rg", f"/F1 {size:.2f} Tf",
+                f"1 0 0 1 {x:.2f} {y:.2f} Tm", f"({_pdf_text(text)}) Tj", "ET",
+            ])
+
+    def wrap(value: Any, limit: int = 88) -> list[str]:
+        output: list[str] = []
+        for raw in str(value or "-").splitlines() or ["-"]:
+            remaining = raw.strip() or "-"
+            while len(remaining) > limit:
+                cut = remaining.rfind(" ", 0, limit)
+                if cut < 24:
+                    cut = limit
+                output.append(remaining[:cut].rstrip())
+                remaining = remaining[cut:].lstrip()
+            output.append(remaining)
+        return output
+
+    def field(commands: list[str], label: str, value: Any, x: float, top: float, width: float, height: float = 30.0) -> None:
+        add_fill(commands, x, top - height, width, height, white)
+        add_stroke(commands, x, top - height, width, height, line)
+        add_text(commands, label, x + 8, top - 10, 7.0, muted)
+        add_text(commands, value, x + 8, top - 23, 8.5, ink)
+
+    def heading(commands: list[str], title: str, top: float) -> float:
+        add_fill(commands, 50, top - 21, 495, 21, teal)
+        add_text(commands, title, 61, top - 14, 9.2, white)
+        return top - 29
+
+    def paragraph(commands: list[str], value: str, top: float, size: float = 8.5, limit: int = 92) -> float:
+        current = top
+        for line_text in wrap(value, limit):
+            add_text(commands, line_text, 61, current - 10, size, ink)
+            current -= 13
+        return current - 3
+
+    def clause(commands: list[str], title: str, value: str, top: float) -> float:
+        current = heading(commands, title, top)
+        return paragraph(commands, value, current, 8.25, 92)
+
+    def page_shell(page_number: int, continuation: bool = False, total_pages: int = 6, language: str = "ar") -> list[str]:
+        commands: list[str] = []
+        add_fill(commands, 0, 0, 595, 842, color("#fbfcfa"))
+        add_stroke(commands, 31, 28, 533, 786, gold, 1.1)
+        add_stroke(commands, 37, 34, 521, 774, line, 0.45)
+        add_fill(commands, 38, 774, 519, 40, teal)
+        add_fill(commands, 38, 770, 519, 4, gold)
+        if language == "en":
+            add_text(commands, display_name, 53, 797, 10.5, white)
+            add_text(commands, "Employment Contract", 400, 798, 12.0, white)
+            add_text(commands, "HR-controlled institutional form", 53, 783, 7.0, color("#c5d9d2"))
+            add_text(commands, "Employment form and acknowledgement", 365, 783, 7.0, color("#f1d69c"))
+            add_text(commands, f"Page {page_number} of {total_pages}", 253, 45, 7.0, muted)
+            add_text(commands, f"Contract reference: {contract_number}", 53, 45, 7.0, muted)
+            add_text(commands, f"Issue date: {issued_at}", 395, 45, 7.0, muted)
+        else:
+            add_text(commands, display_name, 53, 797, 10.5, white)
+            add_text(commands, "عقد عمل", 432, 798, 13.0, white)
+            add_text(commands, "نموذج مؤسسي محفوظ لدى الموارد البشرية", 53, 783, 7.0, color("#c5d9d2"))
+            add_text(commands, "استمارة تعاقد وإقرار", 415, 783, 7.0, color("#f1d69c"))
+            add_text(commands, f"الصفحة {page_number} من {total_pages}" if not continuation else f"استكمال العقد · {page_number} من {total_pages}", 253, 45, 7.0, muted)
+            add_text(commands, f"مرجع العقد: {contract_number}", 53, 45, 7.0, muted)
+            add_text(commands, f"تاريخ الإصدار: {issued_at}", 395, 45, 7.0, muted)
+        return commands
+
+    # Page one: identity, employment data and the first two clauses.
+    first = page_shell(1, total_pages=6)
+    y = heading(first, "بيانات العقد والأطراف", 757)
+    field(first, "صاحب العمل / الطرف الأول", employer, 55, y, 240)
+    field(first, "الموظف / الطرف الثاني", name, 305, y, 235)
+    y -= 38
+    field(first, "الرخصة التجارية", license_no, 55, y, 240)
+    field(first, "الجنسية", employee.get("nationality") or "-", 305, y, 235)
+    y -= 38
+    field(first, "يمثله", representative, 55, y, 240)
+    field(first, "رقم الهوية / الجواز", employee.get("emirates_id_no") or employee.get("passport_no") or "-", 305, y, 235)
+    y -= 38
+    field(first, "العنوان ووسائل الاتصال", address, 55, y, 240)
+    field(first, "الرقم الوظيفي", employee.get("employee_no") or "-", 305, y, 235)
+    y -= 46
+    y = heading(first, "بيانات الوظيفة ومدة العقد", y)
+    field(first, "المسمى الوظيفي", employee.get("job_title") or "-", 55, y, 240)
+    field(first, "القسم / الفرع", f"{employee.get('department_name') or '-'} / {employee.get('branch_name') or '-'}", 305, y, 235)
+    y -= 38
+    field(first, "تاريخ التعيين", employee.get("hire_date") or "-", 55, y, 240)
+    field(first, "نوع العقد", "محدد المدة" if end != "-" else "غير محدد المدة", 305, y, 235)
+    y -= 38
+    field(first, "بداية العقد", start, 55, y, 240)
+    field(first, "نهاية العقد", end, 305, y, 235)
+    y -= 38
+    field(first, "الأجر الإجمالي الشهري", salary_text, 55, y, 240)
+    field(first, "مقر العمل الأساسي", address, 305, y, 235)
+    y -= 46
+    y = clause(first, "البند الأول: الإقرار بالاطلاع", f"يقر الطرف الثاني ({name}) بأنه اطلع اطلاعاً تاماً على أحكام قانون العمل الإماراتي (المرسوم بقانون اتحادي رقم 33 لسنة 2021) ولائحته التنفيذية، وعلى اللائحة الداخلية للشركة وسياساتها وقواعد السلوك الوظيفي المعمول بها، وفهم كافة بنودها، ويلتزم بالعمل بموجبها، على أن تطبق اللائحة الداخلية في كل ما لا يتعارض مع أحكام القانون الاتحادي، وفي حال التعارض تطبق أحكام القانون باعتبارها الحد الأدنى الملزم لحقوق الطرف الثاني.", y)
+    clause(first, "البند الثاني: موضوع العقد", f"يعمل الطرف الثاني لدى الطرف الأول تحت المسمى الوظيفي: {employee.get('job_title') or '-'}، في قسم أو إدارة: {employee.get('department_name') or '-'}، ومقر العمل الأساسي: {address}، مع أحقية الطرف الأول في انتداب الطرف الثاني للعمل في أي مكان آخر داخل الدولة حسب مقتضيات العمل، وكذلك تكليفه بمهام إضافية تتصل بطبيعة وظيفته دون أن يشكل ذلك إخلالاً بشروط هذا العقد.", y - 5)
+    page_streams.append("\n".join(first).encode("ascii", "ignore"))
+
+    # Page two: the detailed working terms and employee obligations.
+    second = page_shell(2, True, 6)
+    y = heading(second, "الشروط والأحكام - الجزء الأول", 757)
+    y = clause(second, "البند الثالث: مدة العقد وفترة التجربة", f"هذا العقد {('محدد المدة' if end != '-' else 'غير محدد المدة')}، ويبدأ نفاذه من تاريخ {start}. يخضع الطرف الثاني لفترة تجربة مدتها ______ يوماً لا تتجاوز 6 أشهر من تاريخ المباشرة الفعلية، ويحق خلالها لأي من الطرفين إنهاء العقد بإشعار كتابي مدته 14 يوماً على الأقل، دون استحقاق تعويض، وفقاً لأحكام قانون العمل.", y)
+    y = clause(second, "البند الرابع: الأجر", f"يتقاضى الطرف الثاني أجراً إجمالياً شهرياً قدره ({salary_text})، يصرف نهاية كل شهر ميلادي عبر نظام حماية الأجور (WPS)، وتخصم منه أي مستحقات نظامية للجهات الحكومية، كالتأمينات الاجتماعية إن انطبقت، وفق القانون.", y - 4)
+    y = clause(second, "البند الخامس: ساعات العمل وأيام العطلة الأسبوعية", "يحدد الطرف الأول ساعات وأيام العمل الرسمية بواقع 8 ساعات يومياً كحد أقصى أو ما يعادلها أسبوعياً وفق النظام المعمول به، ونظام العطلة الأسبوعية يوم أو أكثر بحسب طبيعة النشاط والقسم. ويحتفظ الطرف الأول بحقه في تعديل جدول الدوام أو نظام العطلة الأسبوعية أو أوقات المناوبات وفق مقتضيات العمل، شريطة عدم تجاوز الحد الأقصى لساعات العمل المقرر قانوناً، ويلتزم الطرف الثاني بهذه التعديلات بمجرد إبلاغه بها. وفي حال تكليفه بالعمل خلال أيام العطل الرسمية، يستحق بدلًا نقدياً أو إجازة تعويضية وفق اللائحة الداخلية، بما لا يقل عن الحدود الدنيا المقررة في قانون العمل.", y - 4)
+    y = clause(second, "البند السادس: الإجازات", "يستحق الطرف الثاني إجازة سنوية مدفوعة الأجر بواقع 30 يوماً عن كل سنة خدمة كاملة، أو يومين عن كل شهر عن مدة خدمة تزيد على 6 أشهر وتقل عن سنة، إضافة إلى الإجازات المرضية والخاصة المنصوص عليها في قانون العمل، على أن يحدد موعد الإجازة بالتنسيق مع الطرف الأول وفق مقتضيات العمل.", y - 4)
+    clause(second, "البند السابع: التزامات الطرف الثاني", "يلتزم الطرف الثاني: 1) بأداء العمل المكلف به بأمانة وإخلاص ووفق تعليمات الطرف الأول؛ 2) بالالتزام بأنظمة العمل الداخلية وسياسات الشركة وقواعد السلوك الوظيفي؛ 3) بالمحافظة على سرية معلومات وأسرار العمل أثناء سريان العقد ولمدة ______ سنة بعد انتهائه؛ 4) بعدم العمل لدى أي جهة أخرى منافسة أو غير منافسة دون إذن كتابي مسبق؛ 5) بالمحافظة على ممتلكات ومعدات الشركة وعدم التسبب بضرر أو إهمال جسيم؛ 6) بعدم إفشاء أو استغلال بيانات العملاء أو أعمال الشركة لأي غرض شخصي أو لمصلحة طرف ثالث.", y - 4)
+    y = max(y - 12, 190)
+    page_streams.append("\n".join(second).encode("ascii", "ignore"))
+
+    # Page three: termination, disputes, general provisions and signatures.
+    third = page_shell(3, True, 6)
+    y = heading(third, "الشروط والأحكام - الجزء الثاني", 757)
+    y = clause(third, "البند الثامن: حالات الفصل دون إشعار أو مكافأة", "يحق للطرف الأول إنهاء هذا العقد فوراً ودون إشعار أو مكافأة نهاية خدمة في الحالات المنصوص عليها حصراً في المادة (44) من قانون العمل الإماراتي، كالغش أو التزوير أو الإفشاء الجسيم للأسرار أو الاعتداء أو التغيب دون سبب مشروع لأكثر من المدد المقررة قانوناً، مع مراعاة الإجراءات والضمانات النظامية.", y)
+    y = clause(third, "البند التاسع: إنهاء العقد ومكافأة نهاية الخدمة", "بعد انتهاء فترة التجربة، يخضع إنهاء العقد لإشعار كتابي مسبق مدته ______ يوماً، بين 30 و90 يوماً، وتُصرف مكافأة نهاية الخدمة والمستحقات وفق الحدود والنسب المقررة في قانون العمل الإماراتي، ولا تخل صياغة هذا العقد بأي حق إلزامي مقرر للطرف الثاني بموجب القانون.", y - 4)
+    y = clause(third, "البند العاشر: تسوية النزاعات", "في حال نشوء أي نزاع، يسعى الطرفان إلى حله ودياً أولاً، وفي حال تعذر ذلك يحال إلى وزارة الموارد البشرية والتوطين، ثم إلى المحاكم المختصة في دولة الإمارات العربية المتحدة، التي تطبق أحكامها وقوانينها على هذا العقد.", y - 4)
+    y = clause(third, "البند الحادي عشر: أحكام عامة", "أي بند يرد في هذا العقد ويخالف الحد الأدنى لحقوق الطرف الثاني المقررة بقانون العمل الإماراتي يعتبر لاغياً ويستبدل تلقائياً بالحكم القانوني المقابل دون أن يؤثر ذلك على باقي البنود. وتطبق أحكام قانون العمل الإماراتي ولائحته التنفيذية على كل ما لم يرد به نص. حرر هذا العقد من نسختين أصليتين متطابقتين، بيد كل طرف نسخة للعمل بموجبها، وأقر الطرفان بقراءته وفهم بنوده والموافقة عليه دون إكراه.", y - 4)
+    y = max(y - 16, 300)
+    add_fill(third, 50, y - 18, 495, 18, teal_light)
+    add_text(third, "التوقيعات والإقرار", 61, y - 12, 9.0, teal)
+    y -= 31
+    add_stroke(third, 55, y - 82, 238, 72, line)
+    add_stroke(third, 302, y - 82, 238, 72, line)
+    add_text(third, "الطرف الأول - صاحب العمل", 68, y - 25, 8.3, muted)
+    add_text(third, employer, 68, y - 40, 8.6, ink)
+    add_text(third, "الاسم والتوقيع: __________________", 68, y - 61, 8.0, ink)
+    add_text(third, "التاريخ: _________________________", 68, y - 75, 8.0, ink)
+    add_text(third, "الطرف الثاني - الموظف", 315, y - 25, 8.3, muted)
+    add_text(third, name, 315, y - 40, 8.6, ink)
+    add_text(third, "الاسم والتوقيع: __________________", 315, y - 61, 8.0, ink)
+    add_text(third, "التاريخ: _________________________", 315, y - 75, 8.0, ink)
+    add_text(third, "يقر الطرفان بأن هذه الاستمارة تمثل عقد العمل والإقرار المتفق عليه، وبأن أي حق إلزامي مقرر بموجب القانون يبقى محفوظاً بالكامل.", 61, y - 105, 7.5, muted)
+    page_streams.append("\n".join(third).encode("ascii", "ignore"))
+
+    # Pages four to six repeat the form in English so the signed record is
+    # usable by bilingual staff, banks and government-facing reviewers.
+    salary_text_en = f"{float(salary):,.2f} AED" if salary not in (None, "") else "-"
+    first_en = page_shell(4, total_pages=6, language="en")
+    y = heading(first_en, "Contract parties and identity", 757)
+    field(first_en, "Employer / First party", employer, 55, y, 240)
+    field(first_en, "Employee / Second party", name, 305, y, 235)
+    y -= 38
+    field(first_en, "Trade licence number", license_no, 55, y, 240)
+    field(first_en, "Nationality", employee.get("nationality") or "-", 305, y, 235)
+    y -= 38
+    field(first_en, "Represented by", representative, 55, y, 240)
+    field(first_en, "Emirates ID / passport", employee.get("emirates_id_no") or employee.get("passport_no") or "-", 305, y, 235)
+    y -= 38
+    field(first_en, "Address and contact", address, 55, y, 240)
+    field(first_en, "Employee number", employee.get("employee_no") or "-", 305, y, 235)
+    y -= 46
+    y = heading(first_en, "Employment details and contract term", y)
+    field(first_en, "Job title", employee.get("job_title") or "-", 55, y, 240)
+    field(first_en, "Department / branch", f"{employee.get('department_name') or '-'} / {employee.get('branch_name') or '-'}", 305, y, 235)
+    y -= 38
+    field(first_en, "Hire date", employee.get("hire_date") or "-", 55, y, 240)
+    field(first_en, "Contract type", "Fixed term" if end != "-" else "Indefinite term", 305, y, 235)
+    y -= 38
+    field(first_en, "Contract start", start, 55, y, 240)
+    field(first_en, "Contract end", end, 305, y, 235)
+    y -= 38
+    field(first_en, "Gross monthly salary", salary_text_en, 55, y, 240)
+    field(first_en, "Primary work location", address, 305, y, 235)
+    y -= 46
+    y = clause(first_en, "Clause 1: acknowledgement", "The employee confirms that they have fully read and understood UAE Labour Law, Federal Decree-Law No. 33 of 2021 and its implementing regulations, as well as the employer's internal regulations, policies and code of conduct. The internal rules apply only to the extent that they do not conflict with federal law; where a conflict exists, the mandatory legal minimum applies.", y)
+    clause(first_en, "Clause 2: scope of employment", "The employee is employed by the employer under the job title and department recorded in this form, with the primary work location recorded above. The employer may assign related duties or a work location within the UAE where reasonably required by the business, without reducing any statutory right.", y - 5)
+    page_streams.append("\n".join(first_en).encode("ascii", "ignore"))
+
+    second_en = page_shell(5, True, 6, "en")
+    y = heading(second_en, "Terms and conditions - Part 1", 757)
+    y = clause(second_en, "Clause 3: term and probation", f"This is a {'fixed-term' if end != '-' else 'indefinite-term'} contract effective from {start}. The employee may be subject to a probation period of ______ days, not exceeding six months from the actual commencement date. During probation either party may terminate with at least 14 days' written notice, in accordance with applicable law.", y)
+    y = clause(second_en, "Clause 4: remuneration", f"The employee will receive a gross monthly salary of {salary_text_en}, paid at the end of each Gregorian month through the Wage Protection System (WPS), subject to lawful deductions and statutory contributions where applicable.", y - 4)
+    y = clause(second_en, "Clause 5: working hours and weekly rest", "Normal working hours and weekly rest days are set by the employer according to the department and applicable UAE limits. The employer may adjust schedules and shifts for operational needs without exceeding statutory maximums. Work on public holidays is compensated by payment or a compensatory day in accordance with the internal policy and the legal minimum.", y - 4)
+    y = clause(second_en, "Clause 6: leave", "The employee is entitled to annual leave of 30 paid days for each completed year, or two days for each month where service exceeds six months and is less than one year, in addition to statutory sick and special leave. Leave dates are coordinated with the employer and operational requirements.", y - 4)
+    clause(second_en, "Clause 7: employee obligations", "The employee shall perform assigned duties faithfully, follow internal policies and conduct rules, protect confidential information during employment and for ______ years after termination, avoid outside work without prior written approval, safeguard company property, and never disclose or misuse customer or business data.", y - 4)
+    page_streams.append("\n".join(second_en).encode("ascii", "ignore"))
+
+    third_en = page_shell(6, True, 6, "en")
+    y = heading(third_en, "Terms and conditions - Part 2", 757)
+    y = clause(third_en, "Clause 8: termination for cause", "The employer may terminate without notice or end-of-service benefit only in the cases exhaustively provided by Article 44 of UAE Labour Law, including fraud, forgery, serious disclosure of confidential information, assault, or unjustified absence beyond the statutory periods, subject to the required procedures and safeguards.", y)
+    y = clause(third_en, "Clause 9: termination and end-of-service benefit", "After probation, termination is subject to written notice of ______ days, between 30 and 90 days. End-of-service benefits and all final entitlements are paid in accordance with UAE Labour Law; no wording in this form waives a mandatory statutory right.", y - 4)
+    y = clause(third_en, "Clause 10: dispute resolution", "The parties will first attempt to resolve any dispute amicably. If unresolved, the matter may be referred to the Ministry of Human Resources and Emiratisation and then to the competent courts of the UAE, whose laws govern this contract.", y - 4)
+    y = clause(third_en, "Clause 11: general provisions", "Any provision that falls below the mandatory minimum rights under UAE Labour Law is void and automatically replaced by the applicable legal provision. UAE Labour Law and its implementing regulations apply to matters not expressly covered here. This form is prepared in two identical originals and both parties confirm that they have read, understood and accepted it without coercion.", y - 4)
+    y = max(y - 16, 300)
+    add_fill(third_en, 50, y - 18, 495, 18, teal_light)
+    add_text(third_en, "Acknowledgement and signatures", 61, y - 12, 9.0, teal)
+    y -= 31
+    add_stroke(third_en, 55, y - 82, 238, 72, line)
+    add_stroke(third_en, 302, y - 82, 238, 72, line)
+    add_text(third_en, "First party - employer", 68, y - 25, 8.3, muted)
+    add_text(third_en, employer, 68, y - 40, 8.6, ink)
+    add_text(third_en, "Name and signature: __________________", 68, y - 61, 8.0, ink)
+    add_text(third_en, "Date: ______________________________", 68, y - 75, 8.0, ink)
+    add_text(third_en, "Second party - employee", 315, y - 25, 8.3, muted)
+    add_text(third_en, name, 315, y - 40, 8.6, ink)
+    add_text(third_en, "Name and signature: __________________", 315, y - 61, 8.0, ink)
+    add_text(third_en, "Date: ______________________________", 315, y - 75, 8.0, ink)
+    add_text(third_en, "Both parties acknowledge that this form records the agreed employment terms and preserves every mandatory legal right.", 61, y - 105, 7.5, muted)
+    page_streams.append("\n".join(third_en).encode("ascii", "ignore"))
+
+    page_count = len(page_streams)
+    page_numbers = list(range(3, 3 + page_count))
+    content_numbers = list(range(3 + page_count, 3 + page_count * 2))
+    if use_unicode:
+        assert font_bundle is not None
+        font_data, _ = font_bundle
+        font_descriptor_number = 3 + page_count * 2
+        to_unicode_number = font_descriptor_number + 1
+        compressed_number = to_unicode_number + 1
+        cid_number = compressed_number + 1
+        type0_number = cid_number + 1
+        objects: list[bytes] = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            (f"<< /Type /Pages /Kids [{' '.join(f'{number} 0 R' for number in page_numbers)}] /Count {page_count} >>").encode("ascii"),
+        ]
+        for page_number, content_number in zip(page_numbers, content_numbers):
+            objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F2 {type0_number} 0 R >> >> /Contents {content_number} 0 R >>".encode("ascii"))
+        for stream in page_streams:
+            objects.append(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
+        to_unicode_lines = ["/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap", "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def", "/CMapName /Adobe-Identity-UCS def", "/CMapType 2 def", "1 begincodespacerange", "<0000> <FFFF>", "endcodespacerange"]
+        entries = [f"<{glyph:04X}> <{_pdf_utf16_codepoint(codepoint)}>" for glyph, codepoint in sorted(used_glyphs.items())]
+        for start_index in range(0, len(entries), 100):
+            chunk = entries[start_index:start_index + 100]
+            to_unicode_lines.append(f"{len(chunk)} beginbfchar")
+            to_unicode_lines.extend(chunk)
+            to_unicode_lines.append("endbfchar")
+        to_unicode_lines.extend(["endcmap", "CMapName currentdict /CMap defineresource pop", "end", "end"])
+        to_unicode = "\n".join(to_unicode_lines).encode("ascii")
+        compressed_font = zlib.compress(font_data, 9)
+        font_widths = _ttf_glyph_widths(font_data)
+        width_entries = " ".join(f"{glyph} [{font_widths.get(glyph, 600)}]" for glyph in sorted(used_glyphs))
+        cid_widths = f"/W [{width_entries}]" if width_entries else ""
+        objects.extend([
+            b"<< /Type /FontDescriptor /FontName /Arial /Flags 4 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 " + str(compressed_number).encode("ascii") + b" 0 R >>",
+            b"<< /Length " + str(len(to_unicode)).encode("ascii") + b" >>\nstream\n" + to_unicode + b"\nendstream",
+            b"<< /Length " + str(len(compressed_font)).encode("ascii") + b" /Filter /FlateDecode >>\nstream\n" + compressed_font + b"\nendstream",
+            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
+        ])
+    else:
+        font_number = 3 + page_count * 2 + 1
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            (f"<< /Type /Pages /Kids [{' '.join(f'{number} 0 R' for number in page_numbers)}] /Count {page_count} >>").encode("ascii"),
+        ]
+        for page_number, content_number in zip(page_numbers, content_numbers):
+            objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 {font_number} 0 R >> >> /Contents {content_number} 0 R >>".encode("ascii"))
+        for stream in page_streams:
+            objects.append(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
+        objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{number} 0 obj\n".encode("ascii")); output.extend(obj); output.extend(b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode("ascii"))
+    output.extend("".join(f"{offset:010d} 00000 n \n" for offset in offsets[1:]).encode("ascii"))
+    output.extend(f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
+    return bytes(output)
+
+
 def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
     """Create a dependency-free, printable PDF attachment for approved certificates.
 
@@ -367,6 +932,8 @@ def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
     """
     employee = certificate.get("employee") or {}
     organization = certificate.get("organization") or {}
+    breakdown = certificate.get("salary_breakdown") or employee.get("salary_breakdown") or {}
+    manual = breakdown.get("manual_allowances") or []
     lines = [
         organization.get("display_name") or "Khaisha - HR",
         "SALARY CERTIFICATE / شهادة راتب",
@@ -375,7 +942,13 @@ def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
         f"Employee: {employee.get('name') or employee.get('full_name')}",
         f"Employee No: {employee.get('employee_no') or employee.get('employee_number')}",
         f"Job Title: {employee.get('job_title') or '-'}",
-        f"Monthly Salary (AED): {float(certificate.get('salary') or 0):,.2f}",
+        f"Basic Salary (AED): {float(breakdown.get('basic_salary') or 0):,.2f}",
+        f"Housing Allowance (AED): {float(breakdown.get('housing_allowance') or 0):,.2f}",
+        f"Transport Allowance (AED): {float(breakdown.get('transport_allowance') or 0):,.2f}",
+        f"Profession Allowance (AED): {float(breakdown.get('profession_allowance') or 0):,.2f}",
+        f"Other Allowance (AED): {float(breakdown.get('other_allowance') or 0):,.2f}",
+        *[f"{item.get('name')}: {float(item.get('amount') or 0):,.2f} AED" for item in manual if isinstance(item, dict)],
+        f"Total Monthly Salary (AED): {float(certificate.get('salary') or breakdown.get('total') or 0):,.2f}",
         f"Purpose: {certificate.get('purpose') or 'To whom it may concern'}",
         f"Issued At: {certificate.get('issued_at') or '-'}",
         "This electronic document is verifiable in the HR system.",
@@ -404,6 +977,51 @@ def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
     output.extend("".join(f"{offset:010d} 00000 n \n" for offset in offsets[1:]).encode("ascii"))
     output.extend(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
     return bytes(output)
+
+
+def refresh_legacy_generated_contracts(db: sqlite3.Connection) -> int:
+    """Regenerate legacy auto-created contract PDFs after a template revision."""
+    rows = db.execute(
+        """SELECT d.id,d.employee_id,d.document_number,d.issued_on,d.expires_on,d.updated_at,
+                  e.*,jt.name AS job_title_name,dep.name AS department_name,b.name AS branch_name
+           FROM employee_documents d
+           JOIN employees e ON e.id=d.employee_id
+           LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+           LEFT JOIN departments dep ON dep.id=e.department_id
+           LEFT JOIN branches b ON b.id=e.branch_id
+           WHERE d.document_type='contract' AND d.archived=0 AND d.notes LIKE ?""",
+        ("عقد عمل منشأ آلياً%",),
+    ).fetchall()
+    if not rows:
+        return 0
+    organization = db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+    refreshed = 0
+    for row in rows:
+        if not row["issued_on"] or not row["expires_on"]:
+            continue
+        employee = dict(row)
+        employee["job_title"] = employee.get("job_title_name") or employee.get("job_title") or ""
+        contract_number = row["document_number"] or f"CTR-{employee.get('employee_no') or row['employee_id']}-{str(row['issued_on']).replace('-', '')}"
+        payload = {
+            "contract_number": contract_number,
+            "contract_start_on": row["issued_on"],
+            "contract_end_on": row["expires_on"],
+            "issued_at": row["updated_at"] or now_iso(),
+            "employee": employee,
+            "organization": dict(organization or {}),
+        }
+        pdf_data_url = "data:application/pdf;base64," + base64.b64encode(build_employment_contract_pdf(payload)).decode("ascii")
+        db.execute(
+            "UPDATE employee_documents SET data_url=?,mime_type='application/pdf',file_name=?,notes=? WHERE id=?",
+            (
+                pdf_data_url,
+                f"employment-contract-{employee.get('employee_no') or row['employee_id']}.pdf",
+                "عقد عمل منشأ آلياً من بيانات الموظف وفق نموذج الإقرار الموجز؛ يمكن استبداله بنسخة موقعة من المؤسسة.",
+                row["id"],
+            ),
+        )
+        refreshed += 1
+    return refreshed
 
 
 def clean_email(value: Any) -> str:
@@ -453,6 +1071,82 @@ def parse_date(value: Any, field: str = "date") -> date:
         return date.fromisoformat(str(value))
     except (TypeError, ValueError):
         raise APIError(422, f"صيغة تاريخ «{field}» يجب أن تكون YYYY-MM-DD.", "validation_error", {"field": field})
+
+
+def add_calendar_months(value: date, months: int) -> date:
+    """Add calendar months while clamping dates such as 31 January."""
+    index = value.year * 12 + (value.month - 1) + int(months)
+    year, month_index = divmod(index, 12)
+    month = month_index + 1
+    # The first day of the following month minus one day is the last day of
+    # the requested month and avoids another dependency just for this rule.
+    next_year, next_month = (year + 1, 1) if month == 12 else (year, month + 1)
+    last_day = (date(next_year, next_month, 1) - timedelta(days=1)).day
+    return date(year, month, min(value.day, last_day))
+
+
+def completed_service_months(hire_date: str | None, as_of: date | None = None) -> int:
+    """Return completed calendar months of service for statutory leave accrual."""
+    if not hire_date:
+        return 0
+    try:
+        start = date.fromisoformat(str(hire_date)[:10])
+    except (TypeError, ValueError):
+        return 0
+    end = as_of or local_now().date()
+    if start > end:
+        return 0
+    months = (end.year - start.year) * 12 + end.month - start.month
+    if end.day < start.day:
+        months -= 1
+    return max(0, months)
+
+
+def annual_leave_accrued_to(hire_date: str | None, as_of: date) -> float:
+    """Calculate UAE annual leave accrual at a service point.
+
+    No annual paid leave is earned before six completed months.  From six
+    months through the first year the balance is two days per completed month;
+    each completed service year thereafter contributes thirty days.
+    """
+    months = completed_service_months(hire_date, as_of)
+    if months < 6:
+        return 0.0
+    if months < 12:
+        return float(months * 2)
+    return float((months // 12) * 30)
+
+
+def annual_leave_entitlement_for_year(hire_date: str | None, year: int, as_of: date | None = None) -> float:
+    """Return the earned annual entitlement attributable to one calendar year."""
+    today = as_of or local_now().date()
+    if year > today.year:
+        return 0.0
+    end = min(date(year, 12, 31), today)
+    previous_end = date(year - 1, 12, 31)
+    return max(0.0, annual_leave_accrued_to(hire_date, end) - annual_leave_accrued_to(hire_date, previous_end))
+
+
+def leave_days_excluding_public_holidays(db: sqlite3.Connection, start: date, end: date) -> float:
+    """Count requested leave days while excluding configured public holidays.
+
+    Weekly rest days remain part of the requested calendar range.  Only dates
+    explicitly confirmed by HR in ``public_holidays`` are excluded, which is
+    important for the UAE's Hijri-based holidays whose Gregorian dates change
+    each year.
+    """
+    holiday_rows = db.execute(
+        "SELECT holiday_date FROM public_holidays WHERE active=1 AND holiday_date>=? AND holiday_date<=?",
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+    holidays = {str(row["holiday_date"])[:10] for row in holiday_rows}
+    current = start
+    days = 0
+    while current <= end:
+        if current.isoformat() not in holidays:
+            days += 1
+        current += timedelta(days=1)
+    return float(days)
 
 
 def parse_clock(value: Any, field: str) -> time:
@@ -855,6 +1549,7 @@ def initialize_database(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_FILE.read_text(encoding="utf-8")
     db = open_db(db_path)
+    production = os.environ.get("HR_ENV", "development").strip().lower() in {"prod", "production"}
     try:
         with db:
             db.executescript(schema)
@@ -894,6 +1589,9 @@ def initialize_database(db_path: Path) -> None:
                     "address_area": "TEXT NOT NULL DEFAULT ''", "address_street": "TEXT NOT NULL DEFAULT ''",
                     "address_building": "TEXT NOT NULL DEFAULT ''", "address_po_box": "TEXT NOT NULL DEFAULT ''",
                     "address_notes": "TEXT NOT NULL DEFAULT ''",
+                    "basic_salary": "REAL NOT NULL DEFAULT 0", "housing_allowance": "REAL NOT NULL DEFAULT 0",
+                    "transport_allowance": "REAL NOT NULL DEFAULT 0", "profession_allowance": "REAL NOT NULL DEFAULT 0",
+                    "other_allowance": "REAL NOT NULL DEFAULT 0", "manual_allowances_json": "TEXT NOT NULL DEFAULT '[]'",
                 },
                 "users": {
                     "must_change_password": "INTEGER NOT NULL DEFAULT 0",
@@ -987,6 +1685,15 @@ def initialize_database(db_path: Path) -> None:
             db.execute("UPDATE organization SET visual_identity_interval_seconds=20 WHERE visual_identity_interval_seconds NOT BETWEEN 5 AND 300")
             db.execute("UPDATE organization SET visual_identity_overlay=58 WHERE visual_identity_overlay NOT BETWEEN 20 AND 90")
             db.execute("UPDATE employees SET marital_status='unspecified' WHERE marital_status NOT IN ('unspecified','single','married','divorced','widowed','separated')")
+            # Older profiles stored one gross salary value only. Preserve that
+            # value as the basic salary so the new detailed breakdown remains
+            # backward-compatible and the gross total does not change.
+            db.execute(
+                "UPDATE employees SET basic_salary=salary WHERE COALESCE(basic_salary,0)=0 AND COALESCE(salary,0)>0 "
+                "AND COALESCE(housing_allowance,0)=0 AND COALESCE(transport_allowance,0)=0 "
+                "AND COALESCE(profession_allowance,0)=0 AND COALESCE(other_allowance,0)=0"
+            )
+            db.execute("UPDATE employees SET manual_allowances_json='[]' WHERE manual_allowances_json IS NULL OR TRIM(manual_allowances_json)=''")
             db.execute("UPDATE salary_certificates SET request_status='issued' WHERE request_status IS NULL OR request_status NOT IN ('requested','approved','rejected','issued')")
             db.execute(
                 """UPDATE leave_requests
@@ -1106,7 +1813,10 @@ def initialize_database(db_path: Path) -> None:
                 "INSERT OR IGNORE INTO shifts(name,start_time,end_time,break_minutes,working_days,rest_days,grace_minutes,daily_limit_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 ("الدوام الإداري", "08:00", "17:00", 60, "[0,1,2,3,4]", "[5,6]", 10, 480, stamp, stamp),
             )
-            employee_seed = [
+            # Demo identities are local fixtures only. Never create them in a
+            # production database; the first administrator is bootstrapped
+            # explicitly from secret environment variables below.
+            employee_seed = [] if production else [
                 ("EMP-1001", "خالد المنصوري", "gm@demo.ae", "المدير العام", "G-15", gm_dept, None, 45000),
                 ("EMP-1002", "مريم الهاشمي", "manager@demo.ae", "مديرة العمليات", "G-12", ops_dept, None, 28000),
                 ("EMP-1003", "ليلى الحمادي", "hr@demo.ae", "مديرة الموارد البشرية", "G-12", hr_dept, None, 26000),
@@ -1125,30 +1835,31 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("UPDATE employees SET job_title_id=COALESCE(job_title_id,?),job_grade_id=COALESCE(job_grade_id,?) WHERE employee_no=?", (title_id, grade_id, employee_no))
             for title_row in db.execute("SELECT id,name FROM job_titles").fetchall():
                 seed_job_goal_templates(db, int(title_row["id"]), str(title_row["name"]), stamp)
-            gm_emp = employee_ids["EMP-1001"]
-            manager_emp = employee_ids["EMP-1002"]
-            hr_emp = employee_ids["EMP-1003"]
-            regular_emp = employee_ids["EMP-1024"]
-            db.execute("UPDATE employees SET manager_id=? WHERE id IN (?,?)", (gm_emp, manager_emp, hr_emp))
-            db.execute("UPDATE employees SET manager_id=? WHERE id=?", (manager_emp, regular_emp))
-            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (gm_emp, gm_dept))
-            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (manager_emp, ops_dept))
-            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (hr_emp, hr_dept))
-            db.execute("UPDATE branches SET manager_employee_id=? WHERE id=?", (manager_emp, branch_id))
-            admin_user = seed_user(db, "admin@demo.ae", "Admin@123", "مدير النظام", "admin", None)
-            db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (admin_user,))
-            seed_user(db, "hr@demo.ae", "HR@12345", "ليلى الحمادي", "hr", hr_emp)
-            seed_user(db, "employee@demo.ae", "Emp@12345", "أحمد الراشدي", "employee", regular_emp)
-            seed_user(db, "manager@demo.ae", "Manager@12345", "مريم الهاشمي", "manager", manager_emp)
-            seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "general_manager", gm_emp)
-            shift_id = db.execute("SELECT id FROM shifts WHERE name='الدوام الإداري'").fetchone()[0]
-            for emp_id in employee_ids.values():
-                exists = db.execute("SELECT 1 FROM employee_shift_assignments WHERE employee_id=?", (emp_id,)).fetchone()
-                if not exists:
-                    db.execute(
-                        "INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,created_by,created_at) VALUES(?,?,?,?,?)",
-                        (emp_id, shift_id, "2023-01-01", admin_user, stamp),
-                    )
+            if employee_ids:
+                gm_emp = employee_ids["EMP-1001"]
+                manager_emp = employee_ids["EMP-1002"]
+                hr_emp = employee_ids["EMP-1003"]
+                regular_emp = employee_ids["EMP-1024"]
+                db.execute("UPDATE employees SET manager_id=? WHERE id IN (?,?)", (gm_emp, manager_emp, hr_emp))
+                db.execute("UPDATE employees SET manager_id=? WHERE id=?", (manager_emp, regular_emp))
+                db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (gm_emp, gm_dept))
+                db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (manager_emp, ops_dept))
+                db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (hr_emp, hr_dept))
+                db.execute("UPDATE branches SET manager_employee_id=? WHERE id=?", (manager_emp, branch_id))
+                admin_user = seed_user(db, "admin@demo.ae", "Admin@123", "مدير النظام", "admin", None)
+                db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (admin_user,))
+                seed_user(db, "hr@demo.ae", "HR@12345", "ليلى الحمادي", "hr", hr_emp)
+                seed_user(db, "employee@demo.ae", "Emp@12345", "أحمد الراشدي", "employee", regular_emp)
+                seed_user(db, "manager@demo.ae", "Manager@12345", "مريم الهاشمي", "manager", manager_emp)
+                seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "general_manager", gm_emp)
+                shift_id = db.execute("SELECT id FROM shifts WHERE name='الدوام الإداري'").fetchone()[0]
+                for emp_id in employee_ids.values():
+                    exists = db.execute("SELECT 1 FROM employee_shift_assignments WHERE employee_id=?", (emp_id,)).fetchone()
+                    if not exists:
+                        db.execute(
+                            "INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,created_by,created_at) VALUES(?,?,?,?,?)",
+                            (emp_id, shift_id, "2023-01-01", admin_user, stamp),
+                        )
             leave_seed = [
                 ("annual", "إجازة سنوية", 30, 0, 0, 1),
                 ("sick", "إجازة مرضية", 90, 0, 1, 1),
@@ -1166,12 +1877,27 @@ def initialize_database(db_path: Path) -> None:
                         "INSERT OR IGNORE INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)",
                         (emp_id, leave["id"], current_year, leave["annual_entitlement"]),
                     )
+            if production and db.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+                bootstrap_email = os.environ.get("HR_BOOTSTRAP_ADMIN_EMAIL", "").strip().lower()
+                bootstrap_password = os.environ.get("HR_BOOTSTRAP_ADMIN_PASSWORD", "")
+                bootstrap_name = os.environ.get("HR_BOOTSTRAP_ADMIN_NAME", "مدير النظام").strip() or "مدير النظام"
+                if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", bootstrap_email):
+                    raise RuntimeError("Production database has no users. Set HR_BOOTSTRAP_ADMIN_EMAIL to a valid email address for the first start.")
+                if not bootstrap_password:
+                    raise RuntimeError("Production database has no users. Set HR_BOOTSTRAP_ADMIN_PASSWORD for the first start.")
+                try:
+                    validate_password_strength(bootstrap_password)
+                except APIError as exc:
+                    raise RuntimeError(f"HR_BOOTSTRAP_ADMIN_PASSWORD is too weak: {exc.message}") from exc
+                bootstrap_id = seed_user(db, bootstrap_email, bootstrap_password, bootstrap_name, "admin", None)
+                db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (bootstrap_id,))
             db.execute(
                 "INSERT OR IGNORE INTO evaluation_cycles(year,name,starts_on,ends_on,active) VALUES(?,?,?,?,1)",
                 (current_year, f"تقييم الأداء {current_year}", f"{current_year}-01-01", f"{current_year}-12-31"),
             )
             migrate_evaluation_cycles_v51(db, backfill_v50_goals)
             migrate_nonterminal_legacy_evaluations(db)
+            refresh_legacy_generated_contracts(db)
             process_evaluation_reminders(db)
     finally:
         db.close()
@@ -1348,9 +2074,70 @@ EMPLOYEE_SENSITIVE_FIELDS = (
     "address_building", "address_po_box", "address_notes",
 )
 
+SALARY_COMPONENT_FIELDS = (
+    "basic_salary", "housing_allowance", "transport_allowance",
+    "profession_allowance", "other_allowance",
+)
+
+
+def normalize_manual_allowances(value: Any) -> list[dict[str, Any]]:
+    """Return safe, printable custom salary allowance rows."""
+    raw = value
+    if isinstance(raw, str):
+        raw = parse_json_text(raw, [])
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in raw[:20]:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("label") or "").strip()[:120]
+        if not name:
+            continue
+        try:
+            amount = float(item.get("amount") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount < 0 or amount > 100_000_000:
+            continue
+        result.append({"name": name, "amount": round(amount, 2)})
+    return result
+
+
+def salary_breakdown_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    """Build a consistent salary breakdown and gross total from an employee row."""
+    data = dict(row) if isinstance(row, sqlite3.Row) else row
+    components = {
+        "basic_salary": round(float(data.get("basic_salary") or 0), 2),
+        "housing_allowance": round(float(data.get("housing_allowance") or 0), 2),
+        "transport_allowance": round(float(data.get("transport_allowance") or 0), 2),
+        "profession_allowance": round(float(data.get("profession_allowance") or 0), 2),
+        "other_allowance": round(float(data.get("other_allowance") or 0), 2),
+    }
+    manual = normalize_manual_allowances(data.get("manual_allowances_json", data.get("manual_allowances", [])))
+    custom_total = round(sum(item["amount"] for item in manual), 2)
+    total = round(sum(components.values()) + custom_total, 2)
+    lines = [
+        {"code": "basic_salary", "name": "الراتب الأساسي", "name_en": "Basic salary", "amount": components["basic_salary"]},
+        {"code": "housing_allowance", "name": "بدل السكن", "name_en": "Housing allowance", "amount": components["housing_allowance"]},
+        {"code": "transport_allowance", "name": "بدل المواصلات", "name_en": "Transport allowance", "amount": components["transport_allowance"]},
+        {"code": "profession_allowance", "name": "بدل طبيعة مهنة", "name_en": "Profession allowance", "amount": components["profession_allowance"]},
+        {"code": "other_allowance", "name": "بدل آخر", "name_en": "Other allowance", "amount": components["other_allowance"]},
+    ]
+    lines.extend({"code": "manual", "name": item["name"], "name_en": item["name"], "amount": item["amount"]} for item in manual)
+    return {
+        **components,
+        "manual_allowances": manual,
+        "custom_allowances_total": custom_total,
+        "allowances_total": round(sum(components[key] for key in SALARY_COMPONENT_FIELDS if key != "basic_salary") + custom_total, 2),
+        "total": total,
+        "lines": lines,
+    }
+
 
 def employee_query(include_salary: bool = True, include_sensitive: bool = False) -> str:
     salary = "e.salary" if include_salary else "NULL AS salary"
+    salary_components = ",e.basic_salary,e.housing_allowance,e.transport_allowance,e.profession_allowance,e.other_allowance,e.manual_allowances_json" if include_salary else ",NULL AS basic_salary,NULL AS housing_allowance,NULL AS transport_allowance,NULL AS profession_allowance,NULL AS other_allowance,NULL AS manual_allowances_json"
     sensitive = "," + ",".join(f"e.{field}" for field in EMPLOYEE_SENSITIVE_FIELDS) if include_sensitive else ""
     emergency_count = "," + "(SELECT COUNT(*) FROM employee_emergency_contacts ec WHERE ec.employee_id=e.id AND ec.archived=0) AS emergency_contact_count" if include_sensitive else ""
     return f"""
@@ -1358,7 +2145,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
                COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
-               e.manager_id,m.full_name AS manager_name,e.hire_date,e.qualification,e.nationality,{salary},e.photo_data,e.active{sensitive}{emergency_count},
+               e.manager_id,m.full_name AS manager_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active{sensitive}{emergency_count},
                (SELECT ed.issued_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_start_on,
                (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
                e.created_at,e.updated_at,
@@ -1379,6 +2166,14 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return None
     data = dict(row)
     data["active"] = bool(data["active"])
+    if "basic_salary" in data and data.get("basic_salary") is not None:
+        breakdown = salary_breakdown_from_row(data)
+        data["salary_breakdown"] = breakdown
+        data["salary_total"] = breakdown["total"]
+        # Keep the legacy field as the canonical gross salary for existing
+        # payroll/certificate consumers while making the detailed lines public.
+        if data.get("salary") is not None:
+            data["salary"] = breakdown["total"]
     if "birth_date" in data:
         data["age_years"] = None
         if data.get("birth_date"):
@@ -1593,10 +2388,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/overtime", self.api_overtime_post),
                     ("POST", r"/api/overtime/(\d+)/decision", self.api_overtime_decision),
                     ("GET", r"/api/leaves/types", self.api_leave_types),
+                    ("GET", r"/api/leaves/holidays", self.api_leave_holidays_get),
+                    ("POST", r"/api/leaves/holidays", self.api_leave_holiday_post),
+                    ("PATCH", r"/api/leaves/holidays/(\d+)", self.api_leave_holiday_patch),
+                    ("DELETE", r"/api/leaves/holidays/(\d+)", self.api_leave_holiday_delete),
                     ("GET", r"/api/leaves/balances", self.api_leave_balances),
                     ("GET", r"/api/leaves/requests", self.api_leave_requests_get),
                     ("POST", r"/api/leaves/requests", self.api_leave_requests_post),
                     ("POST", r"/api/leaves/requests/(\d+)/decision", self.api_leave_request_decision),
+                    ("GET", r"/api/leaves/sales", self.api_leave_sales_get),
+                    ("POST", r"/api/leaves/sales", self.api_leave_sales_post),
+                    ("POST", r"/api/leaves/sales/(\d+)/decision", self.api_leave_sale_decision),
                     ("GET", r"/api/evaluation-cycles", self.api_evaluation_cycles_get),
                     ("POST", r"/api/evaluation-cycles", self.api_evaluation_cycle_post),
                     ("GET", r"/api/evaluation-cycles/(\d+)", self.api_evaluation_cycle_get),
@@ -1832,6 +2634,128 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 return None
             manager_id = row["manager_id"] or row["manager_employee_id"]
             return int(manager_id) if manager_id and int(manager_id) != employee_id else None
+
+        def sync_manager_assignment_workflows(
+            self,
+            employee_id: int,
+            previous_manager_id: int | None,
+            new_manager_id: int | None,
+            actor_user_id: int,
+        ) -> None:
+            """Move pending workflow ownership when an employee's manager changes.
+
+            The employee row is the source of truth for the reporting line, but
+            submitted evaluations and leave requests keep a snapshot of the
+            approver.  Keep those snapshots aligned while they are still
+            actionable; completed manager reviews remain immutable history.
+            """
+            old_id = int(previous_manager_id) if previous_manager_id else None
+            next_id = int(new_manager_id) if new_manager_id else None
+            if old_id == next_id:
+                return
+            stamp = now_iso()
+            next_user = self.db.execute(
+                "SELECT id FROM users WHERE employee_id=? AND active=1",
+                (next_id,),
+            ).fetchone() if next_id else None
+            pending_evaluations = self.db.execute(
+                """SELECT id,status,manager_employee_id FROM evaluations
+                     WHERE employee_id=? AND workflow_version>=2
+                       AND status IN ('submitted','returned')""",
+                (employee_id,),
+            ).fetchall()
+            for evaluation in pending_evaluations:
+                evaluation_id = int(evaluation["id"])
+                self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=? AND step_no=1", (evaluation_id,))
+                if next_id:
+                    self.db.execute(
+                        """INSERT INTO evaluation_approvals
+                           (evaluation_id,step_no,approver_employee_id,status,comment,decided_at,created_at)
+                           VALUES(?,1,?,'pending','',NULL,?)""",
+                        (evaluation_id, next_id, stamp),
+                    )
+                self.db.execute(
+                    """UPDATE evaluations SET manager_employee_id=?,status='submitted',current_step=1,
+                              weighted_score=NULL,rating=NULL,manager_report='',manager_submitted_at=NULL,
+                              hr_comment='',updated_at=? WHERE id=?""",
+                    (next_id, stamp, evaluation_id),
+                )
+                audit(
+                    self.db,
+                    actor_user_id,
+                    "evaluation.manager_reassigned",
+                    "evaluation",
+                    evaluation_id,
+                    {"from_manager_employee_id": old_id, "to_manager_employee_id": next_id, "reason": "employee_manager_changed"},
+                )
+            # Draft evaluations have no approval decision to preserve, but must
+            # still carry the new manager so the next submission routes there.
+            self.db.execute(
+                """UPDATE evaluations SET manager_employee_id=?,updated_at=?
+                     WHERE employee_id=? AND workflow_version>=2 AND status='draft'""",
+                (next_id, stamp, employee_id),
+            )
+            pending_leaves = self.db.execute(
+                """SELECT id FROM leave_requests
+                     WHERE employee_id=? AND status='submitted' AND manager_decision='pending'""",
+                (employee_id,),
+            ).fetchall()
+            if pending_leaves:
+                self.db.execute(
+                    """UPDATE leave_requests SET manager_employee_id=?,updated_at=?
+                         WHERE employee_id=? AND status='submitted' AND manager_decision='pending'""",
+                    (next_id, stamp, employee_id),
+                )
+            if next_user:
+                evaluation_count = len(pending_evaluations)
+                leave_count = len(pending_leaves)
+                if evaluation_count or leave_count:
+                    create_internal_notification(
+                        self.db,
+                        actor_user_id,
+                        [int(next_user["id"])],
+                        "تم تحديث نطاق مسؤوليتك",
+                        f"تم إسناد {evaluation_count} تقييم و{leave_count} طلب إجازة معلّق إلى نطاقك بعد تحديث المسؤول المباشر.",
+                    )
+            audit(
+                self.db,
+                actor_user_id,
+                "employee.manager_assignment_sync",
+                "employee",
+                employee_id,
+                {
+                    "from_manager_employee_id": old_id,
+                    "to_manager_employee_id": next_id,
+                    "pending_evaluations": len(pending_evaluations),
+                    "pending_leaves": len(pending_leaves),
+                },
+            )
+
+        def sync_department_manager_workflows(
+            self,
+            department_id: int,
+            previous_manager_id: int | None,
+            new_manager_id: int | None,
+            actor_user_id: int,
+        ) -> None:
+            """Re-route employees who inherit their manager from a department.
+
+            An explicit employee.manager_id always wins over the department
+            manager, so only employees without an explicit manager are moved.
+            """
+            old_id = int(previous_manager_id) if previous_manager_id else None
+            next_id = int(new_manager_id) if new_manager_id else None
+            if old_id == next_id:
+                return
+            employee_ids = [
+                int(row["id"])
+                for row in self.db.execute(
+                    "SELECT id FROM employees WHERE department_id=? AND active=1 AND manager_id IS NULL",
+                    (department_id,),
+                ).fetchall()
+            ]
+            for employee_id in employee_ids:
+                self.sync_manager_assignment_workflows(employee_id, old_id, next_id, actor_user_id)
 
         def may_access_employee(self, employee_id: int, broad_permission: str = "employee.view") -> bool:
             user = self.current_user(True)
@@ -2357,15 +3281,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_department_patch(self, department_id: int) -> None:
             user = self.require_permission("department.manage")
-            if not self.db.execute("SELECT 1 FROM departments WHERE id=?", (department_id,)).fetchone():
+            existing = self.db.execute("SELECT * FROM departments WHERE id=?", (department_id,)).fetchone()
+            if not existing:
                 raise APIError(404, "القسم غير موجود.", "not_found")
             values = self.parse_department(self.read_json(), True)
             if not values:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            previous_manager_id = int(existing["manager_employee_id"]) if existing["manager_employee_id"] else None
             values["updated_at"] = now_iso()
             try:
                 with self.db:
                     self.db.execute("UPDATE departments SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), department_id))
+                    if "manager_employee_id" in values:
+                        self.sync_department_manager_workflows(
+                            department_id,
+                            previous_manager_id,
+                            int(values["manager_employee_id"]) if values["manager_employee_id"] else None,
+                            int(user["id"]),
+                        )
                     audit(self.db, user["id"], "department.update", "department", department_id, values)
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "تعذر تحديث القسم بسبب تعارض البيانات.", "department_conflict") from exc
@@ -2388,10 +3321,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not self.db.execute("SELECT 1 FROM departments WHERE id=? AND active=1", (department_id,)).fetchone():
                 raise APIError(404, "القسم غير موجود أو غير نشط.", "not_found")
             employee_id = as_int(self.read_json().get("employee_id"), "employee_id", 1)
+            previous_manager_id = self.direct_manager_employee_id(employee_id)
             with self.db:
                 result = self.db.execute("UPDATE employees SET department_id=?,updated_at=? WHERE id=?", (department_id, now_iso(), employee_id))
                 if not result.rowcount:
                     raise APIError(404, "الموظف غير موجود.", "not_found")
+                self.sync_manager_assignment_workflows(
+                    employee_id,
+                    previous_manager_id,
+                    self.direct_manager_employee_id(employee_id),
+                    int(user["id"]),
+                )
                 audit(self.db, user["id"], "department.assign_employee", "employee", employee_id, {"department_id": department_id})
             self.send_json(200, {"employee": normalize_employee(self.db.execute(employee_query(True) + " WHERE e.id=?", (employee_id,)).fetchone())})
 
@@ -3239,10 +4179,34 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if marital_status not in {"unspecified", "single", "married", "divorced", "widowed", "separated"}:
                     raise APIError(422, "الحالة الاجتماعية غير صالحة.", "validation_error", {"field": "marital_status"})
                 result["marital_status"] = marital_status
+            salary_component_input = any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
+            if salary_component_input or not partial:
+                for key in SALARY_COMPONENT_FIELDS:
+                    if key in data or not partial:
+                        result[key] = as_float(data.get(key, 0), key, 0, 100_000_000)
+                if "manual_allowances" in data or "manual_allowances_json" in data or not partial:
+                    manual_value = data.get("manual_allowances", data.get("manual_allowances_json", []))
+                    manual = normalize_manual_allowances(manual_value)
+                    if isinstance(manual_value, list) and len(manual) != len(manual_value):
+                        raise APIError(422, "يوجد بدل يدوي غير صالح.", "validation_error", {"field": "manual_allowances"})
+                    result["manual_allowances_json"] = json_text(manual)
             if "salary" in data:
                 result["salary"] = as_float(data["salary"], "salary", 0, 100_000_000)
             elif not partial:
                 result["salary"] = 0
+            if salary_component_input or not partial:
+                manual = normalize_manual_allowances(result.get("manual_allowances_json", []))
+                total = sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS) + sum(item["amount"] for item in manual)
+                result["salary"] = round(total, 2)
+            elif "salary" in data and not any(key in data for key in SALARY_COMPONENT_FIELDS):
+                # Legacy callers can still set one gross value; it is treated
+                # as the basic salary so the new breakdown remains coherent.
+                result["basic_salary"] = result["salary"]
+                result["housing_allowance"] = 0.0
+                result["transport_allowance"] = 0.0
+                result["profession_allowance"] = 0.0
+                result["other_allowance"] = 0.0
+                result["manual_allowances_json"] = "[]"
             if "photo_data" in data:
                 result["photo_data"] = validate_data_url(data["photo_data"], "صورة الموظف")
             if "active" in data:
@@ -3271,31 +4235,63 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return start, end
 
         def sync_employee_contract(self, employee_id: int, dates: tuple[str, str], user_id: int, stamp: str) -> int:
-            """Create or update the active contract record used by card validity."""
+            """Create or update the active contract record used by card validity.
+
+            Profile entry is enough to create a printable PDF contract.  If HR
+            later uploads a signed contract, the signed file is preserved while
+            the validity dates continue to be synchronized from the profile.
+            """
             start, end = dates
             row = self.db.execute(
-                "SELECT id FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC LIMIT 1",
+                "SELECT * FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC LIMIT 1",
                 (employee_id,),
             ).fetchone()
+            employee = self.db.execute(
+                """SELECT e.*,jt.name AS job_title_name,d.name AS department_name,b.name AS branch_name
+                   FROM employees e LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+                   LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN branches b ON b.id=e.branch_id
+                   WHERE e.id=?""",
+                (employee_id,),
+            ).fetchone()
+            organization = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            employee_data = dict(employee or {})
+            employee_data["job_title"] = employee_data.get("job_title_name") or employee_data.get("job_title") or ""
+            contract_number = f"CTR-{employee_data.get('employee_no') or employee_id}-{start.replace('-', '')}"
+            contract_payload = {
+                "contract_number": contract_number,
+                "contract_start_on": start,
+                "contract_end_on": end,
+                "issued_at": stamp,
+                "employee": employee_data,
+                "organization": dict(organization or {}),
+            }
+            pdf = build_employment_contract_pdf(contract_payload)
+            pdf_data_url = "data:application/pdf;base64," + base64.b64encode(pdf).decode("ascii")
+            generated_note = "عقد عمل منشأ آلياً من بيانات الموظف وفق نموذج الإقرار الموجز؛ يمكن استبداله بنسخة موقعة من المؤسسة."
+            keep_uploaded_file = bool(row and row["data_url"] and row["mime_type"] == "application/pdf" and not str(row["notes"] or "").startswith(("سجل عقد العمل أُنشئ", "عقد عمل منشأ آلياً")))
             if row:
-                self.db.execute(
-                    "UPDATE employee_documents SET issued_on=?,expires_on=?,no_expiry=0,updated_at=? WHERE id=?",
-                    (start, end, stamp, row["id"]),
-                )
+                if keep_uploaded_file:
+                    self.db.execute("UPDATE employee_documents SET issued_on=?,expires_on=?,no_expiry=0,updated_at=? WHERE id=?", (start, end, stamp, row["id"]))
+                else:
+                    self.db.execute(
+                        """UPDATE employee_documents SET title=?,document_number=?,issuer=?,issued_on=?,expires_on=?,no_expiry=0,
+                           file_name=?,mime_type=?,data_url=?,notes=?,updated_at=? WHERE id=?""",
+                        (f"عقد العمل - {employee_data.get('full_name') or ''}".strip(" -"), contract_number,
+                         organization["legal_name"] if organization else "", start, end, f"employment-contract-{employee_data.get('employee_no') or employee_id}.pdf",
+                         "application/pdf", pdf_data_url, generated_note, stamp, row["id"]),
+                    )
                 document_id = int(row["id"])
             else:
-                # A contract document is allowed to be created from the profile
-                # dates alone.  The optional upload field can later replace it
-                # with the signed PDF/image without losing the validity window.
                 self.db.execute(
                     """INSERT INTO employee_documents(
                            employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,
                            file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at
                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        employee_id, "contract", "عقد العمل", "", "", start, end, 0,
-                        "contract-record.png", "image/png", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-                        "سجل عقد العمل أُنشئ من حقول بيانات الموظف.", 0, 1, user_id, stamp, stamp,
+                        employee_id, "contract", f"عقد العمل - {employee_data.get('full_name') or ''}".strip(" -"), contract_number,
+                        organization["legal_name"] if organization else "", start, end, 0,
+                        f"employment-contract-{employee_data.get('employee_no') or employee_id}.pdf", "application/pdf", pdf_data_url,
+                        generated_note, 0, 1, user_id, stamp, stamp,
                     ),
                 )
                 document_id = int(self.db.execute("SELECT last_insert_rowid()").fetchone()[0])
@@ -3334,8 +4330,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                             (email, values["full_name"], role, digest, salt, employee_id, stamp, stamp),
                         )
-                    for leave in self.db.execute("SELECT id,annual_entitlement FROM leave_types WHERE active=1"):
-                        self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (employee_id, leave["id"], local_now().year, leave["annual_entitlement"]))
+                    for leave in self.db.execute("SELECT id,code,annual_entitlement FROM leave_types WHERE active=1"):
+                        # Annual paid leave is earned from service, never granted
+                        # as an opening balance when a profile is created.
+                        opening_entitlement = 0 if leave["code"] == "annual" else leave["annual_entitlement"]
+                        self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (employee_id, leave["id"], local_now().year, opening_entitlement))
                     self.replace_employee_languages(employee_id, languages, stamp)
                     for cycle in self.db.execute("SELECT id,announced_by FROM evaluation_cycles WHERE status='announced'").fetchall():
                         enroll_evaluation_cycle(self.db, int(cycle["id"]), cycle["announced_by"] or user["id"], notify=True)
@@ -3433,10 +4432,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_employee_patch(self, employee_id: int) -> None:
             user = self.current_user(True)
             assert user is not None
-            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+            existing_employee = self.db.execute("SELECT * FROM employees WHERE id=?", (employee_id,)).fetchone()
+            if not existing_employee:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             data = self.read_json()
             values = self.parse_employee(data, partial=True)
+            salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
+            if salary_touched:
+                merged_salary = {key: float(existing_employee[key] or 0) for key in SALARY_COMPONENT_FIELDS}
+                for key in SALARY_COMPONENT_FIELDS:
+                    if key in values:
+                        merged_salary[key] = float(values[key] or 0)
+                manual_value = values.get("manual_allowances_json", existing_employee["manual_allowances_json"])
+                manual = normalize_manual_allowances(manual_value)
+                for key, value in merged_salary.items():
+                    values[key] = round(value, 2)
+                values["manual_allowances_json"] = json_text(manual)
+                values["salary"] = round(sum(merged_salary.values()) + sum(item["amount"] for item in manual), 2)
             current_contract = None
             if any(key in data for key in ("contract_start_on", "contract_end_on")):
                 current_contract = self.db.execute(
@@ -3457,9 +4469,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
             if not values and languages is None and contract_dates is None:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            reporting_line_changed = "manager_id" in data or "department_id" in data
+            previous_manager_id = self.direct_manager_employee_id(employee_id) if reporting_line_changed else None
             stamp = now_iso()
             if values:
                 values["updated_at"] = stamp
+            previous_grade = str(existing_employee["job_grade"] or "").strip()
+            next_grade = str(values.get("job_grade") or previous_grade).strip()
+            grade_changed = bool(next_grade and previous_grade and next_grade != previous_grade)
             try:
                 with self.db:
                     if values:
@@ -3468,6 +4485,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         self.replace_employee_languages(employee_id, languages, stamp)
                     if contract_dates:
                         self.sync_employee_contract(employee_id, contract_dates, user["id"], stamp)
+                    if reporting_line_changed:
+                        self.sync_manager_assignment_workflows(
+                            employee_id,
+                            previous_manager_id,
+                            self.direct_manager_employee_id(employee_id),
+                            int(user["id"]),
+                        )
+                    if grade_changed:
+                        employee_account = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
+                        if employee_account:
+                            create_internal_notification(
+                                self.db, user["id"], [int(employee_account["id"])],
+                                "تهانينا بالترقية",
+                                f"نبارك لك ترقيتك من الدرجة {previous_grade} إلى الدرجة {next_grade}. نتمنى لك المزيد من التقدم والنجاح في مهام عملك، وأن تكون هذه الترقية حافزاً لك لمزيد من العطاء والتميز.",
+                            )
+                        audit(self.db, user["id"], "employee.promotion", "employee", employee_id, {"from_grade": previous_grade, "to_grade": next_grade})
                     audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
@@ -3571,26 +4604,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, {"contact": self.serialize_emergency_contact(row)})
 
         def api_employee_emergency_contact_delete(self, contact_id: int) -> None:
-            user = self.require_permission("employee.emergency.manage")
-            current = self.db.execute("SELECT * FROM employee_emergency_contacts WHERE id=? AND archived=0", (contact_id,)).fetchone()
-            if current is None:
-                raise APIError(404, "جهة اتصال الطوارئ غير موجودة.", "not_found")
-            employee_id = int(current["employee_id"])
-            stamp = now_iso()
-            with self.db:
-                self.db.execute("UPDATE employee_emergency_contacts SET archived=1,is_primary=0,archived_by=?,archived_at=?,updated_at=? WHERE id=?", (user["id"], stamp, stamp, contact_id))
-                if current["is_primary"]:
-                    replacement = self.db.execute("SELECT id FROM employee_emergency_contacts WHERE employee_id=? AND archived=0 ORDER BY id LIMIT 1", (employee_id,)).fetchone()
-                    if replacement:
-                        self.db.execute("UPDATE employee_emergency_contacts SET is_primary=1,updated_at=? WHERE id=?", (stamp, replacement["id"]))
-                audit(self.db, user["id"], "employee.emergency_contact.archive", "employee", employee_id, {"contact_id": contact_id})
-            self.send_json(200, {"archived": True, "id": contact_id})
+            self.require_permission("employee.emergency.manage")
+            raise APIError(405, "لا يمكن حذف أو أرشفة جهة اتصال الطوارئ. استخدم التعديل فقط.", "emergency_contact_edit_only")
 
         def api_employee_documents_get(self, employee_id: int) -> None:
             if not self.may_access_employee(employee_id): raise APIError(403,"لا يمكنك عرض مستندات هذا الموظف.","forbidden")
             user=self.current_user(True); assert user is not None
-            visible_only=user.get("employee_id")==employee_id and not has_permission(self.db,user,"employee_document.manage")
+            can_manage_documents = has_permission(self.db, user, "employee_document.manage")
+            visible_only=user.get("employee_id")==employee_id and not can_manage_documents
             conditions=["employee_id=?"]; params:[Any]=[employee_id]
+            # Contract PDFs are restricted records.  Employees may see the
+            # contract dates in the employment panel, but never the document
+            # contents or its direct download endpoint.
+            if not can_manage_documents:
+                conditions.append("document_type<>'contract'")
             if visible_only: conditions.append("visible_to_employee=1")
             if self.query.get("type"): conditions.append("document_type=?"); params.append(self.query["type"])
             if self.query.get("archived") in {"0","1"}: conditions.append("archived=?"); params.append(int(self.query["archived"]))
@@ -3630,16 +4657,40 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if document_type=="contract" and (not issued_on or no_expiry or not expires_on): raise APIError(422,"تاريخ بداية وانتهاء عقد العمل مطلوبان لإصدار البطاقة.","contract_dates_required")
             stamp=now_iso()
             with self.db:
-                cur=self.db.execute("""INSERT INTO employee_documents(employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at)
-                                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(employee_id,document_type,require_text(data,"title",180),optional_text(data,"document_number",120),optional_text(data,"issuer",180),issued_on,expires_on,1 if no_expiry else 0,file_name,mime_type,data_url,optional_text(data,"notes",2000),0,1 if data.get("visible_to_employee",True) else 0,user["id"],stamp,stamp))
-                audit(self.db,user["id"],"employee_document.upload","employee_document",cur.lastrowid,{"employee_id":employee_id,"document_type":document_type})
-            self.send_json(201,{"document":self.serialize_document(self.db.execute("SELECT * FROM employee_documents WHERE id=?",(cur.lastrowid,)).fetchone())})
+                title=require_text(data,"title",180)
+                document_number=optional_text(data,"document_number",120)
+                issuer=optional_text(data,"issuer",180)
+                notes=optional_text(data,"notes",2000)
+                visible=1 if data.get("visible_to_employee",True) else 0
+                generated_contract = self.db.execute(
+                    "SELECT id FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 AND notes LIKE 'عقد عمل منشأ آلياً%' ORDER BY id DESC LIMIT 1",
+                    (employee_id,),
+                ).fetchone() if document_type == "contract" else None
+                if generated_contract:
+                    self.db.execute(
+                        """UPDATE employee_documents SET title=?,document_number=?,issuer=?,issued_on=?,expires_on=?,no_expiry=?,
+                           file_name=?,mime_type=?,data_url=?,notes=?,visible_to_employee=?,uploaded_by=?,updated_at=? WHERE id=?""",
+                        (title, document_number, issuer, issued_on, expires_on, 1 if no_expiry else 0, file_name, mime_type, data_url,
+                         notes, visible, user["id"], stamp, generated_contract["id"]),
+                    )
+                    document_id = int(generated_contract["id"])
+                    audit(self.db,user["id"],"employee_document.replace_generated_contract","employee_document",document_id,{"employee_id":employee_id,"document_type":document_type})
+                else:
+                    cur=self.db.execute("""INSERT INTO employee_documents(employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at)
+                                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(employee_id,document_type,title,document_number,issuer,issued_on,expires_on,1 if no_expiry else 0,file_name,mime_type,data_url,notes,0,visible,user["id"],stamp,stamp))
+                    document_id = int(cur.lastrowid)
+                    audit(self.db,user["id"],"employee_document.upload","employee_document",document_id,{"employee_id":employee_id,"document_type":document_type})
+            self.send_json(201,{"document":self.serialize_document(self.db.execute("SELECT * FROM employee_documents WHERE id=?",(document_id,)).fetchone())})
 
         def api_document_get(self, document_id: int) -> None:
             row=self.db.execute("SELECT * FROM employee_documents WHERE id=?",(document_id,)).fetchone()
             if not row: raise APIError(404,"المستند غير موجود.","not_found")
             user=self.current_user(True); assert user is not None
-            if not self.may_access_employee(row["employee_id"]) or (user.get("employee_id")==row["employee_id"] and not row["visible_to_employee"] and not has_permission(self.db,user,"employee_document.manage")): raise APIError(403,"لا يمكنك عرض هذا المستند.","forbidden")
+            if not self.may_access_employee(row["employee_id"]): raise APIError(403,"لا يمكنك عرض هذا المستند.","forbidden")
+            if row["document_type"] == "contract" and not has_permission(self.db,user,"employee_document.manage"):
+                raise APIError(403,"محتوى عقد العمل متاح للموارد البشرية أو من يملك صلاحية مستندات الموظفين فقط.","contract_document_restricted")
+            if user.get("employee_id")==row["employee_id"] and not row["visible_to_employee"] and not has_permission(self.db,user,"employee_document.manage"):
+                raise APIError(403,"لا يمكنك عرض هذا المستند.","forbidden")
             audit(self.db,user["id"],"employee_document.view","employee_document",document_id)
             self.db.commit()
             self.send_json(200,{"document":self.serialize_document(row,True)})
@@ -3935,6 +4986,36 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             overtime = self.db.execute("SELECT * FROM overtime_requests WHERE employee_id=? ORDER BY created_at DESC LIMIT 10", (employee_id,)).fetchall()
             leaves = self.db.execute("SELECT lr.*,lt.name AS leave_type_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id WHERE lr.employee_id=? ORDER BY lr.created_at DESC LIMIT 10", (employee_id,)).fetchall()
             evaluation = self.db.execute("SELECT e.*,c.year,c.name AS cycle_name FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id WHERE e.employee_id=? ORDER BY c.year DESC LIMIT 1", (employee_id,)).fetchone()
+            gross_cents = money_cents(salary_breakdown_from_row(employee)["total"], "salary")
+            payroll_month = local_now().strftime("%Y-%m")
+            current_payroll = self.db.execute(
+                """SELECT i.basic_cents,i.allowances_cents,i.deductions_cents,i.advance_cents,i.net_cents
+                     FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id
+                    WHERE i.employee_id=? AND r.payroll_month=? AND r.status IN ('approved','paid')
+                    ORDER BY r.id DESC LIMIT 1""",
+                (employee_id, payroll_month),
+            ).fetchone()
+            if current_payroll:
+                salary_snapshot = {
+                    "month": payroll_month,
+                    "gross": cents_value(int(current_payroll["basic_cents"]) + int(current_payroll["allowances_cents"])),
+                    "advance": cents_value(current_payroll["advance_cents"]),
+                    "net": cents_value(current_payroll["net_cents"]),
+                }
+            else:
+                scheduled = self.db.execute(
+                    """SELECT COALESCE(SUM(ai.amount_cents),0)
+                         FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id
+                        WHERE a.employee_id=? AND a.status='approved'
+                          AND ai.due_month=? AND ai.status='scheduled'""",
+                    (employee_id, payroll_month),
+                ).fetchone()[0]
+                advance_cents = int(scheduled or 0)
+                salary_snapshot = {
+                    "month": payroll_month, "gross": cents_value(gross_cents),
+                    "advance": cents_value(advance_cents),
+                    "net": cents_value(max(0, gross_cents - advance_cents)),
+                }
             unread = self.db.execute(
                 """SELECT COUNT(*) FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
@@ -3943,7 +5024,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 (user["id"], now_iso()),
             ).fetchone()[0]
             self.send_json(200, {
-                "employee": normalize_employee(employee), "organization": serialize_org(org),
+                "employee": normalize_employee(employee), "organization": serialize_org(org), "salary": salary_snapshot,
                 "leave_balances": balances, "attendance_today": row_dict(attendance),
                 "overtime_requests": [dict(r) for r in overtime], "leave_requests": [self.leave_request_payload(r, user) for r in leaves],
                 "evaluation": row_dict(evaluation), "notifications_unread": unread,
@@ -4522,6 +5603,70 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     recipients.append(int(row["id"]))
             return recipients
 
+        def api_leave_holidays_get(self) -> None:
+            self.current_user(True)
+            rows = self.db.execute("SELECT * FROM public_holidays ORDER BY holiday_date,id").fetchall()
+            self.send_json(200, {"items": [dict(row) | {"active": bool(row["active"])} for row in rows]})
+
+        def api_leave_holiday_post(self) -> None:
+            user = self.require_permission("leave.approve")
+            data = self.read_json()
+            holiday_date = parse_date(data.get("holiday_date"), "holiday_date").isoformat()
+            name = require_text(data, "name", 160)
+            stamp = now_iso()
+            try:
+                with self.db:
+                    cursor = self.db.execute(
+                        "INSERT INTO public_holidays(holiday_date,name,active,created_by,created_at,updated_at) VALUES(?,?,1,?,?,?)",
+                        (holiday_date, name, user["id"], stamp, stamp),
+                    )
+            except sqlite3.IntegrityError:
+                raise APIError(409, "يوجد يوم عطلة مسجل بهذا التاريخ.", "duplicate_holiday")
+            row = self.db.execute("SELECT * FROM public_holidays WHERE id=?", (cursor.lastrowid,)).fetchone()
+            audit(self.db, user["id"], "leave_holiday.create", "public_holiday", int(cursor.lastrowid), {"holiday_date": holiday_date})
+            self.send_json(201, {"holiday": dict(row) | {"active": bool(row["active"])}})
+
+        def api_leave_holiday_patch(self, holiday_id: int) -> None:
+            user = self.require_permission("leave.approve")
+            row = self.db.execute("SELECT * FROM public_holidays WHERE id=?", (holiday_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "العطلة الرسمية غير موجودة.", "not_found")
+            data = self.read_json()
+            updates: list[str] = []
+            values: list[Any] = []
+            if "holiday_date" in data:
+                updates.append("holiday_date=?")
+                values.append(parse_date(data.get("holiday_date"), "holiday_date").isoformat())
+            if "name" in data:
+                updates.append("name=?")
+                values.append(require_text(data, "name", 160))
+            if "active" in data:
+                if not isinstance(data["active"], bool):
+                    raise APIError(422, "قيمة تفعيل العطلة غير صحيحة.", "validation_error")
+                updates.append("active=?")
+                values.append(1 if data["active"] else 0)
+            if not updates:
+                raise APIError(422, "لم يتم إرسال أي تعديل.", "validation_error")
+            stamp = now_iso()
+            values.extend([stamp, holiday_id])
+            try:
+                with self.db:
+                    self.db.execute(f"UPDATE public_holidays SET {','.join(updates)},updated_at=? WHERE id=?", values)
+            except sqlite3.IntegrityError:
+                raise APIError(409, "يوجد يوم عطلة مسجل بهذا التاريخ.", "duplicate_holiday")
+            saved = self.db.execute("SELECT * FROM public_holidays WHERE id=?", (holiday_id,)).fetchone()
+            audit(self.db, user["id"], "leave_holiday.update", "public_holiday", holiday_id)
+            self.send_json(200, {"holiday": dict(saved) | {"active": bool(saved["active"])}})
+
+        def api_leave_holiday_delete(self, holiday_id: int) -> None:
+            user = self.require_permission("leave.approve")
+            if self.db.execute("SELECT 1 FROM public_holidays WHERE id=?", (holiday_id,)).fetchone() is None:
+                raise APIError(404, "العطلة الرسمية غير موجودة.", "not_found")
+            with self.db:
+                self.db.execute("DELETE FROM public_holidays WHERE id=?", (holiday_id,))
+            audit(self.db, user["id"], "leave_holiday.delete", "public_holiday", holiday_id)
+            self.send_json(200, {"deleted": True, "id": holiday_id})
+
         def leave_request_payload(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
             data = dict(row)
             status = data.get("status")
@@ -4569,17 +5714,39 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def leave_balance_rows(self, employee_id: int, year: int) -> list[dict[str, Any]]:
             leave_types = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
+            employee = self.db.execute("SELECT hire_date FROM employees WHERE id=?", (employee_id,)).fetchone()
+            hire_date = employee["hire_date"] if employee else None
+            today = local_now().date()
             rows: list[dict[str, Any]] = []
             for leave in leave_types:
                 balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (employee_id, leave["id"], year)).fetchone()
-                entitlement = float(balance["entitlement"] if balance else leave["annual_entitlement"])
-                carried = float(balance["carried"] if balance else 0)
+                if leave["code"] == "annual":
+                    entitlement = annual_leave_entitlement_for_year(hire_date, year, today)
+                    previous_entitlement = annual_leave_entitlement_for_year(hire_date, year - 1, date(year - 1, 12, 31))
+                    previous = self.db.execute("SELECT carried,used FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (employee_id, leave["id"], year - 1)).fetchone()
+                    previous_carried = float(previous["carried"] if previous else 0)
+                    previous_used = float(previous["used"] if previous else 0)
+                    # Carry only unused entitlement from the immediately prior
+                    # year, capped at five days and never chained indefinitely.
+                    previous_fresh_remaining = max(0.0, previous_entitlement - max(0.0, previous_used - min(previous_used, previous_carried)))
+                    carried = min(5.0, previous_fresh_remaining)
+                else:
+                    entitlement = float(balance["entitlement"] if balance else leave["annual_entitlement"])
+                    carried = min(5.0, float(balance["carried"] if balance else 0))
                 used = float(balance["used"] if balance else 0)
                 pending = float(self.db.execute("SELECT COALESCE(SUM(days),0) FROM leave_requests WHERE employee_id=? AND leave_type_id=? AND status='submitted' AND substr(start_date,1,4)=?", (employee_id, leave["id"], str(year))).fetchone()[0])
+                pending_sale = 0.0
+                if leave["code"] == "annual":
+                    pending_sale = float(self.db.execute("SELECT COALESCE(SUM(days),0) FROM leave_sale_requests WHERE employee_id=? AND status='submitted'", (employee_id,)).fetchone()[0])
+                raw_available = entitlement + carried - used - pending - pending_sale
+                available = min(60.0, max(0.0, raw_available)) if leave["code"] == "annual" else max(0.0, raw_available)
                 rows.append({
                     "leave_type_id": leave["id"], "code": leave["code"], "name": leave["name"],
                     "year": year, "entitlement": entitlement, "carried": carried, "used": used,
-                    "pending": pending, "available": max(0, entitlement + carried - used - pending),
+                    "pending": pending, "pending_sale": pending_sale, "raw_available": max(0.0, raw_available), "frozen": max(0.0, raw_available - 60.0) if leave["code"] == "annual" else 0.0,
+                    "available": available, "service_months": completed_service_months(hire_date, today),
+                    "paid_eligible": completed_service_months(hire_date, today) >= 6 if leave["code"] == "annual" else bool(leave["paid"]),
+                    "accrual_note": "لا يستحق الموظف إجازة سنوية مدفوعة قبل إتمام ٦ أشهر، ويضاف يومان عن كل شهر حتى إتمام السنة." if leave["code"] == "annual" else "",
                     "requires_attachment": bool(leave["requires_attachment"]), "min_notice_days": leave["min_notice_days"], "paid": bool(leave["paid"]),
                 })
             return rows
@@ -4632,7 +5799,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "تاريخ نهاية الإجازة يسبق بدايتها.", "validation_error")
             if start.year != end.year:
                 raise APIError(422, "قسّم الطلب الذي يمتد بين سنتين إلى طلبين.", "cross_year_leave")
-            days = float((end - start).days + 1)
+            days = leave_days_excluding_public_holidays(self.db, start, end) if leave_type["code"] == "annual" else float((end - start).days + 1)
+            if days <= 0:
+                raise APIError(422, "الفترة المحددة تقع بالكامل ضمن عطل رسمية ولا تُحتسب كإجازة سنوية.", "no_leave_days")
             notice = (start - local_now().date()).days
             if notice < int(leave_type["min_notice_days"]):
                 raise APIError(422, f"هذا النوع يتطلب التقديم قبل {leave_type['min_notice_days']} أيام على الأقل.", "notice_period")
@@ -4644,6 +5813,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             overlap = self.db.execute("SELECT 1 FROM leave_requests WHERE employee_id=? AND status IN ('submitted','approved') AND start_date<=? AND end_date>=?", (employee_id, end.isoformat(), start.isoformat())).fetchone()
             if overlap:
                 raise APIError(409, "يوجد طلب إجازة متداخل مع هذه الفترة.", "overlapping_leave")
+            employee_record = self.db.execute("SELECT hire_date FROM employees WHERE id=?", (employee_id,)).fetchone()
+            hire_value = employee_record["hire_date"] if employee_record else None
+            service_months = completed_service_months(hire_value, start)
+            if leave_type["code"] == "annual" and service_months < 6:
+                eligible_on = None
+                if hire_value:
+                    hire = date.fromisoformat(str(hire_value)[:10])
+                    eligible_on = add_calendar_months(hire, 6).isoformat()
+                raise APIError(422, "لا يستحق الموظف إجازة سنوية مدفوعة قبل إتمام ٦ أشهر من الخدمة.", "annual_leave_before_eligibility", {"service_months": service_months, "eligible_on": eligible_on})
             balance = next((x for x in self.leave_balance_rows(employee_id, start.year) if x["leave_type_id"] == leave_type_id), None)
             if balance and leave_type["annual_entitlement"] > 0 and days > balance["available"]:
                 raise APIError(422, "الرصيد المتاح لا يكفي لهذا الطلب.", "insufficient_balance", {"requested": days, "available": balance["available"]})
@@ -4733,9 +5911,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         year = date.fromisoformat(request_row["start_date"]).year
                         balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["employee_id"], request_row["leave_type_id"], year)).fetchone()
                         if balance is None:
-                            self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (request_row["employee_id"], request_row["leave_type_id"], year, request_row["annual_entitlement"]))
+                            employee_record = self.db.execute("SELECT hire_date FROM employees WHERE id=?", (request_row["employee_id"],)).fetchone()
+                            entitlement = annual_leave_entitlement_for_year(employee_record["hire_date"] if employee_record else None, year, local_now().date()) if request_row["leave_type_code"] == "annual" else request_row["annual_entitlement"]
+                            self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (request_row["employee_id"], request_row["leave_type_id"], year, entitlement))
                             balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["employee_id"], request_row["leave_type_id"], year)).fetchone()
-                        available = float(balance["entitlement"] + balance["carried"] - balance["used"])
+                        rows = {item["leave_type_id"]: item for item in self.leave_balance_rows(int(request_row["employee_id"]), year)}
+                        available = float((rows.get(int(request_row["leave_type_id"])) or {}).get("available", balance["entitlement"] + balance["carried"] - balance["used"])) + float(request_row["days"])
                         if float(request_row["days"]) > available:
                             raise APIError(409, "لم يعد الرصيد كافياً لاعتماد الطلب.", "insufficient_balance", {"available": available})
                         self.db.execute("UPDATE leave_balances SET used=used+? WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["days"], request_row["employee_id"], request_row["leave_type_id"], year))
@@ -4750,6 +5931,135 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     audit(self.db, user["id"], f"leave.hr_{status}", "leave_request", request_id, {"reason": reason})
             saved = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id WHERE lr.id=?", (request_id,)).fetchone()
             self.send_json(200, {"request": self.leave_request_payload(saved, user)})
+
+        def leave_sale_payload(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+            data = dict(row)
+            data["amount"] = cents_value(data.get("amount_cents"))
+            data["daily_rate"] = cents_value(data.get("daily_rate_cents"))
+            data["can_decide"] = bool(
+                str(user.get("role")) in {"hr", "admin"}
+                and has_permission(self.db, user, "leave.approve")
+                and data.get("status") == "submitted"
+            )
+            is_own = user.get("employee_id") == data.get("employee_id")
+            if not is_own and not data["can_decide"]:
+                for key in ("amount_cents", "daily_rate_cents", "amount", "daily_rate", "reason", "decision_note"):
+                    data.pop(key, None)
+            return data
+
+        def api_leave_sales_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            is_hr = bool(str(user.get("role")) in {"hr", "admin"} and has_permission(self.db, user, "leave.approve"))
+            if is_hr:
+                rows = self.db.execute(
+                    """SELECT s.*,e.employee_no,e.full_name AS employee_name,u.display_name AS decided_by_name
+                       FROM leave_sale_requests s JOIN employees e ON e.id=s.employee_id
+                       LEFT JOIN users u ON u.id=s.decided_by ORDER BY s.created_at DESC,s.id DESC"""
+                ).fetchall()
+            else:
+                employee_id = self.own_employee_id()
+                rows = self.db.execute(
+                    """SELECT s.*,e.employee_no,e.full_name AS employee_name,u.display_name AS decided_by_name
+                       FROM leave_sale_requests s JOIN employees e ON e.id=s.employee_id
+                       LEFT JOIN users u ON u.id=s.decided_by WHERE s.employee_id=? ORDER BY s.created_at DESC,s.id DESC""",
+                    (employee_id,),
+                ).fetchall()
+            self.send_json(200, {"items": [self.leave_sale_payload(row, user) for row in rows]})
+
+        def api_leave_sales_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            days = as_float(data.get("days"), "days", 0.01, 366)
+            annual = self.db.execute("SELECT id FROM leave_types WHERE code='annual' AND active=1").fetchone()
+            if annual is None:
+                raise APIError(409, "نوع الإجازة السنوية غير مهيأ.", "annual_leave_type_missing")
+            balance = next((row for row in self.leave_balance_rows(employee_id, local_now().year) if row["leave_type_id"] == annual["id"]), None)
+            available_for_sale = float(balance.get("raw_available", balance.get("available", 0)) if balance else 0)
+            if days > available_for_sale + 1e-9:
+                raise APIError(422, "عدد الأيام المطلوب بيعها يتجاوز الرصيد المتاح للبيع.", "insufficient_balance", {"available": max(0, available_for_sale)})
+            employee = self.db.execute("SELECT employee_no,full_name,salary,basic_salary FROM employees WHERE id=?", (employee_id,)).fetchone()
+            # UAE annual-leave cash-out uses the basic monthly salary divided
+            # by 30, never the gross salary or allowances.
+            salary = Decimal(str((employee["basic_salary"] if employee and employee["basic_salary"] is not None else employee["salary"]) or 0)) if employee else Decimal("0")
+            daily_rate_cents = money_cents(salary / Decimal("30"))
+            amount_cents = money_cents((Decimal(daily_rate_cents) / Decimal("100")) * Decimal(str(days)))
+            stamp = now_iso()
+            with self.db:
+                cursor = self.db.execute(
+                    """INSERT INTO leave_sale_requests(employee_id,days,daily_rate_cents,amount_cents,reason,status,created_at,updated_at)
+                       VALUES(?,?,?,?,?,'submitted',?,?)""",
+                    (employee_id, days, daily_rate_cents, amount_cents, optional_text(data, "reason", 1000), stamp, stamp),
+                )
+                request_id = int(cursor.lastrowid)
+                recipients = self.leave_hr_recipient_ids()
+                create_internal_notification(
+                    self.db, int(user["id"]), recipients,
+                    "طلب بيع رصيد إجازة",
+                    f"قدم {employee['full_name']} ({employee['employee_no']}) طلب بيع {days:g} يوم من رصيد إجازته.",
+                )
+                audit(self.db, user["id"], "leave_sale.submit", "leave_sale_request", request_id, {"days": days, "hr_recipient_count": len(recipients)})
+            row = self.db.execute(
+                """SELECT s.*,e.employee_no,e.full_name AS employee_name,u.display_name AS decided_by_name
+                   FROM leave_sale_requests s JOIN employees e ON e.id=s.employee_id
+                   LEFT JOIN users u ON u.id=s.decided_by WHERE s.id=?""",
+                (request_id,),
+            ).fetchone()
+            self.send_json(201, {"request": self.leave_sale_payload(row, user)})
+
+        def api_leave_sale_decision(self, request_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            if not (str(user.get("role")) in {"hr", "admin"} and has_permission(self.db, user, "leave.approve")):
+                raise APIError(403, "اعتماد بيع رصيد الإجازة متاح للموارد البشرية المخولة فقط.", "forbidden")
+            row = self.db.execute("SELECT s.*,e.employee_no,e.full_name AS employee_name FROM leave_sale_requests s JOIN employees e ON e.id=s.employee_id WHERE s.id=?", (request_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "طلب بيع الرصيد غير موجود.", "not_found")
+            if row["status"] != "submitted":
+                raise APIError(409, "تم اتخاذ قرار نهائي على طلب بيع الرصيد سابقاً.", "invalid_status")
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"approve", "reject"}:
+                raise APIError(422, "القرار يجب أن يكون approve أو reject.", "validation_error")
+            note = optional_text(data, "reason", 1000)
+            if action == "reject" and not note:
+                raise APIError(422, "سبب الرفض مطلوب.", "validation_error")
+            stamp = now_iso()
+            with self.db:
+                if action == "approve":
+                    annual = self.db.execute("SELECT id FROM leave_types WHERE code='annual' AND active=1").fetchone()
+                    balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (row["employee_id"], annual["id"], local_now().year)).fetchone() if annual else None
+                    balance_rows = {item["leave_type_id"]: item for item in self.leave_balance_rows(int(row["employee_id"]), local_now().year)}
+                    balance_item = balance_rows.get(int(annual["id"])) if annual else None
+                    available = float((balance_item or {}).get("raw_available", (balance_item or {}).get("available", 0))) + float(row["days"])
+                    if float(row["days"]) > available + 1e-9:
+                        raise APIError(409, "لم يعد الرصيد كافياً لاعتماد بيع الأيام.", "insufficient_balance", {"available": max(0, available)})
+                    if balance is None and annual:
+                        employee_record = self.db.execute("SELECT hire_date FROM employees WHERE id=?", (row["employee_id"],)).fetchone()
+                        entitlement = annual_leave_entitlement_for_year(employee_record["hire_date"] if employee_record else None, local_now().year, local_now().date())
+                        self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (row["employee_id"], annual["id"], local_now().year, entitlement))
+                    if annual:
+                        self.db.execute("UPDATE leave_balances SET used=used+? WHERE employee_id=? AND leave_type_id=? AND year=?", (row["days"], row["employee_id"], annual["id"], local_now().year))
+                status = "approved" if action == "approve" else "rejected"
+                self.db.execute("UPDATE leave_sale_requests SET status=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, note, user["id"], stamp, stamp, request_id))
+                employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
+                if employee_user:
+                    create_internal_notification(
+                        self.db, int(user["id"]), [int(employee_user["id"])],
+                        "قرار طلب بيع رصيد الإجازة",
+                        f"{'اعتمدت' if action == 'approve' else 'رفضت'} الموارد البشرية طلب بيع {row['days']:g} يوم من رصيدك."
+                        + (f" السبب: {note}" if action == "reject" else f" المبلغ المحتسب: {cents_value(row['amount_cents']):,.2f}.")
+                    )
+                audit(self.db, user["id"], f"leave_sale.{status}", "leave_sale_request", request_id, {"days": row["days"], "reason": note})
+            saved = self.db.execute(
+                """SELECT s.*,e.employee_no,e.full_name AS employee_name,u.display_name AS decided_by_name
+                   FROM leave_sale_requests s JOIN employees e ON e.id=s.employee_id
+                   LEFT JOIN users u ON u.id=s.decided_by WHERE s.id=?""",
+                (request_id,),
+            ).fetchone()
+            self.send_json(200, {"request": self.leave_sale_payload(saved, user)})
 
         # Annual evaluations
         def evaluation_goal_template_scope(self) -> tuple[dict[str, Any], sqlite3.Row]:
@@ -5444,6 +6754,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             own = evaluation["employee_id"] == user.get("employee_id")
             published = self.evaluation_is_published(evaluation)
             hr_reviewer = has_permission(self.db, user, "evaluation.review")
+            manager_override = has_permission(self.db, user, "evaluation.override_manager") and str(user.get("role")) in {"hr", "admin"} and not own
             current_manager = self.direct_manager_employee_id(int(evaluation["employee_id"]))
             direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
             if own and not published and int(evaluation["workflow_version"] or 1) >= 2:
@@ -5457,7 +6768,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             score_total = sum(float(goal.get("awarded_points") or 0) for goal in goal_rows) if score_visible else None
             evaluation_data.update({
                 "published": published,
-                "can_manager_review": bool(direct_manager and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
+                "can_manager_review": bool((direct_manager or manager_override) and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
+                "can_manager_override": bool(manager_override and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
                 "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
                 "can_grieve": bool(own and published and grievance_row is None),
                 "score_total": round(score_total, 2) if score_total is not None else None,
@@ -5471,6 +6783,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "id", "cycle_id", "employee_id", "year", "cycle_name", "full_name", "employee_no", "status",
                 "workflow_version", "manager_employee_id", "manager_name", "weighted_score", "rating", "disclosure_date",
                 "published", "can_manager_review", "can_hr_review", "can_grieve", "score_total", "submitted_late",
+                "can_manager_override",
                 "period_start", "period_end", "self_opens_on", "self_due_on", "manager_due_on", "hr_due_on",
                 "cycle_status", "announcement_title", "announcement_body", "announced_at",
             )} | {"grievance_status": payload["grievance"]["status"] if payload["grievance"] else None}
@@ -5581,7 +6894,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if int(evaluation["workflow_version"] or 1) < 2:
                 raise APIError(409, "هذا السجل يستخدم مسار الاعتماد القديم.", "legacy_workflow")
             manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
-            if not user.get("employee_id") or manager_id != user["employee_id"] or evaluation["manager_employee_id"] != user["employee_id"]:
+            manager_override = bool(
+                evaluation["employee_id"] != user.get("employee_id")
+                and str(user.get("role")) in {"hr", "admin"}
+                and has_permission(self.db, user, "evaluation.override_manager")
+            )
+            is_direct_manager = bool(
+                user.get("employee_id")
+                and manager_id == user["employee_id"]
+                and evaluation["manager_employee_id"] == user["employee_id"]
+            )
+            if not manager_override and not is_direct_manager:
                 raise APIError(403, "المسؤول المباشر الحالي وحده يقيّم هذا الموظف.", "not_direct_manager")
             if evaluation["status"] not in {"submitted", "returned"}:
                 raise APIError(409, "التقييم ليس في مرحلة تقييم المسؤول.", "invalid_status")
@@ -5609,13 +6932,29 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             stamp = now_iso()
             resubmission = evaluation["status"] == "returned"
             reviewers = [int(row["id"]) for row in self.db.execute("SELECT * FROM users WHERE active=1") if has_permission(self.db, dict(row), "evaluation.review") and row["id"] != user["id"]]
+            old_manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["manager_employee_id"],)).fetchone()
             with self.db:
                 for goal_id, points in submitted_map.items():
                     self.db.execute("UPDATE evaluation_goals SET awarded_points=?,updated_at=? WHERE id=? AND evaluation_id=?", (points, stamp, goal_id, evaluation_id))
                 self.db.execute("UPDATE evaluation_approvals SET status='approved',comment=?,decided_at=? WHERE evaluation_id=? AND step_no=1", (report, stamp, evaluation_id))
                 self.db.execute("UPDATE evaluations SET status='in_review',manager_report=?,manager_submitted_at=?,weighted_score=?,rating=?,hr_comment='',updated_at=? WHERE id=?", (report, stamp, score, self.evaluation_rating(score), stamp, evaluation_id))
                 create_internal_notification(self.db, user["id"], reviewers, "تقييم سنوي بانتظار مراجعة HR", "أكمل المسؤول المباشر النقاط وتقرير الموظف.")
-                audit(self.db, user["id"], "evaluation.manager_resubmit" if resubmission else "evaluation.manager_submit", "evaluation", evaluation_id, {"score": score})
+                if manager_override and old_manager_user and int(old_manager_user["id"]) != int(user["id"]):
+                    create_internal_notification(
+                        self.db,
+                        user["id"],
+                        [int(old_manager_user["id"])],
+                        "تم استكمال تقييم موظفك من الموارد البشرية",
+                        "استكملت الموارد البشرية مرحلة المسؤول المباشر لهذا التقييم نيابةً عنك بسبب عدم اتخاذ إجراء، وأصبح التقييم بانتظار المراجعة النهائية.",
+                    )
+                audit(
+                    self.db,
+                    user["id"],
+                    "evaluation.manager_override" if manager_override else ("evaluation.manager_resubmit" if resubmission else "evaluation.manager_submit"),
+                    "evaluation",
+                    evaluation_id,
+                    {"score": score, "manager_override": manager_override, "former_manager_employee_id": evaluation["manager_employee_id"]},
+                )
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
         def api_evaluation_hr_review(self, evaluation_id: int) -> None:
@@ -5869,7 +7208,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def certificate_payload(self, row: sqlite3.Row) -> dict[str, Any]:
             expected = certificate_integrity_hash(db_path, row)
             integrity_valid = bool(row["integrity_hash"]) and hmac.compare_digest(str(row["integrity_hash"]), expected)
-            return {
+            payload = {
                 "id": row["id"], "certificate_no": row["certificate_no"], "employee_id": row["employee_id"],
                 "verification_code": row["verification_code"], "verification_status": row["verification_status"],
                 "request_status": row["request_status"] if "request_status" in row.keys() else "issued",
@@ -5886,6 +7225,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "issued_at": row["issued_at"], "print_count": row["print_count"], "last_printed_at": row["last_printed_at"],
                 "verification_count": row["verification_count"], "last_verified_at": row["last_verified_at"],
             }
+            payload["salary_breakdown"] = (payload["employee"].get("salary_breakdown") or {}) if isinstance(payload["employee"], dict) else {}
+            outbox_id = payload.get("email_outbox_id")
+            if outbox_id:
+                outbox = self.db.execute("SELECT to_email,status,last_error,sent_at FROM email_outbox WHERE id=?", (outbox_id,)).fetchone()
+                if outbox:
+                    payload["email_to"] = outbox["to_email"]
+                    payload["email_status"] = outbox["status"]
+                    payload["email_error"] = outbox["last_error"] or ""
+                    payload["email_sent_at"] = outbox["sent_at"]
+            return payload
 
         def _certificate_safe_request(self, row: sqlite3.Row, privileged: bool = False) -> dict[str, Any]:
             payload = self.certificate_payload(row)
@@ -5994,11 +7343,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
                     certificate = self.certificate_payload(row)
                     pdf_data = build_salary_certificate_pdf(certificate)
-                    if requester and requester["email"]:
-                        email_outbox_id, email_status = self.queue_email("salary_certificate", requester["email"], f"Salary Certificate | {certificate_no}", "تم اعتماد طلب شهادة الراتب. تجد الشهادة الإلكترونية الموقعة مرفقة بهذه الرسالة.", user_id=user["id"], attachment={"name": f"salary-certificate-{certificate_no}.pdf", "content_type": "application/pdf", "data": pdf_data})
+                    # Always deliver the approved copy to the employee's current
+                    # registered address.  The requester account can be an
+                    # administrator submitting on somebody else's behalf, so it
+                    # is not a safe email recipient for this document.
+                    employee_email = clean_email(employee["email"])
+                    if not employee_email and requester:
+                        employee_email = clean_email(requester["email"])
+                    if employee_email:
+                        email_outbox_id, email_status = self.queue_email("salary_certificate", employee_email, f"Salary Certificate | {certificate_no}", "تم اعتماد طلب شهادة الراتب. تجد الشهادة الإلكترونية الموقعة مرفقة بهذه الرسالة.", user_id=user["id"], attachment={"name": f"salary-certificate-{certificate_no}.pdf", "content_type": "application/pdf", "data": pdf_data})
                         self.db.execute("UPDATE salary_certificates SET email_outbox_id=? WHERE id=?", (email_outbox_id, certificate_id))
-                    if requester: create_internal_notification(self.db, user["id"], [requester["id"]], "تم اعتماد شهادة الراتب", "تم اعتماد الطلب وإرسال الشهادة إلى بريدك المؤسسي." if email_status in {"sent", "queued"} else "تم اعتماد الطلب. راجع بريدك المؤسسي عند تفعيل SMTP.")
-                    audit(self.db, user["id"], "salary_certificate.approve", "salary_certificate", certificate_id, {"certificate_no": certificate_no, "email_status": email_status or "no_email"})
+                    if requester:
+                        notice = "تم اعتماد الطلب وإرسال الشهادة إلى بريدك المؤسسي." if email_status in {"sent", "queued"} else "تم اعتماد الطلب. راجع بريدك المؤسسي عند تفعيل SMTP أو تحديث بريد ملفك الوظيفي."
+                        create_internal_notification(self.db, user["id"], [requester["id"]], "تم اعتماد شهادة الراتب", notice)
+                    audit(self.db, user["id"], "salary_certificate.approve", "salary_certificate", certificate_id, {"certificate_no": certificate_no, "email_to": employee_email or None, "email_status": email_status or "no_email"})
             saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
             response = self._certificate_safe_request(saved, True)
             response["email_status"] = email_status
@@ -6092,10 +7450,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             })
 
         def api_certificate_print(self, certificate_id: int) -> None:
-            user = self.require_permission("salary_certificate.print")
+            user = self.current_user(True)
+            assert user is not None
+            if bool(user.get("must_change_password")):
+                raise APIError(428, "يجب تغيير كلمة المرور المؤقتة قبل متابعة العمل.", "password_change_required")
             row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
             if row is None:
                 raise APIError(404, "شهادة الراتب غير موجودة.", "not_found")
+            # A certificate requested by an employee and approved by HR is part
+            # of that employee's self-service record.  It is printable by its
+            # owner without granting the broad HR print permission.  Direct HR
+            # issues remain restricted to authorized issuers.
+            owner_request = row["employee_id"] == user.get("employee_id") and row["requester_id"] == user["id"]
+            if not owner_request and not has_permission(self.db, user, "salary_certificate.print"):
+                raise APIError(403, "لا تملك الصلاحية اللازمة لهذا الإجراء.", "forbidden", {"permission": "salary_certificate.print"})
             if row["employee_id"] != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
                 raise APIError(403, "لا يمكنك طباعة شهادة راتب لموظف آخر.", "forbidden")
             certificate = self.certificate_payload(row)
@@ -6109,6 +7477,48 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, {"certificate": self.certificate_payload(saved), "print_authorized": True})
 
         # Payroll runs, employee payslips and advances
+        def advance_schedule_summary(self, employee_id: int, exclude_month: str | None = None) -> dict[str, Any]:
+            """Return the approved advance amount still scheduled for an employee.
+
+            Installments are the source of truth.  Once the final installment is
+            marked paid, there is no scheduled amount left and the next payroll
+            automatically returns to the employee's full gross salary.
+            """
+            query = """SELECT ai.due_month,ai.amount_cents
+                          FROM advance_installments ai
+                          JOIN advances a ON a.id=ai.advance_id
+                         WHERE a.employee_id=? AND a.status='approved'
+                           AND ai.status='scheduled'"""
+            params: list[Any] = [employee_id]
+            if exclude_month:
+                query += " AND ai.due_month<>?"
+                params.append(exclude_month)
+            rows = self.db.execute(query + " ORDER BY ai.due_month,ai.installment_no", params).fetchall()
+            total = sum(int(row["amount_cents"]) for row in rows)
+            return {
+                "remaining_cents": total,
+                "next_due_month": str(rows[0]["due_month"]) if rows else None,
+                "installment_count": len(rows),
+            }
+
+        def payroll_item_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            item = dict(row)
+            for key in ("basic_cents", "allowances_cents", "deductions_cents", "advance_cents", "net_cents"):
+                item[key.removesuffix("_cents")] = cents_value(item[key])
+            gross_cents = int(item["basic_cents"]) + int(item["allowances_cents"])
+            total_deductions_cents = int(item["deductions_cents"]) + int(item["advance_cents"])
+            item["gross_cents"] = gross_cents
+            item["gross"] = cents_value(gross_cents)
+            item["total_deductions_cents"] = total_deductions_cents
+            item["total_deductions"] = cents_value(total_deductions_cents)
+            exclude_month = str(item.get("payroll_month") or "") if item.get("status") in {"approved", "paid"} else None
+            summary = self.advance_schedule_summary(int(item["employee_id"]), exclude_month or None)
+            item["advance_label"] = "سلفة" if int(item["advance_cents"]) > 0 else ""
+            item["advance_remaining_cents"] = summary["remaining_cents"]
+            item["advance_remaining"] = cents_value(summary["remaining_cents"])
+            item["advance_next_due_month"] = summary["next_due_month"]
+            return item
+
         def payroll_payload(self, run_id: int) -> dict[str, Any]:
             run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
             if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
@@ -6116,11 +7526,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             items=[]
             totals={"basic_cents":0,"allowances_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
             for row in rows:
-                item=dict(row)
-                for key in totals: totals[key]+=int(item[key]); item[key.removesuffix("_cents")]=cents_value(item[key])
+                item=self.payroll_item_payload(row)
+                for key in totals: totals[key]+=int(item[key])
                 items.append(item)
             result=dict(run)|{"items":items,"employee_count":len(items)}
             for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
+            result["gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
+            result["gross"] = cents_value(result["gross_cents"])
+            result["total_deductions_cents"] = totals["deductions_cents"] + totals["advance_cents"]
+            result["total_deductions"] = cents_value(result["total_deductions_cents"])
             return result
 
         def api_payroll_runs_get(self) -> None:
@@ -6140,10 +7554,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             with self.db:
                 cur=self.db.execute("INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES(?,?,?,?)",(month,user["id"],stamp,stamp)); run_id=int(cur.lastrowid)
                 for employee in employees:
-                    basic=money_cents(employee["salary"] or 0,"salary")
+                    basic=money_cents(employee["basic_salary"] or employee["salary"] or 0,"basic_salary")
+                    employee_allowances=money_cents(salary_breakdown_from_row(employee)["allowances_total"],"allowances")
                     installment=self.db.execute("SELECT COALESCE(SUM(ai.amount_cents),0) FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id WHERE a.employee_id=? AND a.status='approved' AND ai.due_month=? AND ai.status='scheduled'",(employee["id"],month)).fetchone()[0]
-                    net=max(0,basic+allowances-deductions-int(installment))
-                    self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,allowances,deductions,int(installment),net))
+                    total_allowances=employee_allowances+allowances
+                    net=max(0,basic+total_allowances-deductions-int(installment))
+                    self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,total_allowances,deductions,int(installment),net))
                 audit(self.db,user["id"],"payroll.create","payroll_run",run_id,{"month":month,"employees":len(employees)})
             self.send_json(201,{"run":self.payroll_payload(run_id)})
 
@@ -6180,21 +7596,41 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_csv(f'payroll-{run["payroll_month"]}.csv',rows)
 
         def api_my_payslips(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
             employee_id=self.own_employee_id(); rows=self.db.execute("SELECT i.*,r.payroll_month,r.status FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE i.employee_id=? AND r.status IN ('approved','paid') ORDER BY r.payroll_month DESC",(employee_id,)).fetchall()
-            self.send_json(200,{"items":[dict(r)|{"basic":cents_value(r["basic_cents"]),"allowances":cents_value(r["allowances_cents"]),"deductions":cents_value(r["deductions_cents"]),"advance":cents_value(r["advance_cents"]),"net":cents_value(r["net_cents"])} for r in rows]})
+            certificates = self.db.execute(
+                """SELECT * FROM salary_certificates
+                   WHERE employee_id=? AND requester_id=?
+                     AND request_status IN ('approved','issued')
+                     AND verification_status='valid'
+                   ORDER BY COALESCE(approved_at,issued_at) DESC,id DESC""",
+                (employee_id, user["id"]),
+            ).fetchall()
+            payslips = [self.payroll_item_payload(r) for r in rows]
+            self.send_json(200,{"items":payslips,"salary_certificates":[self.certificate_payload(row) for row in certificates]})
 
         def api_payslip_get(self, item_id: int) -> None:
             row=self.db.execute("SELECT i.*,r.payroll_month,r.status FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE i.id=?",(item_id,)).fetchone()
             if not row: raise APIError(404,"قسيمة الراتب غير موجودة.","not_found")
             user=self.current_user(True); assert user is not None
             if row["employee_id"]!=user.get("employee_id") and not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"لا يمكنك عرض هذه القسيمة.","forbidden")
-            self.send_json(200,{"payslip":dict(row)|{"basic":cents_value(row["basic_cents"]),"allowances":cents_value(row["allowances_cents"]),"deductions":cents_value(row["deductions_cents"]),"advance":cents_value(row["advance_cents"]),"net":cents_value(row["net_cents"])}})
+            self.send_json(200,{"payslip":self.payroll_item_payload(row)})
 
         def advance_payload(self, advance_id: int) -> dict[str, Any]:
             row=self.db.execute("SELECT a.*,e.full_name,e.employee_no FROM advances a JOIN employees e ON e.id=a.employee_id WHERE a.id=?",(advance_id,)).fetchone()
             if not row: raise APIError(404,"طلب السلفة غير موجود.","not_found")
             installments=self.db.execute("SELECT * FROM advance_installments WHERE advance_id=? ORDER BY installment_no",(advance_id,)).fetchall()
-            return dict(row)|{"amount":cents_value(row["amount_cents"]),"installments":[dict(i)|{"amount":cents_value(i["amount_cents"])} for i in installments]}
+            paid_cents=sum(int(i["amount_cents"]) for i in installments if i["status"]=="paid")
+            remaining_cents=sum(int(i["amount_cents"]) for i in installments if i["status"]=="scheduled")
+            next_due=next((str(i["due_month"]) for i in installments if i["status"]=="scheduled"),None)
+            return dict(row)|{
+                "amount":cents_value(row["amount_cents"]),
+                "paid_cents":paid_cents,"paid":cents_value(paid_cents),
+                "remaining_cents":remaining_cents,"remaining":cents_value(remaining_cents),
+                "next_due_month":next_due,
+                "installments":[dict(i)|{"amount":cents_value(i["amount_cents"])} for i in installments],
+            }
 
         def api_advances_get(self) -> None:
             user=self.current_user(True); assert user is not None
