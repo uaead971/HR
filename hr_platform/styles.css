@@ -964,7 +964,7 @@ html[dir="ltr"] .report-document-head,html[dir="ltr"] .report-employee-identity,
 }
 
 /* V5.7 — full profile editor, executive employee dossier, bilingual salary certificate and attendance command ledger. */
-:root{--font-ar:"Noto Sans Arabic","IBM Plex Sans Arabic",Tahoma,Arial,sans-serif;--font-en:"Avenir Next","Segoe UI",system-ui,sans-serif;--font-ui:var(--font-ar)}
+:root{--font-ar:Arial,Tahoma,sans-serif;--font-en:"Avenir Next","Segoe UI",system-ui,sans-serif;--font-ui:var(--font-ar)}
 html[lang="ar"] body,html[lang="ar"] :is(button,input,select,textarea,.leaflet-container,.employee-id-card,.certificate,.employee-comprehensive-report){font-family:var(--font-ar)}
 html[lang="en"] body,html[lang="en"] :is(button,input,select,textarea,.leaflet-container){font-family:var(--font-en)}
 .employee-id-card,.certificate,.employee-comprehensive-report{font-family:var(--font-ar)}
