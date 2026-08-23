@@ -1,0 +1,6044 @@
+#!/usr/bin/env python3
+"""Local, dependency-free HR application server.
+
+The browser is intentionally a client of this module: business data and all
+authorization decisions live in SQLite and are enforced by the HTTP API.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import math
+import mimetypes
+import os
+import re
+import secrets
+import smtplib
+import sqlite3
+import sys
+import csv
+import io
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from datetime import date, datetime, time, timedelta, timezone
+from email.utils import formatdate
+from email.message import EmailMessage
+from http import HTTPStatus
+from http.cookies import SimpleCookie
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Callable, Iterable
+from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
+
+
+APP_DIR = Path(__file__).resolve().parent
+APP_VERSION = "5.7.0"
+DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
+SCHEMA_FILE = APP_DIR / "schema.sql"
+UAE_TZ = ZoneInfo("Asia/Dubai")
+SESSION_COOKIE = "hr_session"
+SESSION_HOURS = 12
+MAX_JSON_BYTES = 3_200_000
+MAX_IMAGE_BYTES = 1_500_000
+MAX_VISUAL_IDENTITY_IMAGE_BYTES = 1_350_000
+PBKDF2_ROUNDS = 310_000
+PASSWORD_RESET_MINUTES = 30
+
+
+PERMISSION_CATALOG: dict[str, dict[str, str]] = {
+    "dashboard": {
+        "dashboard.view": "عرض لوحة القيادة التنفيذية",
+        "report.view": "عرض التقارير الحية",
+        "audit.view": "عرض سجل النشاط والتدقيق",
+    },
+    "people": {
+        "employee.view": "عرض جميع ملفات الموظفين", "employee.manage": "إنشاء ملفات الموظفين وإدارة بياناتها التشغيلية",
+        "employee.profile.edit": "تعديل البيانات الشخصية والوظيفية والصورة في ملف الموظف",
+        "employee.emergency.manage": "إدارة جهات اتصال الطوارئ للموظفين",
+        "employee.team": "عرض أسماء وأرقام موظفي الفريق فقط", "department.manage": "إدارة الأقسام",
+        "employee_document.manage": "إدارة وثائق الموظفين", "employee_action.manage": "إدارة المخالفات والتعهدات",
+        "employee_report.view": "عرض تقرير الموظف الشامل", "employee_report.export": "طباعة وحفظ تقرير الموظف الشامل PDF",
+        "org.view": "عرض المؤسسة", "org.manage": "إدارة هوية المؤسسة",
+        "branch.view": "عرض الفروع", "branch.manage": "إدارة الفروع والنطاقات",
+        "reference.manage": "إدارة الدرجات والمسميات",
+    },
+    "time": {
+        "attendance.view": "عرض الحضور", "attendance.team": "عرض أوقات دخول وخروج الفريق",
+        "attendance.export": "تصدير كشف الحضور والانصراف CSV",
+        "shift.view": "عرض المناوبات", "shift.manage": "إدارة المناوبات",
+        "leave.view": "عرض طلبات الإجازة", "leave.team": "قرار المسؤول المباشر على طلبات الفريق", "leave.approve": "الاعتماد النهائي للإجازات لدى الموارد البشرية",
+        "overtime.view": "عرض العمل الإضافي", "overtime.approve": "اعتماد العمل الإضافي",
+    },
+    "payroll": {
+        "salary.view": "عرض الرواتب", "salary_certificate.issue": "إصدار شهادة راتب",
+        "salary_certificate.print": "طباعة شهادة راتب", "salary_certificate.verify": "التحقق من صحة شهادة راتب",
+        "payroll.manage": "إدارة المسيرات",
+        "payroll.approve": "اعتماد المسيرات", "payroll.pay": "إثبات دفع المسيرات",
+        "advance.view": "عرض السلف", "advance.approve": "اعتماد السلف",
+    },
+    "performance": {
+        "evaluation.view": "عرض التقييمات", "evaluation.review": "مراجعة الموارد البشرية وحل التظلمات",
+        "evaluation.cycle.manage": "إنشاء دورات التقييم وإعلانها وإرسال تذكيراتها", "lifecycle.view": "عرض دورة الموظف",
+        "lifecycle.manage": "إدارة دورة الموظف",
+    },
+    "communications": {
+        "notification.send": "إرسال إشعارات داخلية", "communications.view": "عرض حملات البريد",
+        "communications.send": "إنشاء وإرسال حملات البريد", "communications.retry": "إعادة محاولة البريد المتعثر",
+    },
+    "security": {
+        "security.manage_users": "إدارة المستخدمين", "security.manage_permissions": "إدارة الصلاحيات",
+        "security.reset_password": "تعيين كلمة مرور مؤقتة", "smtp.manage": "إدارة إعدادات SMTP",
+        "smtp.test": "اختبار اتصال SMTP",
+    },
+}
+
+ALL_PERMISSIONS = {permission for group in PERMISSION_CATALOG.values() for permission in group}
+
+
+ROLE_PERMISSIONS: dict[str, set[str]] = {
+    "admin": {"*"},
+    "hr": {
+        "org.view", "org.manage", "branch.view", "branch.manage", "employee.view", "employee.manage", "employee.profile.edit", "employee.emergency.manage",
+        "salary.view", "attendance.view", "attendance.export", "shift.view", "shift.manage", "overtime.view",
+        "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "evaluation.review", "evaluation.cycle.manage",
+        "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
+        "employee_document.manage", "employee_action.manage", "payroll.manage", "payroll.approve", "payroll.pay",
+        "advance.view", "advance.approve", "reference.manage", "lifecycle.view", "lifecycle.manage", "report.view",
+        "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
+        "employee_report.view", "employee_report.export",
+    },
+    "general_manager": {
+        "org.view", "branch.view", "employee.view", "attendance.view", "shift.view",
+        "overtime.view", "leave.view", "evaluation.view", "notification.send",
+        "salary.view", "salary_certificate.issue", "salary_certificate.print", "payroll.approve",
+        "advance.view", "advance.approve", "lifecycle.view", "report.view",
+    },
+    "manager": {
+        "org.view", "branch.view", "employee.team", "attendance.team", "shift.view",
+        "overtime.view", "leave.team", "evaluation.view",
+    },
+    "employee": {"org.view", "branch.view", "shift.view"},
+}
+
+PEOPLE_ADMIN_ROLES = {"admin", "hr", "general_manager"}
+
+DOCUMENT_TYPES = {
+    "passport", "identity", "residency", "visa", "work_permit", "contract", "job_offer",
+    "qualification", "professional_certificate", "marriage_certificate", "birth_certificate",
+    "good_conduct", "medical_exam", "health_insurance", "driving_license", "personal_photo",
+    "employee_file", "undertaking", "violation", "bank_document", "other", "general",
+}
+
+CARD_TEMPLATES = {"portrait_orbit", "executive_horizontal", "minimal_vertical"}
+
+GENERIC_JOB_GOALS = (
+    ("جودة ودقة الإنجاز", "إنجاز المسؤوليات الأساسية وفق الإجراءات المعتمدة وبأقل نسبة أخطاء.", "نسبة الأعمال المقبولة من المرة الأولى", 25),
+    ("الإنتاجية والالتزام بالمواعيد", "تحقيق حجم العمل المستهدف وتسليم المهام في مواعيدها.", "نسبة المهام المنجزة ضمن الوقت المستهدف", 25),
+    ("تحقيق مؤشرات الوظيفة", "تحقيق مؤشرات الأداء التشغيلية الخاصة بالمسمى الوظيفي.", "نسبة تحقق مؤشرات الأداء المعتمدة", 20),
+    ("التعاون وخدمة المستفيدين", "التعاون مع الفريق وتقديم تجربة مهنية للمستفيدين الداخليين والخارجيين.", "رضا المستفيدين وتقييم التعاون", 15),
+    ("التطوير والتحسين المستمر", "تطوير المهارات واقتراح تحسينات قابلة للتطبيق في نطاق العمل.", "إتمام خطة التطوير وعدد التحسينات المنفذة", 15),
+)
+
+SPECIALIZED_JOB_GOALS = {
+    "أخصائي عمليات": (
+        ("دقة تنفيذ العمليات والالتزام بالإجراءات", "تنفيذ المعاملات التشغيلية وفق الإجراءات ومستويات الخدمة المعتمدة.", "نسبة المعاملات المنجزة دون أخطاء", 30),
+        ("الإنتاجية والالتزام بمواعيد الإنجاز", "إنجاز حجم العمل المستهدف ضمن الوقت المحدد لكل معاملة.", "نسبة المعاملات المنجزة ضمن الزمن المستهدف", 25),
+        ("جودة خدمة المستفيدين", "معالجة الطلبات والملاحظات بمهنية وتحسين تجربة المستفيد.", "معدل رضا المستفيدين ونسبة إغلاق الملاحظات", 20),
+        ("تحسين الإجراءات التشغيلية", "اقتراح وتنفيذ تحسينات تقلل الوقت أو الأخطاء أو التكلفة.", "عدد التحسينات المعتمدة وأثرها القابل للقياس", 15),
+        ("التعاون والتطوير المهني", "مشاركة المعرفة وإكمال خطة التطوير المرتبطة بالوظيفة.", "تقييم التعاون ونسبة إكمال خطة التطوير", 10),
+    ),
+    "مديرة العمليات": (
+        ("تحقيق الخطة التشغيلية", "قيادة تنفيذ خطة الإدارة وربطها بأولويات المؤسسة.", "نسبة إنجاز المبادرات والمؤشرات التشغيلية", 30),
+        ("رفع الكفاءة والإنتاجية", "تحسين تدفق العمل والاستفادة من الموارد وخفض الهدر.", "تحسن زمن الدورة والإنتاجية والتكلفة", 25),
+        ("قيادة الفريق وتطويره", "توزيع الأهداف والمتابعة والتوجيه وبناء قدرات الفريق.", "إنجاز أهداف الفريق وخطط التطوير", 20),
+        ("جودة الخدمة ورضا المستفيدين", "ضمان جودة المخرجات والاستجابة للملاحظات.", "معدل الجودة والرضا وإغلاق الشكاوى", 15),
+        ("إدارة المخاطر والامتثال", "متابعة المخاطر التشغيلية والالتزام بالسياسات والضوابط.", "نسبة إغلاق المخاطر وعدم تكرار المخالفات", 10),
+    ),
+    "مديرة الموارد البشرية": (
+        ("تنفيذ استراتيجية الموارد البشرية", "تحويل أولويات المؤسسة إلى خطة قوى عاملة ومبادرات قابلة للقياس.", "نسبة إنجاز الخطة ومؤشرات القوى العاملة", 25),
+        ("دقة العمليات والبيانات الوظيفية", "ضمان صحة ملفات الموظفين والحضور ومدخلات الرواتب وفي مواعيدها.", "نسبة الدقة والإنجاز ضمن دورة العمل", 25),
+        ("الاستقطاب والاستبقاء", "شغل الاحتياجات الحرجة وتحسين تجربة الانضمام والاستبقاء.", "زمن شغل الوظيفة ونسبة الاستبقاء", 20),
+        ("الامتثال والسياسات", "تحديث السياسات ومتابعة الامتثال لقانون العمل والضوابط الداخلية.", "نسبة المراجعات المكتملة والملاحظات المغلقة", 15),
+        ("تجربة الموظف والتطوير", "رفع التفاعل وتنفيذ خطط التعلم والتطوير المؤسسية.", "رضا الموظفين ونسبة إكمال خطط التطوير", 15),
+    ),
+    "المدير العام": (
+        ("تحقيق الأهداف الاستراتيجية للمؤسسة", "قيادة تنفيذ الخطة الاستراتيجية وتحقيق النتائج المؤسسية المعتمدة.", "نسبة تحقق المؤشرات والمبادرات الاستراتيجية", 35),
+        ("الاستدامة المالية والتشغيلية", "تعزيز كفاءة الموارد واستدامة النتائج والنمو المنضبط.", "النتائج المالية والكفاءة التشغيلية", 25),
+        ("الحوكمة وإدارة المخاطر", "تعزيز الرقابة والامتثال واتخاذ القرار المبني على البيانات.", "مستوى الامتثال وإغلاق المخاطر الجوهرية", 15),
+        ("قيادة رأس المال البشري", "بناء القيادات ورفع التفاعل والأداء المؤسسي.", "مؤشرات الأداء والتعاقب والتفاعل", 15),
+        ("الابتكار والتحول الرقمي", "رعاية مبادرات التحسين والتحول التي ترفع جودة وكفاءة المؤسسة.", "قيمة المبادرات المنفذة وأثرها", 10),
+    ),
+}
+
+
+def seed_job_goal_templates(db: sqlite3.Connection, job_title_id: int, job_title_name: str, stamp: str) -> None:
+    templates = SPECIALIZED_JOB_GOALS.get(job_title_name, GENERIC_JOB_GOALS)
+    for sort_order, (title, description, measure, weight) in enumerate(templates, 1):
+        db.execute(
+            """INSERT OR IGNORE INTO evaluation_goal_templates
+               (job_title_id,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,1,?,?)""",
+            (job_title_id, title, description, measure, weight, sort_order, stamp, stamp),
+        )
+DEFAULT_CARD_INSTRUCTIONS = "البطاقة شخصية ولا يجوز استخدامها من غير صاحبها. عند العثور عليها يرجى التواصل مع المؤسسة."
+LANGUAGE_CATALOG: dict[str, dict[str, str]] = {
+    "ar": {"name": "العربية", "flag": "🇦🇪", "flag_code": "AE"},
+    "en": {"name": "الإنجليزية", "flag": "🇬🇧", "flag_code": "GB"},
+    "ur": {"name": "الأوردو", "flag": "🇮🇳", "flag_code": "IN"},
+    "hi": {"name": "الهندية", "flag": "🇮🇳", "flag_code": "IN"},
+    "zh": {"name": "الصينية", "flag": "🇨🇳", "flag_code": "CN"},
+    "fil": {"name": "الفلبينية", "flag": "🇵🇭", "flag_code": "PH"},
+    "bn": {"name": "البنغالية", "flag": "🇧🇩", "flag_code": "BD"},
+    "ne": {"name": "النيبالية", "flag": "🇳🇵", "flag_code": "NP"},
+    "ru": {"name": "الروسية", "flag": "🇷🇺", "flag_code": "RU"},
+    "fr": {"name": "الفرنسية", "flag": "🇫🇷", "flag_code": "FR"},
+    "es": {"name": "الإسبانية", "flag": "🇪🇸", "flag_code": "ES"},
+    "other": {"name": "أخرى", "flag": "🏳️", "flag_code": "OTHER"},
+}
+LANGUAGE_PROFICIENCIES = {
+    "native": "اللغة الأم", "excellent": "ممتاز", "very_good": "جيد جداً", "good": "جيد", "basic": "أساسي",
+}
+
+
+class APIError(Exception):
+    def __init__(self, status: int, message: str, code: str = "request_error", details: Any = None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.code = code
+        self.details = details
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def now_iso() -> str:
+    return utc_now().isoformat(timespec="seconds")
+
+
+def local_now() -> datetime:
+    return datetime.now(UAE_TZ)
+
+
+def json_text(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def parse_json_text(value: str | None, fallback: Any) -> Any:
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+def password_digest(password: str, salt_hex: str) -> str:
+    salt = bytes.fromhex(salt_hex)
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS).hex()
+
+
+def password_record(password: str) -> tuple[str, str]:
+    salt_hex = secrets.token_hex(16)
+    return password_digest(password, salt_hex), salt_hex
+
+
+def verify_password(password: str, expected: str, salt_hex: str) -> bool:
+    try:
+        return hmac.compare_digest(password_digest(password, salt_hex), expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def validate_password_strength(password: str) -> None:
+    """Apply the same compact password policy to every password-setting flow."""
+    failures = []
+    if len(password) < 10: failures.append("١٠ أحرف على الأقل")
+    if not re.search(r"[A-Z]", password): failures.append("حرف إنجليزي كبير")
+    if not re.search(r"[a-z]", password): failures.append("حرف إنجليزي صغير")
+    if not re.search(r"\d", password): failures.append("رقم")
+    if not re.search(r"[^A-Za-z0-9]", password): failures.append("رمز خاص")
+    if failures:
+        raise APIError(422, "كلمة المرور لا تحقق المتطلبات: " + "، ".join(failures) + ".", "weak_password", {"requirements": failures})
+
+
+def secret_key(db_path: Path) -> bytes:
+    # Keep the deterministic fallback only for local development so an existing
+    # single-user database remains readable when its folder is moved. A missing
+    # key must never silently start a production instance: certificate HMACs and
+    # encrypted SMTP credentials depend on this value.
+    material = os.environ.get("HR_SECRET_KEY", "").strip()
+    environment = os.environ.get("HR_ENV", "development").strip().lower()
+    if environment in {"prod", "production"}:
+        if not material:
+            raise RuntimeError("HR_SECRET_KEY must be set when HR_ENV=production")
+        if len(material) < 32:
+            raise RuntimeError("HR_SECRET_KEY must contain at least 32 characters in production")
+    if not material:
+        material = "mawared-v46-local-development-key"
+    return hashlib.sha256(material.encode("utf-8")).digest()
+
+
+def seal_secret(value: str, db_path: Path) -> str:
+    if not value:
+        return ""
+    nonce = secrets.token_bytes(16)
+    key = secret_key(db_path)
+    stream = hashlib.pbkdf2_hmac("sha256", key, nonce, 120_000, dklen=len(value.encode("utf-8")))
+    raw = value.encode("utf-8")
+    cipher = bytes(a ^ b for a, b in zip(raw, stream))
+    tag = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(nonce + tag + cipher).decode("ascii")
+
+
+def open_secret(value: str, db_path: Path) -> str:
+    if not value:
+        return ""
+    try:
+        packed = base64.urlsafe_b64decode(value.encode("ascii"))
+        nonce, tag, cipher = packed[:16], packed[16:48], packed[48:]
+        key = secret_key(db_path)
+        if not hmac.compare_digest(tag, hmac.new(key, nonce + cipher, hashlib.sha256).digest()):
+            return ""
+        stream = hashlib.pbkdf2_hmac("sha256", key, nonce, 120_000, dklen=len(cipher))
+        return bytes(a ^ b for a, b in zip(cipher, stream)).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def certificate_integrity_hash(db_path: Path, values: dict[str, Any] | sqlite3.Row) -> str:
+    """Seal the immutable salary-certificate snapshot with the application key."""
+    immutable = {
+        "certificate_no": str(values["certificate_no"]),
+        "verification_code": str(values["verification_code"]),
+        "employee_id": int(values["employee_id"]),
+        "issued_by": int(values["issued_by"]),
+        "purpose": str(values["purpose"]),
+        "salary_snapshot": f"{float(values['salary_snapshot']):.2f}",
+        "organization_snapshot": str(values["organization_snapshot"]),
+        "employee_snapshot": str(values["employee_snapshot"]),
+        "issued_at": str(values["issued_at"]),
+    }
+    payload = json.dumps(immutable, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hmac.new(secret_key(db_path), payload, hashlib.sha256).hexdigest()
+
+
+def new_certificate_verification_code(db: sqlite3.Connection, year: int) -> str:
+    for _ in range(12):
+        token = secrets.token_hex(6).upper()
+        code = f"VRF-{year}-{token[:4]}-{token[4:8]}-{token[8:]}"
+        if db.execute("SELECT 1 FROM salary_certificates WHERE verification_code=?", (code,)).fetchone() is None:
+            return code
+    raise RuntimeError("Could not allocate a unique salary-certificate verification code")
+
+
+def _pdf_text(value: Any) -> str:
+    """Keep the lightweight built-in PDF generator safe for arbitrary tenant data."""
+    text = str(value or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return text.encode("ascii", "ignore").decode("ascii") or "-"
+
+
+def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
+    """Create a dependency-free, printable PDF attachment for approved certificates.
+
+    The browser renders the polished bilingual certificate; the email attachment is
+    intentionally generated server-side so it is available even when the recipient
+    never opens the web application.  ASCII-safe fallback text keeps this valid on
+    installations without a PDF package or Arabic font files.
+    """
+    employee = certificate.get("employee") or {}
+    organization = certificate.get("organization") or {}
+    lines = [
+        organization.get("display_name") or "Khaisha - HR",
+        "SALARY CERTIFICATE / شهادة راتب",
+        f"Issue No: {certificate.get('certificate_no')}",
+        f"Verification: {certificate.get('verification_code')}",
+        f"Employee: {employee.get('name') or employee.get('full_name')}",
+        f"Employee No: {employee.get('employee_no') or employee.get('employee_number')}",
+        f"Job Title: {employee.get('job_title') or '-'}",
+        f"Monthly Salary (AED): {float(certificate.get('salary') or 0):,.2f}",
+        f"Purpose: {certificate.get('purpose') or 'To whom it may concern'}",
+        f"Issued At: {certificate.get('issued_at') or '-'}",
+        "This electronic document is verifiable in the HR system.",
+    ]
+    content_lines = ["BT", "/F1 12 Tf", "72 760 Td"]
+    for index, line in enumerate(lines):
+        if index:
+            content_lines.append("0 -28 Td")
+        content_lines.append(f"({_pdf_text(line)}) Tj")
+    content_lines.append("ET")
+    stream = "\n".join(content_lines).encode("ascii", "ignore")
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{number} 0 obj\n".encode("ascii")); output.extend(obj); output.extend(b"\nendobj\n")
+    xref = len(output)
+    output.extend(f"xref\n0 {len(objects)+1}\n0000000000 65535 f \n".encode("ascii"))
+    output.extend("".join(f"{offset:010d} 00000 n \n" for offset in offsets[1:]).encode("ascii"))
+    output.extend(f"trailer\n<< /Size {len(objects)+1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode("ascii"))
+    return bytes(output)
+
+
+def clean_email(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def require_text(data: dict[str, Any], key: str, max_len: int = 500) -> str:
+    value = str(data.get(key, "")).strip()
+    if not value:
+        raise APIError(422, f"الحقل «{key}» مطلوب.", "validation_error", {"field": key})
+    if len(value) > max_len:
+        raise APIError(422, f"الحقل «{key}» أطول من الحد المسموح.", "validation_error", {"field": key})
+    return value
+
+
+def optional_text(data: dict[str, Any], key: str, max_len: int = 1000) -> str:
+    value = str(data.get(key, "") or "").strip()
+    if len(value) > max_len:
+        raise APIError(422, f"الحقل «{key}» أطول من الحد المسموح.", "validation_error", {"field": key})
+    return value
+
+
+def as_int(value: Any, field: str, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        raise APIError(422, f"قيمة «{field}» غير صحيحة.", "validation_error", {"field": field})
+    if minimum is not None and result < minimum or maximum is not None and result > maximum:
+        raise APIError(422, f"قيمة «{field}» خارج النطاق المسموح.", "validation_error", {"field": field})
+    return result
+
+
+def as_float(value: Any, field: str, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        raise APIError(422, f"قيمة «{field}» غير صحيحة.", "validation_error", {"field": field})
+    if not math.isfinite(result):
+        raise APIError(422, f"قيمة «{field}» غير صحيحة.", "validation_error", {"field": field})
+    if minimum is not None and result < minimum or maximum is not None and result > maximum:
+        raise APIError(422, f"قيمة «{field}» خارج النطاق المسموح.", "validation_error", {"field": field})
+    return result
+
+
+def parse_date(value: Any, field: str = "date") -> date:
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        raise APIError(422, f"صيغة تاريخ «{field}» يجب أن تكون YYYY-MM-DD.", "validation_error", {"field": field})
+
+
+def parse_clock(value: Any, field: str) -> time:
+    text = str(value or "")
+    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", text):
+        raise APIError(422, f"صيغة وقت «{field}» يجب أن تكون HH:MM.", "validation_error", {"field": field})
+    return time.fromisoformat(text)
+
+
+def money_cents(value: Any, field: str = "amount", minimum: Decimal = Decimal("0")) -> int:
+    try:
+        amount = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        raise APIError(422, f"قيمة «{field}» غير صحيحة.", "validation_error", {"field": field})
+    if amount < minimum:
+        raise APIError(422, f"قيمة «{field}» أقل من الحد المسموح.", "validation_error", {"field": field})
+    return int(amount * 100)
+
+
+def cents_value(cents: int | None) -> float:
+    return float((Decimal(int(cents or 0)) / Decimal(100)).quantize(Decimal("0.01")))
+
+
+def validate_data_url(value: Any, label: str, allowed: Iterable[str] = ("image/png", "image/jpeg", "image/webp"), max_bytes: int = MAX_IMAGE_BYTES) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    match = re.fullmatch(r"data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)", text)
+    if not match or match.group(1).lower() not in set(allowed):
+        raise APIError(422, f"صيغة {label} غير مدعومة.", "invalid_upload")
+    try:
+        raw = base64.b64decode(match.group(2), validate=True)
+    except ValueError:
+        raise APIError(422, f"ملف {label} غير صالح.", "invalid_upload")
+    if len(raw) > max_bytes:
+        raise APIError(413, f"حجم {label} يتجاوز الحد المسموح.", "upload_too_large", {"max_bytes": max_bytes})
+    mime = match.group(1).lower()
+    signatures = {
+        "image/png": raw.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": raw.startswith(b"\xff\xd8\xff"),
+        "image/webp": len(raw) >= 12 and raw.startswith(b"RIFF") and raw[8:12] == b"WEBP",
+        "application/pdf": raw.startswith(b"%PDF-"),
+    }
+    if mime in signatures and not signatures[mime]:
+        raise APIError(422, f"محتوى ملف {label} لا يطابق صيغته.", "invalid_upload")
+    return text
+
+
+def color_contrast(first: str, second: str) -> float:
+    def luminance(value: str) -> float:
+        channels = [int(value[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4 for channel in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    light, dark = sorted((luminance(first), luminance(second)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    radius = 6_371_000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lng2 - lng1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return radius * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def row_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    return dict(row) if row is not None else None
+
+
+def open_db(path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(path, timeout=15, check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA journal_mode = WAL")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    return connection
+
+
+def seed_user(db: sqlite3.Connection, email: str, password: str, name: str, role: str, employee_id: int | None) -> int:
+    existing = db.execute("SELECT id FROM users WHERE email = ? COLLATE NOCASE", (email,)).fetchone()
+    if existing:
+        return int(existing["id"])
+    digest, salt = password_record(password)
+    stamp = now_iso()
+    cursor = db.execute(
+        "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (email, name, role, digest, salt, employee_id, stamp, stamp),
+    )
+    return int(cursor.lastrowid)
+
+
+def migrate_nonterminal_legacy_evaluations(db: sqlite3.Connection) -> None:
+    """Move actionable V1 evaluations onto the employee -> manager -> HR flow.
+
+    Terminal V1 decisions remain immutable history.  A non-terminal row is only
+    changed when its employee still has a real direct manager; otherwise it is
+    left untouched and an idempotent audit flag records the configuration gap.
+    """
+    legacy_rows = db.execute(
+        """SELECT e.id,e.employee_id,e.status
+             FROM evaluations e
+            WHERE COALESCE(e.workflow_version,1)=1
+              AND e.status IN ('draft','returned','submitted','in_review')
+            ORDER BY e.id"""
+    ).fetchall()
+    stamp = now_iso()
+    for evaluation in legacy_rows:
+        manager = db.execute(
+            """SELECT COALESCE(e.manager_id,d.manager_employee_id) AS manager_id
+                 FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                WHERE e.id=?""",
+            (evaluation["employee_id"],),
+        ).fetchone()
+        manager_id = int(manager["manager_id"]) if manager and manager["manager_id"] else None
+        manager_exists = bool(
+            manager_id
+            and manager_id != int(evaluation["employee_id"])
+            and db.execute("SELECT 1 FROM employees WHERE id=?", (manager_id,)).fetchone()
+        )
+        if not manager_exists:
+            already_flagged = db.execute(
+                """SELECT 1 FROM audit_log
+                    WHERE action='evaluation.workflow_migration_skipped'
+                      AND entity_type='evaluation' AND entity_id=? LIMIT 1""",
+                (str(evaluation["id"]),),
+            ).fetchone()
+            if not already_flagged:
+                db.execute(
+                    """INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details,created_at)
+                       VALUES(NULL,'evaluation.workflow_migration_skipped','evaluation',?,?,?)""",
+                    (str(evaluation["id"]), json_text({"reason": "direct_manager_missing", "from_status": evaluation["status"]}), stamp),
+                )
+            continue
+
+        evaluation_id = int(evaluation["id"])
+        waiting_for_manager = evaluation["status"] in {"submitted", "in_review"}
+        migrated_status = "submitted" if waiting_for_manager else "draft"
+        current_step = 1 if waiting_for_manager else 0
+        db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
+        if waiting_for_manager:
+            db.execute(
+                """INSERT INTO evaluation_approvals
+                   (evaluation_id,step_no,approver_employee_id,status,comment,decided_at,created_at)
+                   VALUES(?,1,?,'pending','',NULL,?)""",
+                (evaluation_id, manager_id, stamp),
+            )
+        db.execute(
+            "UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?",
+            (stamp, evaluation_id),
+        )
+        db.execute(
+            """UPDATE evaluations
+                  SET workflow_version=2,status=?,manager_employee_id=?,current_step=?,
+                      weighted_score=NULL,rating=NULL,finalized_at=NULL,
+                      manager_report='',manager_submitted_at=NULL,hr_reviewed_by=NULL,
+                      hr_comment='',disclosure_date=NULL,updated_at=?
+                WHERE id=?""",
+            (migrated_status, manager_id, current_step, stamp, evaluation_id),
+        )
+        db.execute(
+            """INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details,created_at)
+               VALUES(NULL,'evaluation.workflow_migrate_v2','evaluation',?,?,?)""",
+            (
+                str(evaluation_id),
+                json_text({
+                    "from_status": evaluation["status"],
+                    "to_status": migrated_status,
+                    "manager_employee_id": manager_id,
+                }),
+                stamp,
+            ),
+        )
+
+
+def database_direct_manager_id(db: sqlite3.Connection, employee_id: int) -> int | None:
+    row = db.execute(
+        """SELECT COALESCE(e.manager_id,d.manager_employee_id) AS manager_id
+             FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+            WHERE e.id=?""",
+        (employee_id,),
+    ).fetchone()
+    if row is None or not row["manager_id"] or int(row["manager_id"]) == employee_id:
+        return None
+    manager_id = int(row["manager_id"])
+    return manager_id if db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (manager_id,)).fetchone() else None
+
+
+def default_evaluation_cycle_dates(year: int) -> dict[str, str]:
+    """Return an open UAE-calendar window that safely contains legacy work."""
+    period_start = date(year, 1, 1)
+    period_end = date(year, 12, 31)
+    today = local_now().date()
+    in_year = min(period_end, max(period_start, today))
+    self_due = min(period_end, max(date(year, 10, 31), in_year + timedelta(days=30)))
+    manager_due = min(period_end, self_due + timedelta(days=15))
+    hr_due = min(period_end, manager_due + timedelta(days=15))
+    return {
+        "period_start": period_start.isoformat(),
+        "period_end": period_end.isoformat(),
+        "self_opens_on": period_start.isoformat(),
+        "self_due_on": self_due.isoformat(),
+        "manager_due_on": manager_due.isoformat(),
+        "hr_due_on": hr_due.isoformat(),
+    }
+
+
+def evaluation_cycle_announcement_body(cycle: sqlite3.Row | dict[str, Any]) -> str:
+    return (
+        f"تم إعلان {cycle['name']}. فترة الأداء من {cycle['period_start']} إلى {cycle['period_end']}. "
+        f"يفتح التقييم الذاتي في {cycle['self_opens_on']} وآخر موعد للإرسال {cycle['self_due_on']}. "
+        "افتح صفحة التقييم السنوي لإكمال أهدافك وتقييمك الذاتي."
+    )
+
+
+def evaluation_cycle_notification_body(cycle: sqlite3.Row | dict[str, Any]) -> str:
+    """Keep HR's message while guaranteeing the operational dates in every delivery."""
+    body = str(cycle["announcement_body"] or "").strip()
+    required_dates = (str(cycle["period_start"]), str(cycle["self_opens_on"]), str(cycle["self_due_on"]))
+    if body and all(value in body for value in required_dates):
+        return body
+    dated_context = evaluation_cycle_announcement_body(cycle)
+    return f"{body}\n\n{dated_context}" if body else dated_context
+
+
+def enroll_evaluation_cycle(
+    db: sqlite3.Connection,
+    cycle_id: int,
+    actor_user_id: int | None,
+    *,
+    notify: bool,
+) -> dict[str, int | None]:
+    cycle = db.execute("SELECT * FROM evaluation_cycles WHERE id=?", (cycle_id,)).fetchone()
+    if cycle is None:
+        raise ValueError("evaluation cycle not found")
+    stamp = now_iso()
+    created = 0
+    missing_manager = 0
+    recipients: list[tuple[int, int]] = []
+    for employee in db.execute("SELECT id FROM employees WHERE active=1 ORDER BY id").fetchall():
+        employee_id = int(employee["id"])
+        manager_id = database_direct_manager_id(db, employee_id)
+        if manager_id is None:
+            missing_manager += 1
+        cursor = db.execute(
+            """INSERT OR IGNORE INTO evaluations
+               (cycle_id,employee_id,workflow_version,manager_employee_id,created_at,updated_at)
+               VALUES(?,?,2,?,?,?)""",
+            (cycle_id, employee_id, manager_id, stamp, stamp),
+        )
+        created += int(cursor.rowcount > 0)
+        db.execute(
+            """UPDATE evaluations SET manager_employee_id=?,updated_at=?
+                WHERE cycle_id=? AND employee_id=? AND status='draft'""",
+            (manager_id, stamp, cycle_id, employee_id),
+        )
+        account = db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
+        if account:
+            recipients.append((employee_id, int(account["id"])))
+
+    notification_id = int(cycle["announcement_notification_id"]) if cycle["announcement_notification_id"] else None
+    if notify and recipients:
+        sender_id = actor_user_id or db.execute(
+            "SELECT id FROM users WHERE active=1 ORDER BY is_super_admin DESC,id LIMIT 1"
+        ).fetchone()["id"]
+        for employee_id, recipient_user_id in recipients:
+            already_sent = db.execute(
+                "SELECT notification_id FROM evaluation_cycle_notifications WHERE cycle_id=? AND employee_id=?",
+                (cycle_id, employee_id),
+            ).fetchone()
+            if already_sent:
+                notification_id = notification_id or int(already_sent["notification_id"])
+                continue
+            employee_notification_id = create_internal_notification(
+                db,
+                int(sender_id),
+                [recipient_user_id],
+                str(cycle["announcement_title"] or f"إعلان {cycle['name']}"),
+                evaluation_cycle_notification_body(cycle),
+            )
+            db.execute(
+                "INSERT INTO evaluation_cycle_notifications(cycle_id,employee_id,notification_id,created_at) VALUES(?,?,?,?)",
+                (cycle_id, employee_id, employee_notification_id, stamp),
+            )
+            notification_id = notification_id or employee_notification_id
+        if cycle["announcement_notification_id"] is None and notification_id is not None:
+            db.execute(
+                "UPDATE evaluation_cycles SET announcement_notification_id=?,updated_at=? WHERE id=?",
+                (notification_id, stamp, cycle_id),
+            )
+    return {
+        "eligible": int(db.execute("SELECT COUNT(*) FROM employees WHERE active=1").fetchone()[0]),
+        "created": created,
+        "missing_manager": missing_manager,
+        "notification_id": notification_id,
+    }
+
+
+def migrate_evaluation_cycles_v51(db: sqlite3.Connection, backfill_goals: bool) -> None:
+    """Upgrade V5.0 cycles and their current goals without replacing records."""
+    actor = db.execute("SELECT id FROM users WHERE active=1 ORDER BY is_super_admin DESC,id LIMIT 1").fetchone()
+    actor_id = int(actor["id"]) if actor else None
+    stamp = now_iso()
+    legacy_cycles = db.execute(
+        "SELECT * FROM evaluation_cycles WHERE period_start IS NULL OR period_start='' ORDER BY year,id"
+    ).fetchall()
+    for cycle in legacy_cycles:
+        dates = default_evaluation_cycle_dates(int(cycle["year"]))
+        status = "announced" if bool(cycle["active"]) else "closed"
+        title = f"إعلان {cycle['name']}"
+        values = dict(cycle) | dates | {"announcement_title": title}
+        body = evaluation_cycle_announcement_body(values)
+        db.execute(
+            """UPDATE evaluation_cycles
+                  SET period_start=?,period_end=?,self_opens_on=?,self_due_on=?,manager_due_on=?,hr_due_on=?,
+                      status=?,announcement_title=?,announcement_body=?,created_by=COALESCE(created_by,?),
+                      announced_by=CASE WHEN ?='announced' THEN COALESCE(announced_by,?) ELSE announced_by END,
+                      announced_at=CASE WHEN ?='announced' THEN COALESCE(announced_at,?) ELSE announced_at END,
+                      created_at=COALESCE(created_at,?),updated_at=?
+                WHERE id=?""",
+            (
+                dates["period_start"], dates["period_end"], dates["self_opens_on"], dates["self_due_on"],
+                dates["manager_due_on"], dates["hr_due_on"], status, title, body, actor_id,
+                status, actor_id, status, stamp, stamp, stamp, cycle["id"],
+            ),
+        )
+        if status == "announced":
+            enroll_evaluation_cycle(db, int(cycle["id"]), actor_id, notify=True)
+        db.execute(
+            """INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details,created_at)
+               VALUES(?,'evaluation.cycle_migrate_v51','evaluation_cycle',?,?,?)""",
+            (actor_id, str(cycle["id"]), json_text({"status": status, **dates}), stamp),
+        )
+
+    if backfill_goals:
+        goals = db.execute(
+            """SELECT g.id,g.achievement,g.employee_comment,c.period_start,c.period_end
+                 FROM evaluation_goals g JOIN evaluations e ON e.id=g.evaluation_id
+                 JOIN evaluation_cycles c ON c.id=e.cycle_id"""
+        ).fetchall()
+        for goal in goals:
+            achievement = float(goal["achievement"] or 0)
+            progress = "completed" if achievement >= 100 else "not_completed" if achievement <= 0 else "in_progress"
+            evidence = str(goal["employee_comment"] or "").strip() or "تم ترحيل هذا الهدف من دورة سابقة."
+            db.execute(
+                """UPDATE evaluation_goals SET goal_type='result',start_date=?,end_date=?,
+                       progress_status=?,evidence_note=?,updated_at=? WHERE id=?""",
+                (goal["period_start"], goal["period_end"], progress, evidence, stamp, goal["id"]),
+            )
+
+
+def process_evaluation_reminders(db: sqlite3.Connection, today: date | None = None) -> int:
+    """Persist and deliver due reminders once per cycle, employee and type."""
+    current = today or local_now().date()
+    sent = 0
+    cycles = db.execute("SELECT * FROM evaluation_cycles WHERE status='announced'").fetchall()
+    for cycle in cycles:
+        due = date.fromisoformat(cycle["self_due_on"])
+        days = (due - current).days
+        reminder_type = "due_today" if days == 0 else "due_soon" if 0 < days <= 3 else "overdue" if days < 0 else None
+        if reminder_type is None:
+            continue
+        title = {
+            "due_soon": "اقترب موعد التقييم الذاتي",
+            "due_today": "موعد التقييم الذاتي اليوم",
+            "overdue": "تأخر إرسال التقييم الذاتي",
+        }[reminder_type]
+        for evaluation in db.execute(
+            "SELECT id,employee_id FROM evaluations WHERE cycle_id=? AND status='draft'",
+            (cycle["id"],),
+        ).fetchall():
+            account = db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["employee_id"],)).fetchone()
+            if account is None:
+                continue
+            cursor = db.execute(
+                """INSERT OR IGNORE INTO evaluation_reminders
+                   (cycle_id,employee_id,reminder_type,notification_id,created_by,sent_at)
+                   VALUES(?,?,?,NULL,?,?)""",
+                (cycle["id"], evaluation["employee_id"], reminder_type, cycle["announced_by"], now_iso()),
+            )
+            if cursor.rowcount == 0:
+                continue
+            sender_id = cycle["announced_by"] or cycle["created_by"]
+            if not sender_id:
+                sender = db.execute("SELECT id FROM users WHERE active=1 ORDER BY is_super_admin DESC,id LIMIT 1").fetchone()
+                sender_id = sender["id"] if sender else None
+            if not sender_id:
+                continue
+            body = (
+                f"الدورة: {cycle['name']}. آخر موعد للإرسال {cycle['self_due_on']}. "
+                "انتقل إلى صفحة التقييم السنوي (#evaluations) لإكمال أهدافك وتقييمك الذاتي."
+            )
+            notification_id = create_internal_notification(db, int(sender_id), [int(account["id"])], title, body)
+            db.execute("UPDATE evaluation_reminders SET notification_id=? WHERE cycle_id=? AND employee_id=? AND reminder_type=?", (notification_id, cycle["id"], evaluation["employee_id"], reminder_type))
+            sent += 1
+    return sent
+
+
+def initialize_database(db_path: Path) -> None:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    schema = SCHEMA_FILE.read_text(encoding="utf-8")
+    db = open_db(db_path)
+    try:
+        with db:
+            db.executescript(schema)
+            goal_columns_before_v51 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goals)")}
+            backfill_v50_goals = "progress_status" not in goal_columns_before_v51
+            migrations = {
+                "organization": {
+                    "visual_identity_enabled": "INTEGER NOT NULL DEFAULT 0",
+                    "visual_identity_mode": "TEXT NOT NULL DEFAULT 'static'",
+                    "visual_identity_surface": "TEXT NOT NULL DEFAULT 'both'",
+                    "visual_identity_interval_seconds": "INTEGER NOT NULL DEFAULT 20",
+                    "visual_identity_overlay": "INTEGER NOT NULL DEFAULT 58",
+                    "card_template": "TEXT NOT NULL DEFAULT 'portrait_orbit'",
+                    "card_primary_color": "TEXT NOT NULL DEFAULT '#123d34'",
+                    "card_accent_color": "TEXT NOT NULL DEFAULT '#c6a15b'",
+                    "card_back_instructions": "TEXT NOT NULL DEFAULT 'البطاقة شخصية ولا يجوز استخدامها من غير صاحبها. عند العثور عليها يرجى التواصل مع المؤسسة.'",
+                    "card_contact_phone": "TEXT NOT NULL DEFAULT ''",
+                    "card_contact_email": "TEXT NOT NULL DEFAULT ''",
+                    "smtp_host": "TEXT NOT NULL DEFAULT ''",
+                    "smtp_port": "INTEGER NOT NULL DEFAULT 587",
+                    "smtp_tls": "INTEGER NOT NULL DEFAULT 1",
+                    "smtp_ssl": "INTEGER NOT NULL DEFAULT 0",
+                    "smtp_username": "TEXT NOT NULL DEFAULT ''",
+                    "smtp_password_encrypted": "TEXT NOT NULL DEFAULT ''",
+                    "smtp_from_name": "TEXT NOT NULL DEFAULT ''",
+                    "smtp_from_email": "TEXT NOT NULL DEFAULT ''",
+                },
+                "departments": {"branch_id": "INTEGER", "updated_at": "TEXT"},
+                "employees": {
+                    "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
+                    "qualification": "TEXT NOT NULL DEFAULT ''", "nationality": "TEXT NOT NULL DEFAULT ''",
+                    "birth_date": "TEXT", "place_of_birth": "TEXT NOT NULL DEFAULT ''",
+                    "passport_no": "TEXT NOT NULL DEFAULT ''", "passport_expires_on": "TEXT",
+                    "emirates_id_no": "TEXT NOT NULL DEFAULT ''", "emirates_id_expires_on": "TEXT",
+                    "marital_status": "TEXT NOT NULL DEFAULT 'unspecified'",
+                    "address_country": "TEXT NOT NULL DEFAULT ''", "address_city": "TEXT NOT NULL DEFAULT ''",
+                    "address_area": "TEXT NOT NULL DEFAULT ''", "address_street": "TEXT NOT NULL DEFAULT ''",
+                    "address_building": "TEXT NOT NULL DEFAULT ''", "address_po_box": "TEXT NOT NULL DEFAULT ''",
+                    "address_notes": "TEXT NOT NULL DEFAULT ''",
+                },
+                "users": {
+                    "must_change_password": "INTEGER NOT NULL DEFAULT 0",
+                    "is_super_admin": "INTEGER NOT NULL DEFAULT 0",
+                    "last_password_change_at": "TEXT",
+                },
+                "sessions": {"csrf_token": "TEXT NOT NULL DEFAULT ''"},
+                "salary_certificates": {
+                    "verification_code": "TEXT NOT NULL DEFAULT ''",
+                    "integrity_hash": "TEXT NOT NULL DEFAULT ''",
+                    "verification_status": "TEXT NOT NULL DEFAULT 'valid'",
+                    "verification_count": "INTEGER NOT NULL DEFAULT 0",
+                    "last_verified_at": "TEXT",
+                    "request_status": "TEXT NOT NULL DEFAULT 'issued'",
+                    "requester_id": "INTEGER",
+                    "requested_at": "TEXT",
+                    "approved_by": "INTEGER",
+                    "approved_at": "TEXT",
+                    "decision_note": "TEXT NOT NULL DEFAULT ''",
+                    "email_outbox_id": "INTEGER",
+                },
+                "leave_requests": {
+                    "manager_employee_id": "INTEGER",
+                    "manager_decision": "TEXT NOT NULL DEFAULT 'pending'",
+                    "manager_comment": "TEXT NOT NULL DEFAULT ''",
+                    "manager_decided_by": "INTEGER",
+                    "manager_decided_at": "TEXT",
+                },
+                "evaluation_cycles": {
+                    "period_start": "TEXT",
+                    "period_end": "TEXT",
+                    "self_opens_on": "TEXT",
+                    "self_due_on": "TEXT",
+                    "manager_due_on": "TEXT",
+                    "hr_due_on": "TEXT",
+                    "status": "TEXT NOT NULL DEFAULT 'draft'",
+                    "announcement_title": "TEXT NOT NULL DEFAULT ''",
+                    "announcement_body": "TEXT NOT NULL DEFAULT ''",
+                    "created_by": "INTEGER",
+                    "announced_by": "INTEGER",
+                    "announced_at": "TEXT",
+                    "announcement_notification_id": "INTEGER",
+                    "extension_reason": "TEXT NOT NULL DEFAULT ''",
+                    "created_at": "TEXT",
+                    "updated_at": "TEXT",
+                },
+                "evaluations": {
+                    "workflow_version": "INTEGER NOT NULL DEFAULT 1",
+                    "manager_employee_id": "INTEGER",
+                    "manager_report": "TEXT NOT NULL DEFAULT ''",
+                    "manager_submitted_at": "TEXT",
+                    "hr_reviewed_by": "INTEGER",
+                    "hr_comment": "TEXT NOT NULL DEFAULT ''",
+                    "disclosure_date": "TEXT",
+                    "submitted_late": "INTEGER NOT NULL DEFAULT 0",
+                },
+                "evaluation_goals": {
+                    "source_template_id": "INTEGER",
+                    "awarded_points": "REAL",
+                    "goal_type": "TEXT NOT NULL DEFAULT 'result'",
+                    "start_date": "TEXT",
+                    "end_date": "TEXT",
+                    "progress_status": "TEXT NOT NULL DEFAULT 'not_completed'",
+                    "evidence_note": "TEXT NOT NULL DEFAULT ''",
+                },
+                "notifications": {"available_at": "TEXT"},
+            }
+            for table, columns in migrations.items():
+                existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+                for column, definition in columns.items():
+                    if column not in existing_columns:
+                        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS visual_identity_slides (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       organization_id INTEGER NOT NULL DEFAULT 1 CHECK (organization_id=1),
+                       image_data TEXT,image_mime TEXT,title_ar TEXT NOT NULL DEFAULT '',title_en TEXT NOT NULL DEFAULT '',
+                       alt_ar TEXT NOT NULL DEFAULT '',alt_en TEXT NOT NULL DEFAULT '',
+                       focus_position TEXT NOT NULL DEFAULT 'center' CHECK (focus_position IN ('center','top','bottom','right','left')),
+                       active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+                       sort_order INTEGER NOT NULL,
+                       created_by INTEGER,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+                       FOREIGN KEY (organization_id) REFERENCES organization(id) ON DELETE CASCADE,
+                       FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+                       UNIQUE (organization_id,sort_order))"""
+            )
+            # Defensive normalization for hand-edited legacy files before the
+            # stricter V5.4 settings are exposed by the API.
+            db.execute("UPDATE organization SET visual_identity_mode='static' WHERE visual_identity_mode NOT IN ('static','rotation')")
+            db.execute("UPDATE organization SET visual_identity_surface='both' WHERE visual_identity_surface NOT IN ('login','dashboard','both')")
+            db.execute("UPDATE organization SET visual_identity_interval_seconds=20 WHERE visual_identity_interval_seconds NOT BETWEEN 5 AND 300")
+            db.execute("UPDATE organization SET visual_identity_overlay=58 WHERE visual_identity_overlay NOT BETWEEN 20 AND 90")
+            db.execute("UPDATE employees SET marital_status='unspecified' WHERE marital_status NOT IN ('unspecified','single','married','divorced','widowed','separated')")
+            db.execute("UPDATE salary_certificates SET request_status='issued' WHERE request_status IS NULL OR request_status NOT IN ('requested','approved','rejected','issued')")
+            db.execute(
+                """UPDATE leave_requests
+                   SET manager_employee_id=COALESCE(
+                       manager_employee_id,
+                       (SELECT COALESCE(e.manager_id,d.manager_employee_id)
+                          FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                         WHERE e.id=leave_requests.employee_id)
+                   )"""
+            )
+            db.execute("UPDATE leave_requests SET manager_decision='approved' WHERE status='approved' AND manager_decision='pending'")
+            db.execute("UPDATE leave_requests SET manager_decision='rejected' WHERE status='rejected' AND manager_decision='pending'")
+            db.execute(
+                """UPDATE evaluations SET manager_employee_id=COALESCE(
+                       manager_employee_id,
+                       (SELECT COALESCE(e.manager_id,d.manager_employee_id)
+                          FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                         WHERE e.id=evaluations.employee_id)
+                   )"""
+            )
+            legacy_certificates = db.execute(
+                "SELECT * FROM salary_certificates WHERE verification_code='' OR integrity_hash='' ORDER BY id"
+            ).fetchall()
+            for certificate in legacy_certificates:
+                try:
+                    issue_year = datetime.fromisoformat(certificate["issued_at"]).year
+                except ValueError:
+                    issue_year = local_now().year
+                code = certificate["verification_code"] or new_certificate_verification_code(db, issue_year)
+                values = dict(certificate)
+                values["verification_code"] = code
+                digest = certificate_integrity_hash(db_path, values)
+                db.execute(
+                    "UPDATE salary_certificates SET verification_code=?,integrity_hash=? WHERE id=?",
+                    (code, digest, certificate["id"]),
+                )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_salary_certificates_verification_code ON salary_certificates(verification_code)"
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_salary_certificates_request_status ON salary_certificates(request_status, requested_at)"
+            )
+            # V5.8 adds a dedicated outbox kind and optional PDF attachment fields.
+            # Older databases used a restrictive CHECK constraint, so rebuild that
+            # small append-only table once rather than silently storing certificates
+            # as campaign messages.
+            outbox_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='email_outbox'").fetchone()
+            if outbox_schema and "salary_certificate" not in str(outbox_schema["sql"]):
+                db.execute("""CREATE TABLE email_outbox_v58 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL CHECK (kind IN ('password_reset','campaign','smtp_test','salary_certificate')),
+                    to_email TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sent','failed')),
+                    attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT '',
+                    campaign_id INTEGER, delivery_id INTEGER, user_id INTEGER,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, sent_at TEXT,
+                    attachment_name TEXT, attachment_content_type TEXT, attachment_data TEXT,
+                    FOREIGN KEY (campaign_id) REFERENCES email_campaigns(id) ON DELETE CASCADE,
+                    FOREIGN KEY (delivery_id) REFERENCES email_deliveries(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+                )""")
+                db.execute("""INSERT INTO email_outbox_v58(id,kind,to_email,subject,body,status,attempts,last_error,campaign_id,delivery_id,user_id,created_at,updated_at,sent_at)
+                              SELECT id,kind,to_email,subject,body,status,attempts,last_error,campaign_id,delivery_id,user_id,created_at,updated_at,sent_at FROM email_outbox""")
+                db.execute("DROP TABLE email_outbox")
+                db.execute("ALTER TABLE email_outbox_v58 RENAME TO email_outbox")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_outbox_status ON email_outbox(status, created_at)")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluation_goal_template_once ON evaluation_goals(evaluation_id,source_template_id) WHERE source_template_id IS NOT NULL"
+            )
+            document_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='employee_documents'").fetchone()
+            if document_schema and "'residency'" not in str(document_schema["sql"]):
+                db.execute("""CREATE TABLE employee_documents_v44 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, employee_id INTEGER NOT NULL,
+                    document_type TEXT NOT NULL CHECK (document_type IN ('passport','identity','residency','visa','work_permit','contract','job_offer','qualification','professional_certificate','marriage_certificate','birth_certificate','good_conduct','medical_exam','health_insurance','driving_license','personal_photo','employee_file','undertaking','violation','bank_document','other','general')),
+                    title TEXT NOT NULL, document_number TEXT NOT NULL DEFAULT '', issuer TEXT NOT NULL DEFAULT '',
+                    issued_on TEXT, expires_on TEXT, no_expiry INTEGER NOT NULL DEFAULT 0 CHECK (no_expiry IN (0,1)),
+                    file_name TEXT NOT NULL, mime_type TEXT NOT NULL, data_url TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '',
+                    archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)), visible_to_employee INTEGER NOT NULL DEFAULT 1 CHECK (visible_to_employee IN (0,1)),
+                    uploaded_by INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT,
+                    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+                    FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE RESTRICT)""")
+                db.execute("""INSERT INTO employee_documents_v44(id,employee_id,document_type,title,file_name,mime_type,data_url,visible_to_employee,uploaded_by,created_at,updated_at)
+                              SELECT id,employee_id,document_type,title,file_name,mime_type,data_url,visible_to_employee,uploaded_by,created_at,created_at FROM employee_documents""")
+                db.execute("DROP TABLE employee_documents")
+                db.execute("ALTER TABLE employee_documents_v44 RENAME TO employee_documents")
+            stamp = now_iso()
+            db.execute(
+                "INSERT OR IGNORE INTO organization(id,display_name,legal_name,sector,emirate,address,phone,email,website,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?)",
+                ("خيشة - Khaisha", "خيشة - Khaisha", "الخدمات المهنية", "دبي", "دبي، الإمارات العربية المتحدة", "+971 4 000 0000", "people@demo.ae", "https://example.ae", stamp),
+            )
+            # V5.2: migrate only identities shipped by older demo builds.  A tenant
+            # name entered by the customer is deliberately outside this allowlist.
+            db.execute(
+                """UPDATE organization SET display_name='خيشة - Khaisha',updated_at=?
+                     WHERE id=1 AND display_name IN ('مجموعة أفق المؤسسية','منصة موارد','موارد')""",
+                (stamp,),
+            )
+            db.execute(
+                """UPDATE organization SET legal_name='خيشة - Khaisha',updated_at=?
+                     WHERE id=1 AND legal_name IN ('مجموعة أفق المؤسسية ذ.م.م','مجموعة أفق المؤسسية','منصة موارد','موارد')""",
+                (stamp,),
+            )
+            for name in ("الإدارة العامة", "الموارد البشرية", "العمليات", "المالية"):
+                db.execute("INSERT OR IGNORE INTO departments(name,created_at) VALUES(?,?)", (name, stamp))
+            grade_seed = (("G-07", "الدرجة السابعة"), ("G-12", "الدرجة الثانية عشرة"), ("G-15", "الدرجة الخامسة عشرة"))
+            for code, name in grade_seed:
+                db.execute("INSERT OR IGNORE INTO job_grades(code,name,created_at,updated_at) VALUES(?,?,?,?)", (code, name, stamp, stamp))
+            hr_dept = db.execute("SELECT id FROM departments WHERE name='الموارد البشرية'").fetchone()[0]
+            ops_dept = db.execute("SELECT id FROM departments WHERE name='العمليات'").fetchone()[0]
+            gm_dept = db.execute("SELECT id FROM departments WHERE name='الإدارة العامة'").fetchone()[0]
+            db.execute(
+                "INSERT OR IGNORE INTO branches(name,address,latitude,longitude,radius_m,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("المقر الرئيسي", "دبي، الإمارات العربية المتحدة", 25.204849, 55.270783, 250, 1, stamp, stamp),
+            )
+            branch_id = db.execute("SELECT id FROM branches WHERE name='المقر الرئيسي'").fetchone()[0]
+            db.execute(
+                "INSERT OR IGNORE INTO shifts(name,start_time,end_time,break_minutes,working_days,rest_days,grace_minutes,daily_limit_minutes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("الدوام الإداري", "08:00", "17:00", 60, "[0,1,2,3,4]", "[5,6]", 10, 480, stamp, stamp),
+            )
+            employee_seed = [
+                ("EMP-1001", "خالد المنصوري", "gm@demo.ae", "المدير العام", "G-15", gm_dept, None, 45000),
+                ("EMP-1002", "مريم الهاشمي", "manager@demo.ae", "مديرة العمليات", "G-12", ops_dept, None, 28000),
+                ("EMP-1003", "ليلى الحمادي", "hr@demo.ae", "مديرة الموارد البشرية", "G-12", hr_dept, None, 26000),
+                ("EMP-1024", "أحمد الراشدي", "employee@demo.ae", "أخصائي عمليات", "G-07", ops_dept, None, 12000),
+            ]
+            employee_ids: dict[str, int] = {}
+            for employee_no, name, email, title, grade, dept, manager, salary in employee_seed:
+                db.execute("INSERT OR IGNORE INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)", (title, dept, stamp, stamp))
+                db.execute(
+                    "INSERT OR IGNORE INTO employees(employee_no,full_name,email,job_title,job_grade,department_id,branch_id,manager_id,hire_date,salary,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (employee_no, name, email, title, grade, dept, branch_id, manager, "2023-01-01", salary, stamp, stamp),
+                )
+                employee_ids[employee_no] = int(db.execute("SELECT id FROM employees WHERE employee_no=?", (employee_no,)).fetchone()[0])
+                title_id = db.execute("SELECT id FROM job_titles WHERE name=?", (title,)).fetchone()[0]
+                grade_id = db.execute("SELECT id FROM job_grades WHERE code=?", (grade,)).fetchone()[0]
+                db.execute("UPDATE employees SET job_title_id=COALESCE(job_title_id,?),job_grade_id=COALESCE(job_grade_id,?) WHERE employee_no=?", (title_id, grade_id, employee_no))
+            for title_row in db.execute("SELECT id,name FROM job_titles").fetchall():
+                seed_job_goal_templates(db, int(title_row["id"]), str(title_row["name"]), stamp)
+            gm_emp = employee_ids["EMP-1001"]
+            manager_emp = employee_ids["EMP-1002"]
+            hr_emp = employee_ids["EMP-1003"]
+            regular_emp = employee_ids["EMP-1024"]
+            db.execute("UPDATE employees SET manager_id=? WHERE id IN (?,?)", (gm_emp, manager_emp, hr_emp))
+            db.execute("UPDATE employees SET manager_id=? WHERE id=?", (manager_emp, regular_emp))
+            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (gm_emp, gm_dept))
+            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (manager_emp, ops_dept))
+            db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (hr_emp, hr_dept))
+            db.execute("UPDATE branches SET manager_employee_id=? WHERE id=?", (manager_emp, branch_id))
+            admin_user = seed_user(db, "admin@demo.ae", "Admin@123", "مدير النظام", "admin", None)
+            db.execute("UPDATE users SET is_super_admin=1 WHERE id=?", (admin_user,))
+            seed_user(db, "hr@demo.ae", "HR@12345", "ليلى الحمادي", "hr", hr_emp)
+            seed_user(db, "employee@demo.ae", "Emp@12345", "أحمد الراشدي", "employee", regular_emp)
+            seed_user(db, "manager@demo.ae", "Manager@12345", "مريم الهاشمي", "manager", manager_emp)
+            seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "general_manager", gm_emp)
+            shift_id = db.execute("SELECT id FROM shifts WHERE name='الدوام الإداري'").fetchone()[0]
+            for emp_id in employee_ids.values():
+                exists = db.execute("SELECT 1 FROM employee_shift_assignments WHERE employee_id=?", (emp_id,)).fetchone()
+                if not exists:
+                    db.execute(
+                        "INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,created_by,created_at) VALUES(?,?,?,?,?)",
+                        (emp_id, shift_id, "2023-01-01", admin_user, stamp),
+                    )
+            leave_seed = [
+                ("annual", "إجازة سنوية", 30, 0, 0, 1),
+                ("sick", "إجازة مرضية", 90, 0, 1, 1),
+                ("parental", "إجازة والدية", 5, 0, 1, 1),
+                ("bereavement", "إجازة حداد", 5, 0, 1, 1),
+                ("study", "إجازة دراسية", 10, 7, 1, 1),
+                ("unpaid", "إجازة بدون راتب", 0, 7, 0, 0),
+            ]
+            for values in leave_seed:
+                db.execute("INSERT OR IGNORE INTO leave_types(code,name,annual_entitlement,min_notice_days,requires_attachment,paid) VALUES(?,?,?,?,?,?)", values)
+            current_year = local_now().year
+            for emp_id in employee_ids.values():
+                for leave in db.execute("SELECT id,annual_entitlement FROM leave_types WHERE active=1").fetchall():
+                    db.execute(
+                        "INSERT OR IGNORE INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)",
+                        (emp_id, leave["id"], current_year, leave["annual_entitlement"]),
+                    )
+            db.execute(
+                "INSERT OR IGNORE INTO evaluation_cycles(year,name,starts_on,ends_on,active) VALUES(?,?,?,?,1)",
+                (current_year, f"تقييم الأداء {current_year}", f"{current_year}-01-01", f"{current_year}-12-31"),
+            )
+            migrate_evaluation_cycles_v51(db, backfill_v50_goals)
+            migrate_nonterminal_legacy_evaluations(db)
+            process_evaluation_reminders(db)
+    finally:
+        db.close()
+
+
+def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str) -> bool:
+    if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
+        return True
+    override = db.execute("SELECT granted FROM user_permissions WHERE user_id=? AND permission=?", (user["id"], permission)).fetchone()
+    if override is not None:
+        return bool(override["granted"])
+    base = ROLE_PERMISSIONS.get(str(user["role"]), set())
+    return "*" in base or permission in base
+
+
+def effective_permissions(db: sqlite3.Connection, user: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
+    if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
+        values = sorted(ALL_PERMISSIONS | {"*"})
+        return values, {permission: "protected_super_admin" for permission in values}
+    base = ROLE_PERMISSIONS.get(str(user.get("role")), set())
+    granted = set(ALL_PERMISSIONS if "*" in base else base)
+    reasons = {permission: f"role:{user.get('role')}" for permission in granted}
+    for item in db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=?", (user["id"],)):
+        if bool(item["granted"]):
+            granted.add(item["permission"]); reasons[item["permission"]] = "explicit_grant"
+        else:
+            granted.discard(item["permission"]); reasons[item["permission"]] = "explicit_deny"
+    return sorted(granted), reasons
+
+
+def audit(db: sqlite3.Connection, actor_id: int | None, action: str, entity_type: str, entity_id: Any, details: Any = None) -> None:
+    db.execute(
+        "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
+        (actor_id, action, entity_type, str(entity_id) if entity_id is not None else None, json_text(details or {}), now_iso()),
+    )
+
+
+def create_internal_notification(
+    db: sqlite3.Connection,
+    sender_user_id: int,
+    recipient_user_ids: list[int] | set[int],
+    title: str,
+    body: str,
+    available_at: str | None = None,
+) -> int | None:
+    recipients = sorted({int(value) for value in recipient_user_ids if int(value) > 0})
+    if not recipients:
+        return None
+    stamp = now_iso()
+    cursor = db.execute(
+        "INSERT INTO notifications(sender_user_id,title,body,message_type,audience_type,audience_ref,available_at,created_at) VALUES(?,?,?,'notice','employees',?,?,?)",
+        (sender_user_id, title, body, json_text(recipients), available_at, stamp),
+    )
+    notification_id = int(cursor.lastrowid)
+    db.executemany(
+        "INSERT INTO notification_recipients(notification_id,user_id) VALUES(?,?)",
+        [(notification_id, recipient_id) for recipient_id in recipients],
+    )
+    return notification_id
+
+
+def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = {
+        "id": row["id"], "email": row["email"], "name": row["display_name"],
+        "role": row["role"], "employee_id": row["employee_id"], "active": bool(row["active"]),
+    }
+    keys = row.keys() if hasattr(row, "keys") else row
+    data["must_change_password"] = bool(row["must_change_password"]) if "must_change_password" in keys else False
+    data["is_super_admin"] = bool(row["is_super_admin"]) if "is_super_admin" in keys else False
+    return data
+
+
+def serialize_org(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data.pop("id", None)
+    for key in ("smtp_host", "smtp_port", "smtp_tls", "smtp_ssl", "smtp_username", "smtp_password_encrypted", "smtp_from_name", "smtp_from_email"):
+        data.pop(key, None)
+    return data
+
+
+def visual_identity_slide_payload(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["active"] = bool(data.get("active"))
+    data.pop("organization_id", None)
+    data.pop("created_by", None)
+    image_data = str(data.get("image_data") or "")
+    if image_data and "," in image_data:
+        try:
+            data["image_bytes"] = len(base64.b64decode(image_data.split(",", 1)[1], validate=True))
+        except ValueError:
+            data["image_bytes"] = 0
+    else:
+        data["image_bytes"] = 0
+    return data
+
+
+def visual_identity_payload(db: sqlite3.Connection, organization: sqlite3.Row, admin: bool = False) -> dict[str, Any]:
+    enabled = bool(organization["visual_identity_enabled"])
+    mode = str(organization["visual_identity_mode"] or "static")
+    payload = {
+        "enabled": enabled,
+        "mode": mode,
+        "surface": str(organization["visual_identity_surface"] or "both"),
+        "interval_seconds": int(organization["visual_identity_interval_seconds"] or 20),
+        "overlay": int(organization["visual_identity_overlay"] or 58),
+        "slides": [],
+    }
+    if admin:
+        rows = db.execute("SELECT * FROM visual_identity_slides WHERE organization_id=1 ORDER BY sort_order,id").fetchall()
+    elif enabled:
+        limit = " LIMIT 1" if mode == "static" else ""
+        rows = db.execute(
+            "SELECT * FROM visual_identity_slides WHERE organization_id=1 AND active=1 ORDER BY sort_order,id" + limit
+        ).fetchall()
+    else:
+        rows = []
+    payload["slides"] = [visual_identity_slide_payload(row) for row in rows]
+    return payload
+
+
+EMPLOYEE_SENSITIVE_FIELDS = (
+    "birth_date", "place_of_birth", "passport_no", "passport_expires_on",
+    "emirates_id_no", "emirates_id_expires_on", "marital_status",
+    "address_country", "address_city", "address_area", "address_street",
+    "address_building", "address_po_box", "address_notes",
+)
+
+
+def employee_query(include_salary: bool = True, include_sensitive: bool = False) -> str:
+    salary = "e.salary" if include_salary else "NULL AS salary"
+    sensitive = "," + ",".join(f"e.{field}" for field in EMPLOYEE_SENSITIVE_FIELDS) if include_sensitive else ""
+    emergency_count = "," + "(SELECT COUNT(*) FROM employee_emergency_contacts ec WHERE ec.employee_id=e.id AND ec.archived=0) AS emergency_contact_count" if include_sensitive else ""
+    return f"""
+        SELECT e.id,e.employee_no,e.full_name,e.email,e.phone,
+               COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
+               e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
+               e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
+               e.manager_id,m.full_name AS manager_name,e.hire_date,e.qualification,e.nationality,{salary},e.photo_data,e.active{sensitive}{emergency_count},
+               e.created_at,e.updated_at,
+               (SELECT COUNT(*) FROM employee_documents ed WHERE ed.employee_id=e.id) AS document_count,
+               (SELECT COUNT(*) FROM employee_actions ea WHERE ea.employee_id=e.id AND ea.action_type='violation') AS violation_count,
+               (SELECT COUNT(*) FROM employee_actions ea WHERE ea.employee_id=e.id AND ea.action_type='undertaking') AS undertaking_count
+        FROM employees e
+        LEFT JOIN departments d ON d.id=e.department_id
+        LEFT JOIN branches b ON b.id=e.branch_id
+        LEFT JOIN employees m ON m.id=e.manager_id
+        LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+        LEFT JOIN job_grades jg ON jg.id=e.job_grade_id
+    """
+
+
+def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    data = dict(row)
+    data["active"] = bool(data["active"])
+    if "birth_date" in data:
+        data["age_years"] = None
+        if data.get("birth_date"):
+            try:
+                born = date.fromisoformat(str(data["birth_date"]))
+                today = local_now().date()
+                data["age_years"] = today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+            except ValueError:
+                data["age_years"] = None
+        completeness_fields = (
+            "full_name", "photo_data", "employee_no", "email", "phone", "birth_date", "nationality",
+            "passport_no", "emirates_id_no", "qualification", "job_title", "job_grade",
+            "department_id", "branch_id", "manager_id", "hire_date", "address_country", "address_city",
+            "emergency_contact_count",
+        )
+        filled = sum(bool(data.get(field)) for field in completeness_fields)
+        data["profile_completeness"] = {
+            "percent": round((filled / len(completeness_fields)) * 100),
+            "filled": filled,
+            "total": len(completeness_fields),
+            "missing": [field for field in completeness_fields if not data.get(field)],
+        }
+    if data.get("hire_date"):
+        try:
+            service_days=max(0,(local_now().date()-date.fromisoformat(data["hire_date"])).days)
+            data["service_days"]=service_days; data["service_years"]=round(service_days/365.2425,1)
+        except ValueError:
+            data["service_days"]=None; data["service_years"]=None
+    return data
+
+
+def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPRequestHandler]:
+    class HRHandler(BaseHTTPRequestHandler):
+        server_version = f"KhaishaHR/{APP_VERSION}"
+        protocol_version = "HTTP/1.1"
+
+        def setup(self) -> None:
+            super().setup()
+            self.db = open_db(db_path)
+            self._user: dict[str, Any] | None | bool = False
+
+        def finish(self) -> None:
+            try:
+                self.db.close()
+            finally:
+                super().finish()
+
+        def log_message(self, fmt: str, *args: Any) -> None:
+            sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+
+        def end_headers(self) -> None:
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "same-origin")
+            self.send_header("Permissions-Policy", "geolocation=(self)")
+            self.send_header("Cache-Control", "no-store" if self.path.startswith("/api/") else "no-cache")
+            super().end_headers()
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self.send_header("Allow", "GET, HEAD, POST, PATCH, DELETE, OPTIONS")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_HEAD(self) -> None:
+            self._dispatch("HEAD")
+
+        def do_GET(self) -> None:
+            self._dispatch("GET")
+
+        def do_POST(self) -> None:
+            self._dispatch("POST")
+
+        def do_PATCH(self) -> None:
+            self._dispatch("PATCH")
+
+        def do_DELETE(self) -> None:
+            self._dispatch("DELETE")
+
+        def _dispatch(self, method: str) -> None:
+            # A BaseHTTPRequestHandler instance serves every request carried by
+            # one HTTP/1.1 keep-alive connection. Authentication must therefore
+            # be resolved anew from the cookie for each request, not cached for
+            # the lifetime of the TCP connection.
+            self._user = False
+            try:
+                parsed = urlsplit(self.path)
+                path = parsed.path.rstrip("/") or "/"
+                self.query = {k: v[-1] for k, v in parse_qs(parsed.query).items() if v}
+                if not path.startswith("/api/") and path != "/api":
+                    if method not in ("GET", "HEAD"):
+                        raise APIError(405, "الطريقة غير مسموحة.", "method_not_allowed")
+                    return self.serve_static(path, head=(method == "HEAD"))
+
+                if method in {"POST", "PATCH", "DELETE"} and path not in {
+                    "/api/auth/login", "/api/auth/forgot-password", "/api/auth/reset-password",
+                    "/api/auth/reset-password/validate",
+                }:
+                    session_user = self.current_user(False)
+                    if session_user is not None:
+                        expected_csrf = str(session_user.get("csrf_token") or "")
+                        supplied_csrf = self.headers.get("X-CSRF-Token", "")
+                        if not expected_csrf or not hmac.compare_digest(expected_csrf, supplied_csrf):
+                            raise APIError(403, "رمز حماية الطلب غير صالح. حدّث الصفحة وحاول مجدداً.", "csrf_failed")
+                request_user = self.current_user(False)
+                password_gate_paths = {
+                    "/api/health", "/api/org", "/api/auth/login", "/api/auth/logout", "/api/auth/me",
+                    "/api/auth/change-password", "/api/auth/forgot-password", "/api/auth/reset-password",
+                    "/api/auth/reset-password/validate",
+                }
+                if request_user and bool(request_user.get("must_change_password")) and path not in password_gate_paths:
+                    raise APIError(428, "يجب تغيير كلمة المرور المؤقتة قبل متابعة العمل.", "password_change_required")
+                if request_user:
+                    with self.db:
+                        process_evaluation_reminders(self.db)
+
+                routes: list[tuple[str, str, Callable[..., Any]]] = [
+                    ("GET", r"/api/health", self.api_health),
+                    ("POST", r"/api/auth/login", self.api_login),
+                    ("POST", r"/api/auth/logout", self.api_logout),
+                    ("GET", r"/api/auth/me", self.api_auth_me),
+                    ("POST", r"/api/auth/change-password", self.api_change_password),
+                    ("POST", r"/api/auth/forgot-password", self.api_forgot_password),
+                    ("POST", r"/api/auth/reset-password/validate", self.api_reset_password_validate),
+                    ("POST", r"/api/auth/reset-password", self.api_reset_password),
+                    ("GET", r"/api/dashboard", self.api_executive_dashboard),
+                    ("GET", r"/api/org/grid", self.api_org_grid),
+                    ("GET", r"/api/admin/permissions/catalog", self.api_permission_catalog),
+                    ("GET", r"/api/admin/users", self.api_admin_users),
+                    ("PATCH", r"/api/admin/users/(\d+)", self.api_admin_user_patch),
+                    ("GET", r"/api/admin/users/(\d+)/permissions", self.api_user_permissions_get),
+                    ("PATCH", r"/api/admin/users/(\d+)/permissions", self.api_user_permissions_patch),
+                    ("POST", r"/api/admin/users/(\d+)/reset-password", self.api_admin_password_reset),
+                    ("GET", r"/api/admin/smtp", self.api_smtp_get),
+                    ("PATCH", r"/api/admin/smtp", self.api_smtp_patch),
+                    ("POST", r"/api/admin/smtp/test", self.api_smtp_test),
+                    ("GET", r"/api/admin/outbox", self.api_outbox_get),
+                    ("GET", r"/api/communications/campaigns", self.api_campaigns_get),
+                    ("POST", r"/api/communications/campaigns", self.api_campaign_post),
+                    ("GET", r"/api/communications/campaigns/(\d+)", self.api_campaign_get),
+                    ("POST", r"/api/communications/campaigns/(\d+)/retry", self.api_campaign_retry),
+                    ("GET", r"/api/org/visual-identity", self.api_visual_identity_admin_get),
+                    ("PATCH", r"/api/org/visual-identity", self.api_visual_identity_settings_patch),
+                    ("POST", r"/api/org/visual-identity/slides", self.api_visual_identity_slide_post),
+                    ("PATCH", r"/api/org/visual-identity/slides/order", self.api_visual_identity_order_patch),
+                    ("PATCH", r"/api/org/visual-identity/slides/(\d+)", self.api_visual_identity_slide_patch),
+                    ("DELETE", r"/api/org/visual-identity/slides/(\d+)", self.api_visual_identity_slide_delete),
+                    ("GET", r"/api/org", self.api_org_get),
+                    ("PATCH", r"/api/org", self.api_org_patch),
+                    ("GET", r"/api/departments", self.api_departments),
+                    ("POST", r"/api/departments", self.api_department_post),
+                    ("PATCH", r"/api/departments/(\d+)", self.api_department_patch),
+                    ("DELETE", r"/api/departments/(\d+)", self.api_department_delete),
+                    ("POST", r"/api/departments/(\d+)/assign", self.api_department_assign),
+                    ("GET", r"/api/org/hierarchy", self.api_org_hierarchy),
+                    ("GET", r"/api/job-grades", self.api_job_grades_get),
+                    ("POST", r"/api/job-grades", self.api_job_grades_post),
+                    ("PATCH", r"/api/job-grades/(\d+)", self.api_job_grade_patch),
+                    ("DELETE", r"/api/job-grades/(\d+)", self.api_job_grade_delete),
+                    ("GET", r"/api/job-titles", self.api_job_titles_get),
+                    ("POST", r"/api/job-titles", self.api_job_titles_post),
+                    ("PATCH", r"/api/job-titles/(\d+)", self.api_job_title_patch),
+                    ("DELETE", r"/api/job-titles/(\d+)", self.api_job_title_delete),
+                    ("GET", r"/api/branches", self.api_branches_get),
+                    ("POST", r"/api/branches", self.api_branches_post),
+                    ("GET", r"/api/branches/(\d+)", self.api_branch_get),
+                    ("PATCH", r"/api/branches/(\d+)", self.api_branch_patch),
+                    ("DELETE", r"/api/branches/(\d+)", self.api_branch_delete),
+                    ("POST", r"/api/branches/(\d+)/assign", self.api_branch_assign),
+                    ("POST", r"/api/branches/(\d+)/location-test", self.api_branch_location_test),
+                    ("GET", r"/api/employees", self.api_employees_get),
+                    ("POST", r"/api/employees", self.api_employees_post),
+                    ("GET", r"/api/employee-reports/search", self.api_employee_report_search),
+                    ("POST", r"/api/employees/(\d+)/comprehensive-report", self.api_employee_report_generate),
+                    ("POST", r"/api/employees/(\d+)/comprehensive-report/export", self.api_employee_report_export),
+                    ("GET", r"/api/employees/(\d+)", self.api_employee_get),
+                    ("PATCH", r"/api/employees/(\d+)", self.api_employee_patch),
+                    ("GET", r"/api/employees/(\d+)/emergency-contacts", self.api_employee_emergency_contacts_get),
+                    ("POST", r"/api/employees/(\d+)/emergency-contacts", self.api_employee_emergency_contact_post),
+                    ("PATCH", r"/api/emergency-contacts/(\d+)", self.api_employee_emergency_contact_patch),
+                    ("DELETE", r"/api/emergency-contacts/(\d+)", self.api_employee_emergency_contact_delete),
+                    ("GET", r"/api/languages/catalog", self.api_language_catalog),
+                    ("GET", r"/api/employees/(\d+)/languages", self.api_employee_languages_get),
+                    ("PATCH", r"/api/employees/(\d+)/languages", self.api_employee_languages_patch),
+                    ("GET", r"/api/employees/(\d+)/documents", self.api_employee_documents_get),
+                    ("POST", r"/api/employees/(\d+)/documents", self.api_employee_documents_post),
+                    ("GET", r"/api/documents/(\d+)", self.api_document_get),
+                    ("PATCH", r"/api/documents/(\d+)", self.api_document_patch),
+                    ("DELETE", r"/api/documents/(\d+)", self.api_document_delete),
+                    ("GET", r"/api/employees/(\d+)/actions", self.api_employee_actions_get),
+                    ("POST", r"/api/employees/(\d+)/actions", self.api_employee_actions_post),
+                    ("PATCH", r"/api/employee-actions/(\d+)", self.api_employee_action_patch),
+                    ("GET", r"/api/employees/(\d+)/card", self.api_employee_card),
+                    ("POST", r"/api/employees/(\d+)/card/print", self.api_employee_card_print),
+                    ("GET", r"/api/cards/verify/([A-Za-z0-9-]+)", self.api_card_verify),
+                    ("GET", r"/api/me/card", self.api_my_card),
+                    ("GET", r"/api/me/dashboard", self.api_my_dashboard),
+                    ("POST", r"/api/attendance/punch", self.api_attendance_punch),
+                    ("GET", r"/api/attendance/daily", self.api_attendance_daily),
+                    ("GET", r"/api/attendance/range", self.api_attendance_range),
+                    ("GET", r"/api/attendance/range\.csv", self.api_attendance_range_csv),
+                    ("GET", r"/api/shifts", self.api_shifts_get),
+                    ("POST", r"/api/shifts", self.api_shifts_post),
+                    ("PATCH", r"/api/shifts/(\d+)", self.api_shift_patch),
+                    ("DELETE", r"/api/shifts/(\d+)", self.api_shift_delete),
+                    ("POST", r"/api/shifts/(\d+)/assign", self.api_shift_assign),
+                    ("GET", r"/api/overtime", self.api_overtime_get),
+                    ("POST", r"/api/overtime", self.api_overtime_post),
+                    ("POST", r"/api/overtime/(\d+)/decision", self.api_overtime_decision),
+                    ("GET", r"/api/leaves/types", self.api_leave_types),
+                    ("GET", r"/api/leaves/balances", self.api_leave_balances),
+                    ("GET", r"/api/leaves/requests", self.api_leave_requests_get),
+                    ("POST", r"/api/leaves/requests", self.api_leave_requests_post),
+                    ("POST", r"/api/leaves/requests/(\d+)/decision", self.api_leave_request_decision),
+                    ("GET", r"/api/evaluation-cycles", self.api_evaluation_cycles_get),
+                    ("POST", r"/api/evaluation-cycles", self.api_evaluation_cycle_post),
+                    ("GET", r"/api/evaluation-cycles/(\d+)", self.api_evaluation_cycle_get),
+                    ("PATCH", r"/api/evaluation-cycles/(\d+)", self.api_evaluation_cycle_patch),
+                    ("POST", r"/api/evaluation-cycles/(\d+)/announce", self.api_evaluation_cycle_announce),
+                    ("POST", r"/api/evaluation-cycles/(\d+)/reminders", self.api_evaluation_cycle_reminders),
+                    ("GET", r"/api/evaluations", self.api_evaluations_get),
+                    ("POST", r"/api/evaluations", self.api_evaluations_post),
+                    ("GET", r"/api/evaluations/history", self.api_evaluation_history),
+                    ("GET", r"/api/employees/(\d+)/evaluations/history", self.api_employee_evaluation_history),
+                    ("GET", r"/api/evaluation-goal-templates", self.api_evaluation_goal_templates_get),
+                    ("POST", r"/api/evaluation-goal-templates", self.api_evaluation_goal_template_post),
+                    ("PATCH", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_patch),
+                    ("GET", r"/api/evaluations/(\d+)", self.api_evaluation_get),
+                    ("POST", r"/api/evaluations/(\d+)/goals", self.api_evaluation_goal_post),
+                    ("POST", r"/api/evaluations/(\d+)/goals/from-templates", self.api_evaluation_goals_from_templates),
+                    ("PATCH", r"/api/evaluation-goals/(\d+)", self.api_evaluation_goal_patch),
+                    ("DELETE", r"/api/evaluation-goals/(\d+)", self.api_evaluation_goal_delete),
+                    ("POST", r"/api/evaluations/(\d+)/submit", self.api_evaluation_submit),
+                    ("POST", r"/api/evaluations/(\d+)/decision", self.api_evaluation_decision),
+                    ("POST", r"/api/evaluations/(\d+)/manager-review", self.api_evaluation_manager_review),
+                    ("POST", r"/api/evaluations/(\d+)/hr-review", self.api_evaluation_hr_review),
+                    ("POST", r"/api/evaluations/(\d+)/grievance", self.api_evaluation_grievance_post),
+                    ("POST", r"/api/evaluation-grievances/(\d+)/resolve", self.api_evaluation_grievance_resolve),
+                    ("GET", r"/api/notifications/inbox", self.api_notification_inbox),
+                    ("GET", r"/api/notifications/unread-count", self.api_notification_unread_count),
+                    ("POST", r"/api/notifications", self.api_notification_send),
+                    ("GET", r"/api/notifications/(\d+)", self.api_notification_get),
+                    ("POST", r"/api/notifications/(\d+)/read", self.api_notification_read),
+                    ("POST", r"/api/notifications/read-all", self.api_notification_read_all),
+                    ("POST", r"/api/salary-certificates", self.api_certificate_post),
+                    ("POST", r"/api/salary-certificates/request", self.api_certificate_request_post),
+                    ("GET", r"/api/salary-certificates/requests", self.api_certificate_requests_get),
+                    ("GET", r"/api/salary-certificates/history", self.api_certificate_history_get),
+                    ("POST", r"/api/salary-certificates/verify", self.api_certificate_verify),
+                    ("GET", r"/api/salary-certificates/(\d+)", self.api_certificate_get),
+                    ("POST", r"/api/salary-certificates/(\d+)/print", self.api_certificate_print),
+                    ("POST", r"/api/salary-certificates/(\d+)/decision", self.api_certificate_request_decision),
+                    ("GET", r"/api/payroll/runs", self.api_payroll_runs_get),
+                    ("POST", r"/api/payroll/runs", self.api_payroll_runs_post),
+                    ("GET", r"/api/payroll/runs/(\d+)", self.api_payroll_run_get),
+                    ("POST", r"/api/payroll/runs/(\d+)/transition", self.api_payroll_transition),
+                    ("GET", r"/api/payroll/runs/(\d+)/export\.csv", self.api_payroll_csv),
+                    ("GET", r"/api/me/payslips", self.api_my_payslips),
+                    ("GET", r"/api/payslips/(\d+)", self.api_payslip_get),
+                    ("GET", r"/api/advances", self.api_advances_get),
+                    ("POST", r"/api/advances", self.api_advances_post),
+                    ("POST", r"/api/advances/(\d+)/decision", self.api_advance_decision),
+                    ("GET", r"/api/lifecycle/cases", self.api_lifecycle_get),
+                    ("POST", r"/api/lifecycle/cases", self.api_lifecycle_post),
+                    ("PATCH", r"/api/lifecycle/cases/(\d+)", self.api_lifecycle_patch),
+                    ("DELETE", r"/api/lifecycle/cases/(\d+)", self.api_lifecycle_delete),
+                    ("GET", r"/api/reports/summary", self.api_report_summary),
+                    ("GET", r"/api/reports/summary\.csv", self.api_report_summary_csv),
+                ]
+                for route_method, pattern, handler in routes:
+                    match = re.fullmatch(pattern, path)
+                    if match and route_method == method:
+                        return handler(*[int(x) if x.isdigit() else x for x in match.groups()])
+                if any(re.fullmatch(pattern, path) for _, pattern, _ in routes):
+                    raise APIError(405, "الطريقة غير مسموحة.", "method_not_allowed")
+                raise APIError(404, "واجهة الخدمة المطلوبة غير موجودة.", "not_found")
+            except APIError as exc:
+                self.send_api_error(exc)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                self.log_error("Unhandled API error: %r", exc)
+                self.send_api_error(APIError(500, "حدث خطأ داخلي غير متوقع.", "internal_error"))
+
+        def read_json(self) -> dict[str, Any]:
+            content_type = self.headers.get_content_type()
+            if content_type != "application/json":
+                raise APIError(415, "أرسل البيانات بصيغة application/json.", "unsupported_media_type")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                raise APIError(400, "طول الطلب غير صالح.", "invalid_request")
+            if length <= 0 or length > MAX_JSON_BYTES:
+                raise APIError(413 if length > MAX_JSON_BYTES else 400, "حجم الطلب غير صالح.", "payload_too_large" if length > MAX_JSON_BYTES else "invalid_request")
+            try:
+                data = json.loads(self.rfile.read(length))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                raise APIError(400, "تعذر قراءة JSON.", "invalid_json")
+            if not isinstance(data, dict):
+                raise APIError(422, "يجب أن يكون الطلب كائناً JSON.", "validation_error")
+            return data
+
+        def send_json(self, status: int, payload: Any, cookie: str | None = None) -> None:
+            raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            if cookie:
+                self.send_header("Set-Cookie", cookie)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(raw)
+
+        def send_csv(self, filename: str, rows: list[list[Any]]) -> None:
+            buffer = io.StringIO(newline="")
+            writer = csv.writer(buffer)
+            writer.writerows(rows)
+            raw = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(raw)
+
+        def send_api_error(self, exc: APIError) -> None:
+            payload: dict[str, Any] = {"error": exc.message, "code": exc.code}
+            if exc.details is not None:
+                payload["details"] = exc.details
+            self.send_json(exc.status, payload)
+
+        def client_ip(self) -> str:
+            return str(self.client_address[0] if self.client_address else "local")[:80]
+
+        def rate_limit(self, action: str, key: str, maximum: int, window_minutes: int) -> bool:
+            """Return True when the request is within its rolling persistence-backed window."""
+            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            now = utc_now(); row = self.db.execute(
+                "SELECT window_started,attempts FROM auth_rate_limits WHERE rate_key=? AND action=?", (digest, action)
+            ).fetchone()
+            fresh = True
+            if row:
+                try: fresh = datetime.fromisoformat(row["window_started"]) + timedelta(minutes=window_minutes) <= now
+                except ValueError: fresh = True
+            with self.db:
+                if not row or fresh:
+                    self.db.execute("INSERT OR REPLACE INTO auth_rate_limits(rate_key,action,window_started,attempts) VALUES(?,?,?,1)", (digest, action, now.isoformat(timespec="seconds")))
+                    return True
+                attempts = int(row["attempts"]) + 1
+                self.db.execute("UPDATE auth_rate_limits SET attempts=? WHERE rate_key=? AND action=?", (attempts, digest, action))
+            return attempts <= maximum
+
+        def serve_static(self, path: str, head: bool = False) -> None:
+            from urllib.parse import unquote
+            clean = unquote(path).lstrip("/") or "index.html"
+            candidate = (static_root / clean).resolve()
+            try:
+                candidate.relative_to(static_root.resolve())
+            except ValueError:
+                raise APIError(403, "المسار غير مسموح.", "forbidden")
+            if candidate.is_dir():
+                candidate = candidate / "index.html"
+            if not candidate.is_file() or candidate.suffix.lower() in {".py", ".sql", ".sqlite", ".sqlite3", ".command"} or "data" in candidate.parts:
+                raise APIError(404, "الملف غير موجود.", "not_found")
+            raw = candidate.read_bytes()
+            mime = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", f"{mime}; charset=utf-8" if mime.startswith("text/") else mime)
+            self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Last-Modified", formatdate(candidate.stat().st_mtime, usegmt=True))
+            self.end_headers()
+            if not head:
+                self.wfile.write(raw)
+
+        def current_user(self, required: bool = True) -> dict[str, Any] | None:
+            if self._user is not False:
+                if required and self._user is None:
+                    raise APIError(401, "يرجى تسجيل الدخول أولاً.", "authentication_required")
+                return self._user  # type: ignore[return-value]
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            morsel = cookie.get(SESSION_COOKIE)
+            user = None
+            if morsel:
+                token_hash = hashlib.sha256(morsel.value.encode("ascii", "ignore")).hexdigest()
+                row = self.db.execute(
+                    """SELECT u.id,u.email,u.display_name,u.role,u.employee_id,u.active,u.must_change_password,u.is_super_admin,
+                              s.expires_at,s.csrf_token
+                       FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?""",
+                    (token_hash,),
+                ).fetchone()
+                if row and bool(row["active"]):
+                    try:
+                        expires = datetime.fromisoformat(row["expires_at"])
+                    except ValueError:
+                        expires = utc_now() - timedelta(seconds=1)
+                    if expires > utc_now():
+                        user = dict(row)
+                        user.pop("expires_at", None)
+                        self.db.execute("UPDATE sessions SET last_seen_at=? WHERE token_hash=?", (now_iso(), token_hash))
+                        self.db.commit()
+                    else:
+                        self.db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
+                        self.db.commit()
+            self._user = user
+            if required and user is None:
+                raise APIError(401, "يرجى تسجيل الدخول أولاً.", "authentication_required")
+            return user
+
+        def require_permission(self, permission: str) -> dict[str, Any]:
+            user = self.current_user(True)
+            assert user is not None
+            if bool(user.get("must_change_password")):
+                raise APIError(428, "يجب تغيير كلمة المرور المؤقتة قبل متابعة العمل.", "password_change_required")
+            if not has_permission(self.db, user, permission):
+                raise APIError(403, "لا تملك الصلاحية اللازمة لهذا الإجراء.", "forbidden", {"permission": permission})
+            return user
+
+        def own_employee_id(self) -> int:
+            user = self.current_user(True)
+            assert user is not None
+            if user.get("employee_id") is None:
+                raise APIError(409, "حساب المستخدم غير مرتبط بملف موظف.", "employee_not_linked")
+            return int(user["employee_id"])
+
+        def has_privileged_people_access(self, user: dict[str, Any], permission: str) -> bool:
+            return str(user.get("role")) in PEOPLE_ADMIN_ROLES and has_permission(self.db, user, permission)
+
+        def team_member_row(self, manager_employee_id: int, employee_id: int) -> sqlite3.Row | None:
+            return self.db.execute(
+                """SELECT e.id,e.employee_no,e.full_name
+                     FROM employees e
+                     LEFT JOIN departments d ON d.id=e.department_id
+                    WHERE e.id=? AND e.active=1 AND e.id<>?
+                      AND (e.manager_id=? OR d.manager_employee_id=?)""",
+                (employee_id, manager_employee_id, manager_employee_id, manager_employee_id),
+            ).fetchone()
+
+        def direct_manager_employee_id(self, employee_id: int) -> int | None:
+            row = self.db.execute(
+                """SELECT e.manager_id,d.manager_employee_id
+                     FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                    WHERE e.id=?""",
+                (employee_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            manager_id = row["manager_id"] or row["manager_employee_id"]
+            return int(manager_id) if manager_id and int(manager_id) != employee_id else None
+
+        def may_access_employee(self, employee_id: int, broad_permission: str = "employee.view") -> bool:
+            user = self.current_user(True)
+            assert user is not None
+            if user.get("employee_id") == employee_id:
+                return True
+            return self.has_privileged_people_access(user, broad_permission) or has_permission(self.db, user, "employee.profile.edit")
+
+        # Authentication and basic reference data
+        def api_health(self) -> None:
+            self.send_json(200, {"ok": True, "service": "Khaisha HR", "version": APP_VERSION})
+
+        def api_login(self) -> None:
+            data = self.read_json()
+            email = clean_email(data.get("email"))
+            password = str(data.get("password", ""))
+            if not email or not password:
+                raise APIError(422, "البريد وكلمة المرور مطلوبان.", "validation_error")
+            row = self.db.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE", (email,)).fetchone()
+            if row is None or not bool(row["active"]) or not verify_password(password, row["password_hash"], row["password_salt"]):
+                allowed = self.rate_limit("login", f"{self.client_ip()}|{email}", 12, 15)
+                with self.db: audit(self.db, row["id"] if row else None, "auth.login_failed", "security", row["id"] if row else None, {"email_hash": hashlib.sha256(email.encode()).hexdigest()[:16]})
+                if not allowed:
+                    with self.db: audit(self.db, None, "auth.login_rate_limited", "security", None, {"email_hash": hashlib.sha256(email.encode()).hexdigest()[:16]})
+                    raise APIError(429, "محاولات كثيرة. انتظر قليلاً ثم أعد المحاولة.", "rate_limited")
+                raise APIError(401, "بيانات الدخول غير صحيحة.", "invalid_credentials")
+            with self.db:
+                self.db.execute("DELETE FROM auth_rate_limits WHERE rate_key=? AND action='login'", (hashlib.sha256(f"{self.client_ip()}|{email}".encode("utf-8")).hexdigest(),))
+            raw_token = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(raw_token.encode("ascii")).hexdigest()
+            csrf_token = secrets.token_urlsafe(24)
+            stamp = now_iso()
+            expires = (utc_now() + timedelta(hours=SESSION_HOURS)).isoformat(timespec="seconds")
+            with self.db:
+                self.db.execute("DELETE FROM sessions WHERE expires_at <= ?", (stamp,))
+                self.db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,created_at,last_seen_at,csrf_token) VALUES(?,?,?,?,?,?)", (token_hash, row["id"], expires, stamp, stamp, csrf_token))
+                audit(self.db, row["id"], "auth.login", "user", row["id"])
+            cookie = f"{SESSION_COOKIE}={raw_token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_HOURS * 3600}"
+            self.send_json(200, {"user": public_user(row), "csrf_token": csrf_token}, cookie=cookie)
+
+        def api_logout(self) -> None:
+            user = self.current_user(False)
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            morsel = cookie.get(SESSION_COOKIE)
+            if morsel:
+                token_hash = hashlib.sha256(morsel.value.encode("ascii", "ignore")).hexdigest()
+                with self.db:
+                    self.db.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
+                    if user:
+                        audit(self.db, user["id"], "auth.logout", "user", user["id"])
+            self.send_json(200, {"ok": True}, cookie=f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+
+        def api_auth_me(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            if not user.get("csrf_token"):
+                csrf_token = secrets.token_urlsafe(24); cookie = SimpleCookie(self.headers.get("Cookie", "")); morsel = cookie.get(SESSION_COOKIE)
+                if morsel:
+                    token_hash = hashlib.sha256(morsel.value.encode("ascii", "ignore")).hexdigest()
+                    with self.db: self.db.execute("UPDATE sessions SET csrf_token=? WHERE token_hash=?", (csrf_token, token_hash))
+                    user["csrf_token"] = csrf_token
+            permissions, reasons = effective_permissions(self.db, user)
+            self.send_json(200, {"user": public_user(user), "permissions": permissions, "permission_reasons": reasons, "csrf_token": user.get("csrf_token", "")})
+
+        def api_change_password(self) -> None:
+            user = self.current_user(True); assert user is not None
+            data = self.read_json(); current = str(data.get("current_password", "")); password = str(data.get("password", ""))
+            if password != str(data.get("confirm_password", "")):
+                raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
+            row = self.db.execute("SELECT password_hash,password_salt FROM users WHERE id=?", (user["id"],)).fetchone()
+            if not row or not verify_password(current, row["password_hash"], row["password_salt"]):
+                raise APIError(403, "كلمة المرور الحالية غير صحيحة.", "current_password_invalid")
+            validate_password_strength(password); digest, salt = password_record(password); stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE users SET password_hash=?,password_salt=?,must_change_password=0,last_password_change_at=?,updated_at=? WHERE id=?", (digest, salt, stamp, stamp, user["id"]))
+                self.db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
+                audit(self.db, user["id"], "auth.password_changed", "user", user["id"])
+            self.send_json(200, {"ok": True, "reauthenticate": True}, cookie=f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+
+        def reset_token_row(self, raw_token: str) -> sqlite3.Row | None:
+            if not raw_token or len(raw_token) > 180: return None
+            token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+            return self.db.execute("SELECT * FROM password_reset_tokens WHERE token_hash=?", (token_hash,)).fetchone()
+
+        def api_forgot_password(self) -> None:
+            data = self.read_json(); email = clean_email(data.get("email"))
+            generic = {"ok": True, "message": "إذا كان البريد مسجلاً ونشطاً فستصل تعليمات الاسترجاع خلال دقائق."}
+            if not email or len(email) > 254:
+                self.send_json(200, generic); return
+            allowed = self.rate_limit("forgot_password", f"{self.client_ip()}|{email}", 5, 60)
+            row = self.db.execute("SELECT id,email,active FROM users WHERE email=? COLLATE NOCASE", (email,)).fetchone()
+            if allowed and row and bool(row["active"]):
+                raw_token = secrets.token_urlsafe(40); token_hash = hashlib.sha256(raw_token.encode("ascii")).hexdigest(); stamp = now_iso()
+                expires = (utc_now() + timedelta(minutes=PASSWORD_RESET_MINUTES)).isoformat(timespec="seconds")
+                port = int(self.server.server_address[1]); link = f"http://localhost:{port}/?reset_token={raw_token}#reset-password"
+                subject = "استرجاع كلمة المرور — منصة موارد"
+                body = f"تم طلب إعادة تعيين كلمة المرور. استخدم الرابط خلال {PASSWORD_RESET_MINUTES} دقيقة:\n{link}\nإذا لم تطلب ذلك فتجاهل الرسالة."
+                with self.db:
+                    self.db.execute("UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL", (stamp, row["id"]))
+                    self.db.execute("INSERT INTO password_reset_tokens(user_id,token_hash,expires_at,requested_ip,created_at) VALUES(?,?,?,?,?)", (row["id"], token_hash, expires, self.client_ip(), stamp))
+                    self.queue_email("password_reset", row["email"], subject, body, user_id=row["id"])
+                    audit(self.db, None, "auth.password_reset_requested", "user", row["id"], {"delivery": "queued_or_sent"})
+            elif not allowed:
+                with self.db: audit(self.db, None, "auth.password_reset_rate_limited", "security", None, {"email_hash": hashlib.sha256(email.encode()).hexdigest()[:16]})
+            self.send_json(200, generic)
+
+        def api_reset_password_validate(self) -> None:
+            token = str(self.read_json().get("token", "")); row = self.reset_token_row(token); valid = False
+            if row and row["used_at"] is None:
+                try: valid = datetime.fromisoformat(row["expires_at"]) > utc_now()
+                except ValueError: valid = False
+            self.send_json(200, {"valid": valid, "expires_in_minutes": PASSWORD_RESET_MINUTES if valid else 0})
+
+        def api_reset_password(self) -> None:
+            data = self.read_json(); token = str(data.get("token", "")); password = str(data.get("password", ""))
+            if password != str(data.get("confirm_password", "")):
+                raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
+            validate_password_strength(password); row = self.reset_token_row(token)
+            if not row or row["used_at"] is not None:
+                raise APIError(410, "رابط الاسترجاع غير صالح أو سبق استخدامه.", "reset_token_invalid")
+            try: expired = datetime.fromisoformat(row["expires_at"]) <= utc_now()
+            except ValueError: expired = True
+            if expired: raise APIError(410, "انتهت صلاحية رابط الاسترجاع.", "reset_token_expired")
+            digest, salt = password_record(password); stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE users SET password_hash=?,password_salt=?,must_change_password=0,last_password_change_at=?,updated_at=? WHERE id=?", (digest, salt, stamp, stamp, row["user_id"]))
+                self.db.execute("UPDATE password_reset_tokens SET used_at=? WHERE id=?", (stamp, row["id"]))
+                self.db.execute("DELETE FROM sessions WHERE user_id=?", (row["user_id"],))
+                audit(self.db, row["user_id"], "auth.password_reset_completed", "user", row["user_id"])
+            self.send_json(200, {"ok": True, "message": "تم تحديث كلمة المرور. يمكنك تسجيل الدخول الآن."})
+
+        def permission_catalog_payload(self) -> list[dict[str, Any]]:
+            group_labels = {"dashboard":"القيادة والتقارير","people":"الأشخاص والهيكل","time":"الوقت والإجازات","payroll":"الرواتب والمزايا","performance":"الأداء والتطوير","communications":"التواصل","security":"الإدارة والأمان"}
+            return [{"key": key, "label": group_labels[key], "permissions": [{"key": p, "label": label} for p, label in values.items()]} for key, values in PERMISSION_CATALOG.items()]
+
+        def api_permission_catalog(self) -> None:
+            self.require_permission("security.manage_permissions"); self.send_json(200, {"groups": self.permission_catalog_payload()})
+
+        def admin_user_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            user = dict(row); effective, reasons = effective_permissions(self.db, user)
+            overrides = [{"permission": x["permission"], "granted": bool(x["granted"])} for x in self.db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=? ORDER BY permission", (user["id"],))]
+            return public_user(user) | {"permissions": effective, "permission_reasons": reasons, "overrides": overrides, "last_password_change_at": user.get("last_password_change_at")}
+
+        def api_admin_users(self) -> None:
+            user = self.current_user(True); assert user is not None
+            if not (has_permission(self.db, user, "security.manage_users") or has_permission(self.db, user, "security.manage_permissions")):
+                raise APIError(403, "لا تملك صلاحية إدارة المستخدمين.", "forbidden")
+            rows = self.db.execute("SELECT id,email,display_name,role,employee_id,active,must_change_password,is_super_admin,last_password_change_at FROM users ORDER BY display_name").fetchall()
+            self.send_json(200, {"items": [self.admin_user_payload(row) for row in rows]})
+
+        def admin_target(self, user_id: int) -> sqlite3.Row:
+            row = self.db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row: raise APIError(404, "المستخدم غير موجود.", "not_found")
+            return row
+
+        def guard_admin_continuity(self, actor: dict[str, Any], target: sqlite3.Row, updates: dict[str, Any]) -> None:
+            if bool(target["is_super_admin"]) and (updates.get("active") == 0 or updates.get("role", target["role"]) != "admin"):
+                raise APIError(409, "لا يمكن تعطيل أو خفض دور المدير الأعلى المحمي.", "protected_super_admin")
+            removes_admin = target["role"] == "admin" and bool(target["active"]) and (updates.get("active") == 0 or updates.get("role", "admin") != "admin")
+            if removes_admin:
+                others = self.db.execute("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1 AND id<>?", (target["id"],)).fetchone()[0]
+                if not others: raise APIError(409, "يجب الإبقاء على مدير نظام نشط واحد على الأقل.", "last_admin_protected")
+
+        def api_admin_user_patch(self, user_id: int) -> None:
+            actor = self.require_permission("security.manage_users"); target = self.admin_target(user_id); data = self.read_json(); updates: dict[str, Any] = {}
+            if "active" in data: updates["active"] = 1 if bool(data["active"]) else 0
+            if "role" in data:
+                if data["role"] not in ROLE_PERMISSIONS: raise APIError(422, "الدور غير صالح.", "validation_error")
+                updates["role"] = data["role"]
+            if not updates: raise APIError(422, "لا توجد تغييرات.", "validation_error")
+            self.guard_admin_continuity(actor, target, updates); before = {k: target[k] for k in updates}; updates["updated_at"] = now_iso()
+            with self.db:
+                self.db.execute("UPDATE users SET "+",".join(f"{k}=?" for k in updates)+" WHERE id=?", (*updates.values(), user_id))
+                if updates.get("active") == 0: self.db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+                audit(self.db, actor["id"], "security.user_update", "user", user_id, {"before": before, "after": updates})
+            self.send_json(200, {"user": self.admin_user_payload(self.admin_target(user_id))})
+
+        def api_user_permissions_get(self, user_id: int) -> None:
+            self.require_permission("security.manage_permissions"); target = self.admin_target(user_id)
+            self.send_json(200, {"user": self.admin_user_payload(target), "groups": self.permission_catalog_payload()})
+
+        def api_user_permissions_patch(self, user_id: int) -> None:
+            actor = self.require_permission("security.manage_permissions"); target = self.admin_target(user_id); data = self.read_json()
+            if bool(target["is_super_admin"]): raise APIError(409, "صلاحيات المدير الأعلى المحمي ثابتة وكاملة.", "protected_super_admin")
+            raw = data.get("overrides")
+            if not isinstance(raw, list) or len(raw) > len(ALL_PERMISSIONS): raise APIError(422, "قائمة الصلاحيات غير صالحة.", "validation_error")
+            normalized: dict[str, bool] = {}
+            for item in raw:
+                if not isinstance(item, dict) or item.get("permission") not in ALL_PERMISSIONS or not isinstance(item.get("granted"), bool):
+                    raise APIError(422, "تحتوي القائمة على صلاحية غير صالحة.", "validation_error")
+                normalized[item["permission"]] = item["granted"]
+            critical = {"security.manage_permissions", "security.manage_users"}
+            if actor["id"] == user_id and any(permission in critical and not granted for permission, granted in normalized.items()):
+                raise APIError(409, "لا يمكنك منع صلاحيات الإدارة الحرجة عن حسابك الحالي.", "critical_self_deny")
+            before = [{"permission": r["permission"], "granted": bool(r["granted"])} for r in self.db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=? ORDER BY permission", (user_id,))]
+            with self.db:
+                self.db.execute("DELETE FROM user_permissions WHERE user_id=?", (user_id,))
+                self.db.executemany("INSERT INTO user_permissions(user_id,permission,granted) VALUES(?,?,?)", [(user_id, p, 1 if g else 0) for p, g in normalized.items()])
+                audit(self.db, actor["id"], "security.permissions_update", "user", user_id, {"before": before, "after": [{"permission": p, "granted": g} for p, g in normalized.items()]})
+            self.send_json(200, {"user": self.admin_user_payload(self.admin_target(user_id))})
+
+        def api_admin_password_reset(self, user_id: int) -> None:
+            actor = self.require_permission("security.reset_password"); target = self.admin_target(user_id); data = self.read_json()
+            if data.get("confirm") is not True: raise APIError(422, "يلزم تأكيد تعيين كلمة المرور المؤقتة.", "confirmation_required")
+            password = str(data.get("password", ""))
+            if password != str(data.get("confirm_password", "")): raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
+            validate_password_strength(password); digest, salt = password_record(password); stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE users SET password_hash=?,password_salt=?,must_change_password=1,last_password_change_at=?,updated_at=? WHERE id=?", (digest, salt, stamp, stamp, user_id))
+                self.db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+                audit(self.db, actor["id"], "security.temporary_password_set", "user", user_id, {"must_change_password": True})
+            self.send_json(200, {"ok": True, "must_change_password": True})
+
+        def smtp_settings(self) -> dict[str, Any]:
+            row = self.db.execute("SELECT smtp_host,smtp_port,smtp_tls,smtp_ssl,smtp_username,smtp_password_encrypted,smtp_from_name,smtp_from_email,display_name,email FROM organization WHERE id=1").fetchone()
+            return dict(row) if row else {}
+
+        def smtp_deliver(self, to_email: str, subject: str, body: str, attachment: dict[str, Any] | None = None) -> tuple[str, str]:
+            settings = self.smtp_settings()
+            if not settings.get("smtp_host"):
+                return "queued", ""
+            message = EmailMessage(); message["Subject"] = subject; message["To"] = to_email
+            message["From"] = f'{settings.get("smtp_from_name") or settings.get("display_name") or "موارد"} <{settings.get("smtp_from_email") or settings.get("email") or settings.get("smtp_username")}>'
+            message.set_content(body, subtype="plain", charset="utf-8")
+            if attachment and attachment.get("data"):
+                raw = attachment["data"] if isinstance(attachment["data"], bytes) else base64.b64decode(str(attachment["data"]))
+                message.add_attachment(raw, maintype="application", subtype="pdf", filename=str(attachment.get("name") or "salary-certificate.pdf"))
+            password = open_secret(str(settings.get("smtp_password_encrypted") or ""), db_path)
+            try:
+                smtp_class = smtplib.SMTP_SSL if bool(settings.get("smtp_ssl")) else smtplib.SMTP
+                with smtp_class(str(settings["smtp_host"]), int(settings.get("smtp_port") or 587), timeout=12) as client:
+                    if bool(settings.get("smtp_tls")) and not bool(settings.get("smtp_ssl")): client.starttls()
+                    if settings.get("smtp_username"): client.login(str(settings["smtp_username"]), password)
+                    client.send_message(message)
+                return "sent", ""
+            except (OSError, smtplib.SMTPException) as exc:
+                return "failed", type(exc).__name__
+
+        def queue_email(self, kind: str, to_email: str, subject: str, body: str, *, campaign_id: int | None = None, delivery_id: int | None = None, user_id: int | None = None, attachment: dict[str, Any] | None = None) -> tuple[int, str]:
+            stamp = now_iso(); status, error = self.smtp_deliver(to_email, subject, body, attachment)
+            cursor = self.db.execute(
+                "INSERT INTO email_outbox(kind,to_email,subject,body,status,attempts,last_error,campaign_id,delivery_id,user_id,created_at,updated_at,sent_at,attachment_name,attachment_content_type,attachment_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (kind, to_email, subject, body, status, 1 if status != "queued" else 0, error, campaign_id, delivery_id, user_id, stamp, stamp, stamp if status == "sent" else None,
+                 (attachment or {}).get("name"), (attachment or {}).get("content_type"),
+                 base64.b64encode(attachment["data"]).decode("ascii") if attachment and isinstance(attachment.get("data"), bytes) else ((attachment or {}).get("data") if attachment else None)),
+            )
+            return int(cursor.lastrowid), status
+
+        def api_smtp_get(self) -> None:
+            self.require_permission("smtp.manage"); settings = self.smtp_settings()
+            payload = {key: settings.get(key) for key in ("smtp_host","smtp_port","smtp_tls","smtp_ssl","smtp_username","smtp_from_name","smtp_from_email")}
+            payload["smtp_tls"] = bool(payload["smtp_tls"]); payload["smtp_ssl"] = bool(payload["smtp_ssl"])
+            payload["password_configured"] = bool(settings.get("smtp_password_encrypted")); payload["smtp_password"] = "••••••••" if payload["password_configured"] else ""
+            self.send_json(200, {"smtp": payload})
+
+        def api_smtp_patch(self) -> None:
+            user = self.require_permission("smtp.manage"); data = self.read_json(); values: dict[str, Any] = {}
+            for key in ("smtp_host","smtp_username","smtp_from_name","smtp_from_email"):
+                if key in data: values[key] = optional_text(data, key, 254)
+            if "smtp_port" in data: values["smtp_port"] = as_int(data["smtp_port"], "smtp_port", 1, 65535)
+            for key in ("smtp_tls","smtp_ssl"):
+                if key in data: values[key] = 1 if bool(data[key]) else 0
+            if values.get("smtp_tls") and values.get("smtp_ssl"): raise APIError(422, "اختر TLS أو SSL وليس كليهما.", "validation_error")
+            if "smtp_from_email" in values and values["smtp_from_email"] and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", values["smtp_from_email"]): raise APIError(422, "بريد المرسل غير صالح.", "validation_error")
+            if "smtp_password" in data and str(data["smtp_password"]) and "•" not in str(data["smtp_password"]):
+                values["smtp_password_encrypted"] = seal_secret(str(data["smtp_password"]), db_path)
+            if data.get("clear_password") is True: values["smtp_password_encrypted"] = ""
+            if not values: raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            with self.db:
+                self.db.execute("UPDATE organization SET "+",".join(f"{k}=?" for k in values)+",updated_at=? WHERE id=1", (*values.values(), now_iso()))
+                audit(self.db, user["id"], "smtp.settings_update", "organization", 1, {"fields": [k for k in values if k != "smtp_password_encrypted"], "password_changed": "smtp_password_encrypted" in values})
+            self.api_smtp_get()
+
+        def api_smtp_test(self) -> None:
+            user = self.require_permission("smtp.test"); data = self.read_json(); to_email = clean_email(data.get("to_email") or user["email"])
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", to_email): raise APIError(422, "بريد الاختبار غير صالح.", "validation_error")
+            with self.db:
+                outbox_id, status = self.queue_email("smtp_test", to_email, "اختبار اتصال البريد — منصة موارد", "هذه رسالة اختبار لإعدادات البريد المؤسسي.", user_id=user["id"])
+                audit(self.db, user["id"], "smtp.test", "email_outbox", outbox_id, {"status": status})
+            self.send_json(200 if status == "sent" else 202, {"status": status, "message": "تم إرسال رسالة الاختبار." if status == "sent" else "لم يتم الإرسال عبر SMTP؛ حُفظت الرسالة في صندوق التطوير الآمن."})
+
+        def api_outbox_get(self) -> None:
+            self.require_permission("smtp.manage"); rows = self.db.execute("SELECT id,kind,to_email,subject,body,status,attempts,last_error,campaign_id,created_at,updated_at,sent_at FROM email_outbox ORDER BY id DESC LIMIT 100").fetchall()
+            items = []
+            for row in rows:
+                item = dict(row)
+                if item["kind"] == "password_reset": item["body"] = "[محتوى رابط الاسترجاع محجوب أمنياً]"
+                items.append(item)
+            self.send_json(200, {"items": items})
+
+        def campaign_recipients(self, audience_type: str, audience_ref: Any) -> list[sqlite3.Row]:
+            query = "SELECT id,full_name,email,department_id,branch_id FROM employees WHERE active=1 AND email IS NOT NULL AND TRIM(email)<>''"; params: list[Any] = []
+            if audience_type == "employee": query += " AND id=?"; params.append(as_int(audience_ref, "audience_ref", 1))
+            elif audience_type == "department": query += " AND department_id=?"; params.append(as_int(audience_ref, "audience_ref", 1))
+            elif audience_type == "branch": query += " AND branch_id=?"; params.append(as_int(audience_ref, "audience_ref", 1))
+            elif audience_type != "all": raise APIError(422, "نطاق المستلمين غير صالح.", "validation_error")
+            return self.db.execute(query+" ORDER BY full_name", params).fetchall()
+
+        def campaign_payload(self, campaign_id: int, include_deliveries: bool = True) -> dict[str, Any]:
+            row = self.db.execute("SELECT c.*,u.display_name AS sender_name FROM email_campaigns c JOIN users u ON u.id=c.sender_user_id WHERE c.id=?", (campaign_id,)).fetchone()
+            if not row: raise APIError(404, "الحملة البريدية غير موجودة.", "not_found")
+            data = dict(row)
+            if include_deliveries:
+                data["deliveries"] = [dict(x) for x in self.db.execute("SELECT d.*,e.full_name AS employee_name FROM email_deliveries d JOIN employees e ON e.id=d.employee_id WHERE d.campaign_id=? ORDER BY d.id", (campaign_id,))]
+            return data
+
+        def refresh_campaign_status(self, campaign_id: int) -> None:
+            counts = self.db.execute("SELECT COUNT(*) total,SUM(status='sent') sent,SUM(status='failed') failed,SUM(status='queued') queued FROM email_deliveries WHERE campaign_id=?", (campaign_id,)).fetchone()
+            total, sent, failed, queued = (int(counts[k] or 0) for k in ("total","sent","failed","queued"))
+            status = "sent" if total and sent == total else "failed" if total and failed == total else "partial" if sent or failed else "queued"
+            self.db.execute("UPDATE email_campaigns SET status=?,recipient_count=?,sent_count=?,failed_count=?,updated_at=? WHERE id=?", (status,total,sent,failed,now_iso(),campaign_id))
+
+        def api_campaigns_get(self) -> None:
+            self.require_permission("communications.view"); rows = self.db.execute("SELECT id FROM email_campaigns ORDER BY id DESC LIMIT 100").fetchall()
+            self.send_json(200, {"items": [self.campaign_payload(row["id"], False) for row in rows]})
+
+        def api_campaign_get(self, campaign_id: int) -> None:
+            self.require_permission("communications.view"); self.send_json(200, {"campaign": self.campaign_payload(campaign_id)})
+
+        def api_campaign_post(self) -> None:
+            user = self.require_permission("communications.send"); data = self.read_json(); audience_type = str(data.get("audience_type", "")); audience_ref = data.get("audience_ref")
+            subject = require_text(data, "subject", 200); body = require_text(data, "body", 5000); template = optional_text(data, "template", 40) or "plain"
+            if template not in {"plain","announcement","policy","congratulation"}: raise APIError(422, "قالب الرسالة غير صالح.", "validation_error")
+            recipients = self.campaign_recipients(audience_type, audience_ref)
+            if not recipients: raise APIError(422, "لا يوجد مستلمون نشطون لديهم بريد ضمن النطاق المحدد.", "no_recipients")
+            if len(recipients) > 5000: raise APIError(422, "يتجاوز عدد المستلمين الحد المسموح للحملة.", "recipient_limit")
+            stamp = now_iso()
+            with self.db:
+                cursor = self.db.execute("INSERT INTO email_campaigns(sender_user_id,audience_type,audience_ref,subject,body,template,recipient_count,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (user["id"],audience_type,str(audience_ref) if audience_ref not in (None,"") else None,subject,body,template,len(recipients),stamp,stamp)); campaign_id = int(cursor.lastrowid)
+                for recipient in recipients:
+                    delivery = self.db.execute("INSERT INTO email_deliveries(campaign_id,employee_id,to_email,created_at,updated_at) VALUES(?,?,?,?,?)", (campaign_id,recipient["id"],recipient["email"],stamp,stamp)); delivery_id = int(delivery.lastrowid)
+                    _, status = self.queue_email("campaign", recipient["email"], subject, body, campaign_id=campaign_id, delivery_id=delivery_id, user_id=user["id"])
+                    self.db.execute("UPDATE email_deliveries SET status=?,attempts=?,updated_at=?,sent_at=? WHERE id=?", (status,0 if status=="queued" else 1,now_iso(),now_iso() if status=="sent" else None,delivery_id))
+                self.refresh_campaign_status(campaign_id); audit(self.db,user["id"],"communications.campaign_create","email_campaign",campaign_id,{"audience_type":audience_type,"audience_ref":audience_ref,"recipient_count":len(recipients)})
+            self.send_json(201, {"campaign": self.campaign_payload(campaign_id)})
+
+        def api_campaign_retry(self, campaign_id: int) -> None:
+            user = self.require_permission("communications.retry"); campaign = self.campaign_payload(campaign_id, False); deliveries = self.db.execute("SELECT * FROM email_deliveries WHERE campaign_id=? AND status IN ('queued','failed')", (campaign_id,)).fetchall()
+            with self.db:
+                for delivery in deliveries:
+                    _, status = self.queue_email("campaign", delivery["to_email"], campaign["subject"], campaign["body"], campaign_id=campaign_id, delivery_id=delivery["id"], user_id=user["id"])
+                    self.db.execute("UPDATE email_deliveries SET status=?,attempts=attempts+1,last_error='',updated_at=?,sent_at=? WHERE id=?", (status,now_iso(),now_iso() if status=="sent" else None,delivery["id"]))
+                self.refresh_campaign_status(campaign_id); audit(self.db,user["id"],"communications.campaign_retry","email_campaign",campaign_id,{"delivery_count":len(deliveries)})
+            self.send_json(200, {"campaign": self.campaign_payload(campaign_id)})
+
+        def executive_scope(self, user: dict[str, Any]) -> tuple[list[str], list[Any]]:
+            conditions: list[str] = []; params: list[Any] = []
+            branch_id = self.query.get("branch_id"); department_id = self.query.get("department_id")
+            if not has_permission(self.db, user, "employee.view"):
+                employee = self.db.execute("SELECT branch_id,department_id FROM employees WHERE id=?", (user.get("employee_id"),)).fetchone()
+                if not employee: return ["1=0"], []
+                if employee["branch_id"]: conditions.append("e.branch_id=?"); params.append(employee["branch_id"])
+                if employee["department_id"]: conditions.append("e.department_id=?"); params.append(employee["department_id"])
+            if branch_id: conditions.append("e.branch_id=?"); params.append(as_int(branch_id,"branch_id",1))
+            if department_id: conditions.append("e.department_id=?"); params.append(as_int(department_id,"department_id",1))
+            return conditions, params
+
+        def executive_attendance_context(
+            self,
+            employees: list[sqlite3.Row],
+            work_date: date,
+            present_employee_ids: set[int],
+        ) -> dict[str, int]:
+            """Classify who is actually due to attend before deriving absence.
+
+            A person is excluded when they had not joined yet, have approved leave,
+            have no effective shift, are on the shift's weekly rest day, or when
+            today's shift has not reached its start plus grace period.  An early
+            check-in remains attendance and makes that employee eligible.
+            """
+            employee_ids = {int(employee["id"]) for employee in employees}
+            approved_leave_ids: set[int] = set()
+            if employee_ids:
+                placeholders = ",".join("?" for _ in employee_ids)
+                approved_leave_ids = {
+                    int(row["employee_id"])
+                    for row in self.db.execute(
+                        f"SELECT DISTINCT employee_id FROM leave_requests "
+                        f"WHERE status='approved' AND employee_id IN ({placeholders}) "
+                        "AND start_date<=? AND end_date>=?",
+                        (*sorted(employee_ids), work_date.isoformat(), work_date.isoformat()),
+                    )
+                }
+            context = {
+                "eligible_to_attend": 0,
+                "eligible_present": 0,
+                "absent": 0,
+                "approved_leave": 0,
+                "weekly_rest": 0,
+                "no_shift": 0,
+                "not_due_yet": 0,
+                "not_employed_yet": 0,
+            }
+            current = local_now()
+            for employee in employees:
+                employee_id = int(employee["id"])
+                hire_date = parse_date(employee["hire_date"], "hire_date") if employee["hire_date"] else None
+                if hire_date and hire_date > work_date:
+                    context["not_employed_yet"] += 1
+                    continue
+                if employee_id in approved_leave_ids:
+                    context["approved_leave"] += 1
+                    continue
+                shift = self.shift_for_employee(employee_id, work_date)
+                if shift is None:
+                    context["no_shift"] += 1
+                    continue
+                rest_days = set(shift.get("rest_days") or [])
+                working_days = set(shift.get("working_days") or [])
+                if work_date.weekday() in rest_days or (working_days and work_date.weekday() not in working_days):
+                    context["weekly_rest"] += 1
+                    continue
+                already_present = employee_id in present_employee_ids
+                if work_date > current.date():
+                    context["not_due_yet"] += 1
+                    continue
+                if work_date == current.date() and not already_present:
+                    expected_start = datetime.combine(work_date, parse_clock(shift["start_time"], "start_time"), UAE_TZ)
+                    due_at = expected_start + timedelta(minutes=int(shift.get("grace_minutes") or 0))
+                    if current < due_at:
+                        context["not_due_yet"] += 1
+                        continue
+                context["eligible_to_attend"] += 1
+                if already_present:
+                    context["eligible_present"] += 1
+                else:
+                    context["absent"] += 1
+            return context
+
+        def api_executive_dashboard(self) -> None:
+            user = self.require_permission("dashboard.view")
+            today = local_now().date(); date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to"); date_from = parse_date(self.query.get("date_from", (date_to-timedelta(days=29)).isoformat()), "date_from")
+            if date_from > date_to or (date_to-date_from).days > 366: raise APIError(422,"نطاق التاريخ غير صالح أو يتجاوز سنة.","validation_error")
+            conditions, params = self.executive_scope(user); where = " WHERE "+" AND ".join(conditions) if conditions else ""
+            def count(extra: str = "", extra_params: tuple[Any,...] = ()) -> int:
+                clauses = conditions + ([extra] if extra else []); sql_where = " WHERE "+" AND ".join(clauses) if clauses else ""
+                return int(self.db.execute("SELECT COUNT(*) FROM employees e"+sql_where, (*params,*extra_params)).fetchone()[0])
+            total = count(); active = count("e.active=1"); inactive = total-active
+            active_rows = self.db.execute("SELECT e.id,e.hire_date FROM employees e"+(" WHERE "+" AND ".join(conditions+["e.active=1"])), params).fetchall()
+            attendance = int(self.db.execute("SELECT COUNT(DISTINCT a.employee_id) FROM attendance a JOIN employees e ON e.id=a.employee_id"+(" WHERE "+" AND ".join(conditions+["e.active=1","a.work_date=?","a.check_in_at IS NOT NULL"])), (*params,date_to.isoformat())).fetchone()[0])
+            late = 0
+            attendance_rows = self.db.execute("SELECT a.* FROM attendance a JOIN employees e ON e.id=a.employee_id"+(" WHERE "+" AND ".join(conditions+["e.active=1","a.work_date=?","a.check_in_at IS NOT NULL"])), (*params,date_to.isoformat())).fetchall()
+            for row in attendance_rows:
+                shift = self.shift_for_employee(int(row["employee_id"]), date_to)
+                if shift and self.attendance_metrics(row, shift).get("late_minutes",0)>0: late += 1
+            attendance_context = self.executive_attendance_context(active_rows, date_to, {int(row["employee_id"]) for row in attendance_rows})
+            absent = attendance_context["absent"]
+            scope_join = (" AND "+" AND ".join(c.replace("e.","e.") for c in conditions)) if conditions else ""
+            leave_pending = int(self.db.execute("SELECT COUNT(*) FROM leave_requests r JOIN employees e ON e.id=r.employee_id WHERE r.status='submitted'"+scope_join, params).fetchone()[0])
+            overtime_pending = int(self.db.execute("SELECT COUNT(*) FROM overtime_requests r JOIN employees e ON e.id=r.employee_id WHERE r.status='submitted'"+scope_join, params).fetchone()[0])
+            expiry_limit = (today+timedelta(days=60)).isoformat()
+            expiring_docs = int(self.db.execute("SELECT COUNT(*) FROM employee_documents d JOIN employees e ON e.id=d.employee_id WHERE d.archived=0 AND d.no_expiry=0 AND d.expires_on BETWEEN ? AND ?"+scope_join, (today.isoformat(),expiry_limit,*params)).fetchone()[0])
+            new_employees = count("e.hire_date BETWEEN ? AND ?", (date_from.isoformat(),date_to.isoformat()))
+            advance_active = int(self.db.execute("SELECT COUNT(*) FROM advances a JOIN employees e ON e.id=a.employee_id WHERE a.status IN ('submitted','approved')"+scope_join, params).fetchone()[0])
+            payroll = self.db.execute("SELECT COUNT(DISTINCT r.id) runs,COALESCE(SUM(i.net_cents),0) net FROM payroll_runs r JOIN payroll_items i ON i.run_id=r.id JOIN employees e ON e.id=i.employee_id WHERE r.payroll_month BETWEEN ? AND ?"+scope_join, (date_from.strftime('%Y-%m'),date_to.strftime('%Y-%m'),*params)).fetchone()
+            departments = [dict(r) for r in self.db.execute("SELECT COALESCE(d.name,'دون قسم') label,COUNT(*) value FROM employees e LEFT JOIN departments d ON d.id=e.department_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.department_id,d.name ORDER BY value DESC", params)]
+            branches = [dict(r) for r in self.db.execute("SELECT COALESCE(b.name,'دون فرع') label,COUNT(*) value FROM employees e LEFT JOIN branches b ON b.id=e.branch_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.branch_id,b.name ORDER BY value DESC", params)]
+            activity = [dict(r) for r in self.db.execute("SELECT a.action,a.entity_type,a.entity_id,a.created_at,COALESCE(u.display_name,'النظام') actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.id DESC LIMIT 12")]
+            eligible_to_attend = attendance_context["eligible_to_attend"]
+            absence_penalty = round((absent/eligible_to_attend)*35) if eligible_to_attend else 0
+            health_score = max(0, min(100, 100-absence_penalty-min(expiring_docs*3,25)-min((leave_pending+overtime_pending)*2,20)))
+            action_map = [("employee.manage","إضافة موظف","employees"),("leave.approve","اعتماد الإجازات","leaves"),("payroll.manage","إنشاء مسير","payroll"),("communications.send","إرسال تعميم","communications")]
+            quick_actions = [{"label":label,"route":route} for permission,label,route in action_map if has_permission(self.db,user,permission)]
+            selected_label = "اليوم" if date_to == today else date_to.isoformat()
+            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"payroll_runs":int(payroll["runs"] or 0),"payroll_net":cents_value(payroll["net"])},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
+
+        def api_org_grid(self) -> None:
+            user = self.current_user(True); assert user is not None
+            if not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "المخطط الكامل متاح للإدارة المخولة فقط.", "forbidden")
+            branch = self.query.get("branch_id"); search = self.query.get("q","").strip()
+            conditions = ["e.active=1"]; params: list[Any] = []
+            if branch: conditions.append("e.branch_id=?"); params.append(as_int(branch,"branch_id",1))
+            if search: conditions.append("(e.full_name LIKE ? OR e.employee_no LIKE ? OR e.job_title LIKE ?)"); term=f"%{search}%"; params.extend((term,term,term))
+            employees = [normalize_employee(row) for row in self.db.execute(employee_query(False)+" WHERE "+" AND ".join(conditions)+" ORDER BY e.full_name", params)]
+            gm_row = self.db.execute(employee_query(False)+" JOIN users gu ON gu.employee_id=e.id WHERE gu.role='general_manager' AND gu.active=1 ORDER BY gu.is_super_admin DESC,e.id LIMIT 1").fetchone()
+            gm = normalize_employee(gm_row) if gm_row else next((e for e in employees if e and not e.get("manager_id")), None)
+            departments = []
+            dept_rows = self.db.execute("SELECT d.id,d.name,d.branch_id,b.name AS branch_name,d.manager_employee_id,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id WHERE d.active=1 ORDER BY d.name").fetchall()
+            for row in dept_rows:
+                members=[e for e in employees if e and e.get("department_id")==row["id"]]
+                if members or (not branch and not search): departments.append(dict(row)|{"employees":members})
+            self.send_json(200,{"view":"grid","label":"المخطط الشبكي","general_manager":gm,"departments":departments,"employee_count":len([e for e in employees if e]),"filters":{"branch_id":branch,"q":search},"source":"employees+departments+users"})
+
+        def api_departments(self) -> None:
+            user = self.current_user(True); assert user is not None
+            rows = self.db.execute("SELECT d.*,e.full_name AS manager_name,b.name AS branch_name,(SELECT COUNT(*) FROM employees x WHERE x.department_id=d.id AND x.active=1) AS employee_count FROM departments d LEFT JOIN employees e ON e.id=d.manager_employee_id LEFT JOIN branches b ON b.id=d.branch_id ORDER BY d.name").fetchall()
+            privileged = self.has_privileged_people_access(user, "employee.view")
+            items = []
+            for row in rows:
+                data = dict(row) | {"active": bool(row["active"])}
+                if not privileged:
+                    data = {key: data.get(key) for key in ("id", "name", "branch_id", "branch_name", "active")}
+                items.append(data)
+            self.send_json(200, {"items": items})
+
+        def parse_department(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not partial or "name" in data:
+                result["name"] = require_text(data, "name", 150)
+            for key in ("branch_id", "manager_employee_id"):
+                if key in data:
+                    result[key] = as_int(data[key], key, 1) if data[key] not in (None, "") else None
+            if "active" in data:
+                result["active"] = 1 if bool(data["active"]) else 0
+            elif not partial:
+                result["active"] = 1
+            return result
+
+        def api_department_post(self) -> None:
+            user = self.require_permission("department.manage")
+            values = self.parse_department(self.read_json())
+            stamp = now_iso()
+            try:
+                with self.db:
+                    cur = self.db.execute("INSERT INTO departments(name,branch_id,manager_employee_id,active,created_at,updated_at) VALUES(?,?,?,?,?,?)", (values["name"], values.get("branch_id"), values.get("manager_employee_id"), values["active"], stamp, stamp))
+                    audit(self.db, user["id"], "department.create", "department", cur.lastrowid, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد قسم بالاسم نفسه أو مرجع غير صالح.", "department_conflict") from exc
+            row = self.db.execute("SELECT * FROM departments WHERE id=?", (cur.lastrowid,)).fetchone()
+            self.send_json(201, {"department": dict(row)})
+
+        def api_department_patch(self, department_id: int) -> None:
+            user = self.require_permission("department.manage")
+            if not self.db.execute("SELECT 1 FROM departments WHERE id=?", (department_id,)).fetchone():
+                raise APIError(404, "القسم غير موجود.", "not_found")
+            values = self.parse_department(self.read_json(), True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute("UPDATE departments SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), department_id))
+                    audit(self.db, user["id"], "department.update", "department", department_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "تعذر تحديث القسم بسبب تعارض البيانات.", "department_conflict") from exc
+            self.send_json(200, {"department": dict(self.db.execute("SELECT * FROM departments WHERE id=?", (department_id,)).fetchone())})
+
+        def api_department_delete(self, department_id: int) -> None:
+            user = self.require_permission("department.manage")
+            count = int(self.db.execute("SELECT COUNT(*) FROM employees WHERE department_id=?", (department_id,)).fetchone()[0])
+            if count:
+                raise APIError(409, "لا يمكن حذف قسم مرتبط بموظفين. انقل الموظفين أولاً.", "department_has_employees", {"employee_count": count})
+            with self.db:
+                result = self.db.execute("DELETE FROM departments WHERE id=?", (department_id,))
+                if not result.rowcount:
+                    raise APIError(404, "القسم غير موجود.", "not_found")
+                audit(self.db, user["id"], "department.delete", "department", department_id)
+            self.send_json(200, {"ok": True})
+
+        def api_department_assign(self, department_id: int) -> None:
+            user = self.require_permission("department.manage")
+            if not self.db.execute("SELECT 1 FROM departments WHERE id=? AND active=1", (department_id,)).fetchone():
+                raise APIError(404, "القسم غير موجود أو غير نشط.", "not_found")
+            employee_id = as_int(self.read_json().get("employee_id"), "employee_id", 1)
+            with self.db:
+                result = self.db.execute("UPDATE employees SET department_id=?,updated_at=? WHERE id=?", (department_id, now_iso(), employee_id))
+                if not result.rowcount:
+                    raise APIError(404, "الموظف غير موجود.", "not_found")
+                audit(self.db, user["id"], "department.assign_employee", "employee", employee_id, {"department_id": department_id})
+            self.send_json(200, {"employee": normalize_employee(self.db.execute(employee_query(True) + " WHERE e.id=?", (employee_id,)).fetchone())})
+
+        def api_org_hierarchy(self) -> None:
+            user = self.current_user(True); assert user is not None
+            if not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "الهيكل الكامل متاح للإدارة المخولة فقط.", "forbidden")
+            view=self.query.get("view","hierarchical")
+            if view not in {"hierarchical","grid","sequential"}: raise APIError(422,"عرض الهيكل غير صالح.","validation_error")
+            departments = [dict(r) for r in self.db.execute("SELECT d.*,b.name AS branch_name,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id ORDER BY d.name")]
+            employees = [normalize_employee(r) for r in self.db.execute(employee_query(False) + " ORDER BY e.full_name")]
+            by_id = {e["id"]: e for e in employees if e}
+            flat = []
+            for employee in employees:
+                if not employee:
+                    continue
+                chain, seen, manager_id = [], set(), employee.get("manager_id")
+                while manager_id and manager_id not in seen and manager_id in by_id:
+                    seen.add(manager_id); manager = by_id[manager_id]
+                    chain.append({"id": manager["id"], "full_name": manager["full_name"], "job_title": manager["job_title"]})
+                    manager_id = manager.get("manager_id")
+                flat.append(employee | {"manager_chain": chain})
+            branch_filter=self.query.get("branch_id"); department_filter=self.query.get("department_id"); search=self.query.get("q","").strip().casefold()
+            if branch_filter: flat=[e for e in flat if str(e.get("branch_id") or "")==branch_filter]
+            if department_filter: flat=[e for e in flat if str(e.get("department_id") or "")==department_filter]
+            if search: flat=[e for e in flat if search in " ".join(str(e.get(k) or "") for k in ("full_name","employee_no","job_title","department_name","branch_name")).casefold()]
+            relevant_departments={e.get("department_id") for e in flat}; departments=[d for d in departments if d["id"] in relevant_departments or (not branch_filter and not department_filter and not search)]
+            self.send_json(200, {"view":view,"filters":{"branch_id":branch_filter,"department_id":department_filter,"q":self.query.get("q","")},"departments": departments, "employees": flat,"source":"employees.manager_id+departments"})
+
+        def api_job_grades_get(self) -> None:
+            self.current_user(True)
+            rows = self.db.execute("SELECT *,min_salary_cents/100.0 AS min_salary,max_salary_cents/100.0 AS max_salary FROM job_grades ORDER BY code").fetchall()
+            self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"])} for r in rows]})
+
+        def api_job_grades_post(self) -> None:
+            user = self.require_permission("reference.manage"); data = self.read_json(); stamp = now_iso()
+            code, name = require_text(data, "code", 40), require_text(data, "name", 120)
+            minimum, maximum = money_cents(data.get("min_salary", 0), "min_salary"), money_cents(data.get("max_salary", 0), "max_salary")
+            if maximum and maximum < minimum: raise APIError(422, "الحد الأعلى أقل من الحد الأدنى.", "validation_error")
+            try:
+                with self.db:
+                    cur = self.db.execute("INSERT INTO job_grades(code,name,min_salary_cents,max_salary_cents,created_at,updated_at) VALUES(?,?,?,?,?,?)", (code,name,minimum,maximum,stamp,stamp)); audit(self.db,user["id"],"job_grade.create","job_grade",cur.lastrowid)
+            except sqlite3.IntegrityError as exc: raise APIError(409,"رمز الدرجة مستخدم.","duplicate_reference") from exc
+            self.send_json(201,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(cur.lastrowid,)).fetchone())})
+
+        def api_job_grade_patch(self, grade_id: int) -> None:
+            user=self.require_permission("reference.manage"); data=self.read_json(); allowed={k:data[k] for k in ("code","name","active") if k in data}
+            if "min_salary" in data: allowed["min_salary_cents"]=money_cents(data["min_salary"],"min_salary")
+            if "max_salary" in data: allowed["max_salary_cents"]=money_cents(data["max_salary"],"max_salary")
+            if "active" in allowed: allowed["active"]=1 if bool(allowed["active"]) else 0
+            if not allowed: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            allowed["updated_at"]=now_iso()
+            with self.db:
+                result=self.db.execute("UPDATE job_grades SET "+",".join(f"{k}=?" for k in allowed)+" WHERE id=?",(*allowed.values(),grade_id))
+                if not result.rowcount: raise APIError(404,"الدرجة غير موجودة.","not_found")
+                audit(self.db,user["id"],"job_grade.update","job_grade",grade_id,allowed)
+            self.send_json(200,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone())})
+
+        def api_job_grade_delete(self, grade_id: int) -> None:
+            user=self.require_permission("reference.manage")
+            if self.db.execute("SELECT 1 FROM employees WHERE job_grade_id=?",(grade_id,)).fetchone(): raise APIError(409,"الدرجة مرتبطة بموظفين.","reference_in_use")
+            with self.db:
+                result=self.db.execute("DELETE FROM job_grades WHERE id=?",(grade_id,)); audit(self.db,user["id"],"job_grade.delete","job_grade",grade_id)
+            if not result.rowcount: raise APIError(404,"الدرجة غير موجودة.","not_found")
+            self.send_json(200,{"ok":True})
+
+        def api_job_titles_get(self) -> None:
+            self.current_user(True); rows=self.db.execute("SELECT jt.*,d.name AS department_name FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id ORDER BY jt.name").fetchall(); self.send_json(200,{"items":[dict(r)|{"active":bool(r["active"])} for r in rows]})
+
+        def api_job_titles_post(self) -> None:
+            user=self.require_permission("reference.manage"); data=self.read_json(); stamp=now_iso(); name=require_text(data,"name",180); department_id=as_int(data["department_id"],"department_id",1) if data.get("department_id") else None
+            try:
+                with self.db:
+                    cur=self.db.execute("INSERT INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)",(name,department_id,stamp,stamp))
+                    seed_job_goal_templates(self.db, int(cur.lastrowid), name, stamp)
+                    audit(self.db,user["id"],"job_title.create","job_title",cur.lastrowid)
+            except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
+            self.send_json(201,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(cur.lastrowid,)).fetchone())})
+
+        def api_job_title_patch(self, title_id: int) -> None:
+            user=self.require_permission("reference.manage"); data=self.read_json(); values={k:data[k] for k in ("name","active") if k in data}
+            if "department_id" in data: values["department_id"]=as_int(data["department_id"],"department_id",1) if data["department_id"] else None
+            if "active" in values: values["active"]=1 if bool(values["active"]) else 0
+            if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            values["updated_at"]=now_iso()
+            with self.db:
+                result=self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
+                if not result.rowcount: raise APIError(404,"المسمى غير موجود.","not_found")
+                audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
+            self.send_json(200,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(title_id,)).fetchone())})
+
+        def api_job_title_delete(self, title_id: int) -> None:
+            user=self.require_permission("reference.manage")
+            if self.db.execute("SELECT 1 FROM employees WHERE job_title_id=?",(title_id,)).fetchone(): raise APIError(409,"المسمى مرتبط بموظفين.","reference_in_use")
+            with self.db:
+                result=self.db.execute("DELETE FROM job_titles WHERE id=?",(title_id,)); audit(self.db,user["id"],"job_title.delete","job_title",title_id)
+            if not result.rowcount: raise APIError(404,"المسمى غير موجود.","not_found")
+            self.send_json(200,{"ok":True})
+
+        # Organization, branches and employees
+        def api_org_get(self) -> None:
+            user = self.current_user(False)
+            row = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            organization = serialize_org(row)
+            organization["visual_identity"] = visual_identity_payload(self.db, row, admin=False)
+            if user is None:
+                organization["stamp_data"] = None
+            self.send_json(200, {"organization": organization})
+
+        def api_visual_identity_admin_get(self) -> None:
+            self.require_permission("org.manage")
+            row = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            self.send_json(200, {"visual_identity": visual_identity_payload(self.db, row, admin=True)})
+
+        def api_visual_identity_settings_patch(self) -> None:
+            user = self.require_permission("org.manage")
+            data = self.read_json()
+            updates: dict[str, Any] = {}
+            if "enabled" in data:
+                if not isinstance(data["enabled"], bool):
+                    raise APIError(422, "حالة تفعيل الهوية يجب أن تكون قيمة منطقية.", "validation_error", {"field": "enabled"})
+                updates["visual_identity_enabled"] = 1 if data["enabled"] else 0
+            if "mode" in data:
+                mode = str(data["mode"])
+                if mode not in {"static", "rotation"}:
+                    raise APIError(422, "نمط الهوية البصرية غير صالح.", "validation_error", {"field": "mode"})
+                updates["visual_identity_mode"] = mode
+            if "surface" in data:
+                surface = str(data["surface"])
+                if surface not in {"login", "dashboard", "both"}:
+                    raise APIError(422, "سطح ظهور الهوية غير صالح.", "validation_error", {"field": "surface"})
+                updates["visual_identity_surface"] = surface
+            if "interval_seconds" in data:
+                updates["visual_identity_interval_seconds"] = as_int(data["interval_seconds"], "interval_seconds", 5, 300)
+            if "overlay" in data:
+                updates["visual_identity_overlay"] = as_int(data["overlay"], "overlay", 20, 90)
+            if not updates:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            updates["updated_at"] = now_iso()
+            with self.db:
+                self.db.execute(
+                    "UPDATE organization SET " + ",".join(f"{key}=?" for key in updates) + " WHERE id=1",
+                    tuple(updates.values()),
+                )
+                audit(self.db, user["id"], "visual_identity.settings_update", "organization", 1, {"fields": list(updates)})
+            row = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            self.send_json(200, {"visual_identity": visual_identity_payload(self.db, row, admin=True)})
+
+        def parse_visual_identity_slide(self, data: dict[str, Any], current: sqlite3.Row | None = None) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            for key, limit in (("title_ar", 240), ("title_en", 240), ("alt_ar", 300), ("alt_en", 300)):
+                if current is None or key in data:
+                    values[key] = optional_text(data, key, limit)
+            if current is None or "focus_position" in data:
+                focus = str(data.get("focus_position") or "center")
+                if focus not in {"center", "top", "bottom", "right", "left"}:
+                    raise APIError(422, "نقطة تركيز الصورة غير صالحة.", "validation_error", {"field": "focus_position"})
+                values["focus_position"] = focus
+            if current is None or "active" in data:
+                active = data.get("active", True)
+                if not isinstance(active, bool):
+                    raise APIError(422, "حالة الشريحة يجب أن تكون قيمة منطقية.", "validation_error", {"field": "active"})
+                values["active"] = 1 if active else 0
+            if "image_data" in data:
+                image_data = validate_data_url(
+                    data.get("image_data"), "خلفية الهوية",
+                    ("image/png", "image/jpeg", "image/webp"), MAX_VISUAL_IDENTITY_IMAGE_BYTES,
+                )
+                values["image_data"] = image_data
+                values["image_mime"] = image_data.split(";", 1)[0][5:] if image_data else None
+            elif current is None:
+                values["image_data"] = None
+                values["image_mime"] = None
+            effective = dict(current) if current is not None else {}
+            effective.update(values)
+            if not str(effective.get("image_data") or "") and not str(effective.get("title_ar") or "") and not str(effective.get("title_en") or ""):
+                raise APIError(422, "أضف صورة أو رسالة واحدة على الأقل للشريحة.", "validation_error")
+            if effective.get("image_data") and not str(effective.get("alt_ar") or effective.get("alt_en") or ""):
+                raise APIError(422, "النص البديل مطلوب عند إضافة صورة.", "validation_error", {"field": "alt_ar"})
+            return values
+
+        def api_visual_identity_slide_post(self) -> None:
+            user = self.require_permission("org.manage")
+            data = self.read_json()
+            count = int(self.db.execute("SELECT COUNT(*) FROM visual_identity_slides WHERE organization_id=1").fetchone()[0])
+            if count >= 5:
+                raise APIError(409, "وصلت مكتبة الهوية إلى الحد الأقصى: خمس شرائح.", "slide_limit_reached", {"max_slides": 5})
+            values = self.parse_visual_identity_slide(data)
+            stamp = now_iso()
+            with self.db:
+                cursor = self.db.execute(
+                    """INSERT INTO visual_identity_slides
+                       (organization_id,image_data,image_mime,title_ar,title_en,alt_ar,alt_en,focus_position,active,sort_order,created_by,created_at,updated_at)
+                       VALUES(1,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (values["image_data"], values["image_mime"], values["title_ar"], values["title_en"],
+                     values["alt_ar"], values["alt_en"], values["focus_position"], values["active"], count + 1,
+                     user["id"], stamp, stamp),
+                )
+                audit(self.db, user["id"], "visual_identity.slide_create", "visual_identity_slide", cursor.lastrowid,
+                      {"sort_order": count + 1, "has_image": bool(values["image_data"])})
+            row = self.db.execute("SELECT * FROM visual_identity_slides WHERE id=?", (cursor.lastrowid,)).fetchone()
+            self.send_json(201, {"slide": visual_identity_slide_payload(row)})
+
+        def visual_identity_slide_row(self, slide_id: int) -> sqlite3.Row:
+            row = self.db.execute("SELECT * FROM visual_identity_slides WHERE id=? AND organization_id=1", (slide_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "شريحة الهوية غير موجودة.", "not_found")
+            return row
+
+        def api_visual_identity_slide_patch(self, slide_id: int) -> None:
+            user = self.require_permission("org.manage")
+            current = self.visual_identity_slide_row(slide_id)
+            values = self.parse_visual_identity_slide(self.read_json(), current)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            with self.db:
+                self.db.execute(
+                    "UPDATE visual_identity_slides SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
+                    (*values.values(), slide_id),
+                )
+                audit(self.db, user["id"], "visual_identity.slide_update", "visual_identity_slide", slide_id,
+                      {"fields": list(values), "has_image": bool(values.get("image_data", current["image_data"]))})
+            self.send_json(200, {"slide": visual_identity_slide_payload(self.visual_identity_slide_row(slide_id))})
+
+        def api_visual_identity_order_patch(self) -> None:
+            user = self.require_permission("org.manage")
+            data = self.read_json()
+            raw_ids = data.get("slide_ids")
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 5:
+                raise APIError(422, "أرسل ترتيب الشرائح كاملاً.", "validation_error", {"field": "slide_ids"})
+            try:
+                slide_ids = [int(value) for value in raw_ids]
+            except (TypeError, ValueError):
+                raise APIError(422, "معرّفات الشرائح غير صالحة.", "validation_error", {"field": "slide_ids"})
+            existing = [int(row["id"]) for row in self.db.execute("SELECT id FROM visual_identity_slides WHERE organization_id=1 ORDER BY sort_order,id")]
+            if len(set(slide_ids)) != len(slide_ids) or set(slide_ids) != set(existing):
+                raise APIError(409, "يجب أن يحتوي الترتيب على جميع الشرائح الحالية مرة واحدة.", "order_conflict")
+            stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE visual_identity_slides SET sort_order=sort_order+10 WHERE organization_id=1")
+                for order, slide_id in enumerate(slide_ids, 1):
+                    self.db.execute("UPDATE visual_identity_slides SET sort_order=?,updated_at=? WHERE id=?", (order, stamp, slide_id))
+                audit(self.db, user["id"], "visual_identity.slides_reorder", "organization", 1, {"slide_ids": slide_ids})
+            row = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            self.send_json(200, {"visual_identity": visual_identity_payload(self.db, row, admin=True)})
+
+        def api_visual_identity_slide_delete(self, slide_id: int) -> None:
+            user = self.require_permission("org.manage")
+            current = self.visual_identity_slide_row(slide_id)
+            with self.db:
+                self.db.execute("DELETE FROM visual_identity_slides WHERE id=?", (slide_id,))
+                self.db.execute("UPDATE visual_identity_slides SET sort_order=sort_order+10 WHERE organization_id=1")
+                remaining = self.db.execute("SELECT id FROM visual_identity_slides WHERE organization_id=1 ORDER BY sort_order,id").fetchall()
+                for order, row in enumerate(remaining, 1):
+                    self.db.execute("UPDATE visual_identity_slides SET sort_order=? WHERE id=?", (order, row["id"]))
+                audit(self.db, user["id"], "visual_identity.slide_delete", "visual_identity_slide", slide_id,
+                      {"sort_order": current["sort_order"], "had_image": bool(current["image_data"])})
+            self.send_json(200, {"ok": True})
+
+        def api_org_patch(self) -> None:
+            user = self.require_permission("org.manage")
+            data = self.read_json()
+            allowed = {
+                "display_name", "legal_name", "license_no", "tax_no", "sector", "emirate",
+                "address", "phone", "email", "website", "timezone", "currency",
+                "primary_color", "accent_color", "document_template", "logo_data", "stamp_data",
+                "card_template", "card_primary_color", "card_accent_color", "card_back_instructions",
+                "card_contact_phone", "card_contact_email",
+            }
+            updates: dict[str, Any] = {}
+            for key in allowed:
+                if key not in data:
+                    continue
+                if key in {"logo_data", "stamp_data"}:
+                    updates[key] = validate_data_url(data[key], "الشعار" if key == "logo_data" else "الختم")
+                else:
+                    updates[key] = optional_text(data, key, 1200 if key == "card_back_instructions" else 500)
+            if "display_name" in updates and not updates["display_name"] or "legal_name" in updates and not updates["legal_name"]:
+                raise APIError(422, "اسم العرض والاسم القانوني لا يمكن أن يكونا فارغين.", "validation_error")
+            for color_key in ("primary_color", "accent_color", "card_primary_color", "card_accent_color"):
+                if color_key in updates and not re.fullmatch(r"#[0-9a-fA-F]{6}", updates[color_key]):
+                    raise APIError(422, "رمز اللون غير صالح.", "validation_error", {"field": color_key})
+            if "document_template" in updates and updates["document_template"] not in {"corporate", "modern", "compact"}:
+                raise APIError(422, "قالب الوثائق غير صالح.", "validation_error")
+            if "card_template" in updates and updates["card_template"] not in CARD_TEMPLATES:
+                raise APIError(422, "قالب البطاقة غير صالح.", "validation_error", {"field": "card_template"})
+            if "card_contact_email" in updates and updates["card_contact_email"] and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", updates["card_contact_email"]):
+                raise APIError(422, "بريد التواصل الخاص بالبطاقة غير صالح.", "validation_error", {"field": "card_contact_email"})
+            current_org = self.db.execute("SELECT card_primary_color,card_accent_color FROM organization WHERE id=1").fetchone()
+            effective_primary = updates.get("card_primary_color", current_org["card_primary_color"])
+            effective_accent = updates.get("card_accent_color", current_org["card_accent_color"])
+            if color_contrast(effective_primary, "#ffffff") < 4.5:
+                raise APIError(422, "لون البطاقة الأساسي لا يحقق تبايناً كافياً مع النص الأبيض.", "invalid_contrast", {"field": "card_primary_color"})
+            if color_contrast(effective_primary, effective_accent) < 1.35:
+                raise APIError(422, "اللونان الأساسي والمساند متقاربان أكثر من اللازم.", "invalid_contrast", {"field": "card_accent_color"})
+            if not updates:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            updates["updated_at"] = now_iso()
+            with self.db:
+                self.db.execute("UPDATE organization SET " + ",".join(f"{key}=?" for key in updates) + " WHERE id=1", tuple(updates.values()))
+                audit(self.db, user["id"], "organization.update", "organization", 1, {"fields": list(updates)})
+            row = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            organization = serialize_org(row)
+            organization["visual_identity"] = visual_identity_payload(self.db, row, admin=False)
+            self.send_json(200, {"organization": organization})
+
+        def branch_row(self, branch_id: int) -> sqlite3.Row:
+            row = self.db.execute(
+                """SELECT b.*,e.full_name AS manager_name,
+                          (SELECT COUNT(*) FROM employees x WHERE x.branch_id=b.id AND x.active=1) AS employee_count
+                   FROM branches b LEFT JOIN employees e ON e.id=b.manager_employee_id WHERE b.id=?""",
+                (branch_id,),
+            ).fetchone()
+            if row is None:
+                raise APIError(404, "الفرع غير موجود.", "not_found")
+            return row
+
+        def serialize_branch(self, row: sqlite3.Row) -> dict[str, Any]:
+            data = dict(row)
+            data["active"] = bool(data["active"])
+            return data
+
+        def parse_branch(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not partial or "name" in data:
+                result["name"] = require_text(data, "name", 150)
+            if not partial or "address" in data:
+                result["address"] = optional_text(data, "address", 500)
+            if not partial or "latitude" in data:
+                result["latitude"] = as_float(data.get("latitude"), "latitude", -90, 90)
+            if not partial or "longitude" in data:
+                result["longitude"] = as_float(data.get("longitude"), "longitude", -180, 180)
+            if not partial or "radius_m" in data:
+                result["radius_m"] = as_int(data.get("radius_m"), "radius_m", 50, 5000)
+            if "manager_employee_id" in data:
+                result["manager_employee_id"] = as_int(data["manager_employee_id"], "manager_employee_id", 1) if data["manager_employee_id"] not in (None, "") else None
+                if result["manager_employee_id"] and not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (result["manager_employee_id"],)).fetchone():
+                    raise APIError(422, "مدير الفرع المحدد غير موجود.", "validation_error")
+            if "active" in data:
+                result["active"] = 1 if bool(data["active"]) else 0
+            elif not partial:
+                result["active"] = 1
+            return result
+
+        def api_branches_get(self) -> None:
+            user = self.current_user(True); assert user is not None
+            rows = self.db.execute(
+                """SELECT b.*,e.full_name AS manager_name,
+                          (SELECT COUNT(*) FROM employees x WHERE x.branch_id=b.id AND x.active=1) AS employee_count
+                   FROM branches b LEFT JOIN employees e ON e.id=b.manager_employee_id ORDER BY b.active DESC,b.name"""
+            ).fetchall()
+            privileged = self.has_privileged_people_access(user, "employee.view")
+            items = []
+            for row in rows:
+                data = self.serialize_branch(row)
+                if not privileged:
+                    data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "active")}
+                items.append(data)
+            self.send_json(200, {"items": items})
+
+        def api_branch_get(self, branch_id: int) -> None:
+            user = self.current_user(True); assert user is not None
+            data = self.serialize_branch(self.branch_row(branch_id))
+            if not self.has_privileged_people_access(user, "employee.view"):
+                data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "active")}
+            self.send_json(200, {"branch": data})
+
+        def api_branches_post(self) -> None:
+            user = self.require_permission("branch.manage")
+            values = self.parse_branch(self.read_json())
+            stamp = now_iso()
+            try:
+                with self.db:
+                    cursor = self.db.execute(
+                        "INSERT INTO branches(name,address,manager_employee_id,latitude,longitude,radius_m,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (values["name"], values["address"], values.get("manager_employee_id"), values["latitude"], values["longitude"], values["radius_m"], values["active"], stamp, stamp),
+                    )
+                    branch_id = int(cursor.lastrowid)
+                    audit(self.db, user["id"], "branch.create", "branch", branch_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد فرع بالاسم نفسه.", "duplicate_branch") from exc
+            self.send_json(201, {"branch": self.serialize_branch(self.branch_row(branch_id))})
+
+        def api_branch_patch(self, branch_id: int) -> None:
+            user = self.require_permission("branch.manage")
+            self.branch_row(branch_id)
+            values = self.parse_branch(self.read_json(), partial=True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute("UPDATE branches SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), branch_id))
+                    audit(self.db, user["id"], "branch.update", "branch", branch_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد فرع بالاسم نفسه أو أن البيانات غير صحيحة.", "conflict") from exc
+            self.send_json(200, {"branch": self.serialize_branch(self.branch_row(branch_id))})
+
+        def api_branch_delete(self, branch_id: int) -> None:
+            user = self.require_permission("branch.manage")
+            self.branch_row(branch_id)
+            count = self.db.execute("SELECT COUNT(*) FROM employees WHERE branch_id=?", (branch_id,)).fetchone()[0]
+            if count:
+                raise APIError(409, "لا يمكن حذف الفرع لوجود موظفين مرتبطين به. انقل الموظفين أولاً.", "branch_has_employees", {"employee_count": count})
+            with self.db:
+                self.db.execute("DELETE FROM branches WHERE id=?", (branch_id,))
+                audit(self.db, user["id"], "branch.delete", "branch", branch_id)
+            self.send_json(200, {"ok": True})
+
+        def api_branch_assign(self, branch_id: int) -> None:
+            user = self.require_permission("branch.manage")
+            branch = self.branch_row(branch_id)
+            if not bool(branch["active"]):
+                raise APIError(409, "لا يمكن تعيين موظف لفرع غير نشط.", "inactive_branch")
+            data = self.read_json()
+            employee_id = as_int(data.get("employee_id"), "employee_id", 1)
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            with self.db:
+                self.db.execute("UPDATE employees SET branch_id=?,updated_at=? WHERE id=?", (branch_id, now_iso(), employee_id))
+                audit(self.db, user["id"], "branch.assign_employee", "employee", employee_id, {"branch_id": branch_id})
+            employee = self.db.execute(employee_query(True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            self.send_json(200, {"employee": normalize_employee(employee)})
+
+        def api_branch_location_test(self, branch_id: int) -> None:
+            self.require_permission("branch.manage")
+            branch = self.branch_row(branch_id)
+            data = self.read_json()
+            latitude = as_float(data.get("latitude"), "latitude", -90, 90)
+            longitude = as_float(data.get("longitude"), "longitude", -180, 180)
+            distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
+            self.send_json(200, {"inside": distance <= branch["radius_m"], "distance_m": round(distance, 1), "radius_m": branch["radius_m"], "branch_id": branch_id})
+
+        # Comprehensive employee report (HR/admin only unless explicitly granted)
+        def api_employee_report_search(self) -> None:
+            self.require_permission("employee_report.view")
+            query = str(self.query.get("q", "")).strip()
+            if not query:
+                self.send_json(200, {"items": []})
+                return
+            if len(query) > 120:
+                raise APIError(422, "نص البحث أطول من الحد المسموح.", "validation_error", {"field": "q"})
+            token = f"%{query}%"
+            rows = self.db.execute(
+                """SELECT e.id,e.employee_no,e.full_name,e.hire_date,e.active,
+                          COALESCE(jt.name,e.job_title) AS job_title,d.name AS department_name
+                     FROM employees e
+                     LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+                     LEFT JOIN departments d ON d.id=e.department_id
+                    WHERE e.full_name LIKE ? COLLATE NOCASE OR e.employee_no LIKE ? COLLATE NOCASE
+                    ORDER BY CASE WHEN e.employee_no=? COLLATE NOCASE THEN 0 ELSE 1 END,e.active DESC,e.full_name
+                    LIMIT 12""",
+                (token, token, query),
+            ).fetchall()
+            self.send_json(200, {"items": [{**dict(row), "active": bool(row["active"])} for row in rows]})
+
+        def employee_report_period(self, employee: sqlite3.Row, data: dict[str, Any]) -> dict[str, Any]:
+            today = local_now().date()
+            hire_date = parse_date(employee["hire_date"], "hire_date") if employee["hire_date"] else parse_date(str(employee["created_at"])[:10], "created_at")
+            requested_from = parse_date(data.get("date_from", hire_date.isoformat()), "date_from")
+            requested_to = parse_date(data.get("date_to", today.isoformat()), "date_to")
+            if requested_from > requested_to:
+                raise APIError(422, "تاريخ البداية يجب ألا يكون بعد تاريخ النهاية.", "invalid_report_range", {"field": "date_from"})
+            if requested_from > today or requested_to > today:
+                raise APIError(422, "لا يمكن إنشاء تقرير عن فترة مستقبلية.", "future_report_range", {"today": today.isoformat()})
+            if (requested_to - requested_from).days > 60 * 366:
+                raise APIError(422, "الفترة المطلوبة تتجاوز حد الأمان البالغ 60 عاماً.", "report_range_too_large")
+
+            service_end = today
+            service_end_source = "active_employee_today"
+            if not bool(employee["active"]):
+                offboarding = self.db.execute(
+                    """SELECT COALESCE(closed_at,updated_at) AS ended_at
+                         FROM lifecycle_cases
+                        WHERE employee_id=? AND module='offboarding' AND status='closed'
+                        ORDER BY COALESCE(closed_at,updated_at) DESC,id DESC LIMIT 1""",
+                    (employee["id"],),
+                ).fetchone()
+                if offboarding and offboarding["ended_at"]:
+                    service_end = parse_date(str(offboarding["ended_at"])[:10], "offboarding_end")
+                    service_end_source = "closed_offboarding"
+                else:
+                    service_end = parse_date(str(employee["updated_at"])[:10], "employee_updated_at")
+                    service_end_source = "inactive_profile_updated_at_fallback"
+                service_end = min(service_end, today)
+
+            effective_from = max(requested_from, hire_date)
+            effective_to = min(requested_to, service_end)
+            if effective_to < effective_from:
+                raise APIError(
+                    422,
+                    "الفترة المطلوبة لا تتقاطع مع مدة خدمة الموظف.",
+                    "report_range_outside_service",
+                    {"hire_date": hire_date.isoformat(), "service_end": service_end.isoformat()},
+                )
+            return {
+                "requested_from": requested_from,
+                "requested_to": requested_to,
+                "effective_from": effective_from,
+                "effective_to": effective_to,
+                "hire_date": hire_date,
+                "service_end": service_end,
+                "service_end_source": service_end_source,
+                "adjusted": requested_from != effective_from or requested_to != effective_to,
+            }
+
+        def build_employee_comprehensive_report(self, employee_id: int, data: dict[str, Any], actor: dict[str, Any]) -> dict[str, Any]:
+            employee = self.db.execute(
+                """SELECT e.id,e.employee_no,e.full_name,e.hire_date,e.photo_data,e.active,e.created_at,e.updated_at,
+                          COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
+                          jg.name AS job_grade_name,d.name AS department_name,b.name AS branch_name
+                     FROM employees e
+                     LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+                     LEFT JOIN job_grades jg ON jg.id=e.job_grade_id
+                     LEFT JOIN departments d ON d.id=e.department_id
+                     LEFT JOIN branches b ON b.id=e.branch_id
+                    WHERE e.id=?""",
+                (employee_id,),
+            ).fetchone()
+            if employee is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            period = self.employee_report_period(employee, data)
+            start: date = period["effective_from"]
+            end: date = period["effective_to"]
+
+            assignment_rows = self.db.execute(
+                """SELECT a.id,a.effective_from,a.effective_to,s.*
+                     FROM employee_shift_assignments a JOIN shifts s ON s.id=a.shift_id
+                    WHERE a.employee_id=? AND a.effective_from<=?
+                      AND (a.effective_to IS NULL OR a.effective_to>=?) AND s.active=1
+                    ORDER BY a.effective_from DESC,a.id DESC""",
+                (employee_id, end.isoformat(), start.isoformat()),
+            ).fetchall()
+            assignments: list[dict[str, Any]] = []
+            for row in assignment_rows:
+                item = dict(row)
+                item["working_days"] = parse_json_text(item["working_days"], [])
+                item["rest_days"] = parse_json_text(item["rest_days"], [])
+                assignments.append(item)
+
+            def shift_on(day: date) -> dict[str, Any] | None:
+                iso = day.isoformat()
+                return next((item for item in assignments if item["effective_from"] <= iso and (not item["effective_to"] or item["effective_to"] >= iso)), None)
+
+            attendance_rows = self.db.execute(
+                "SELECT * FROM attendance WHERE employee_id=? AND work_date BETWEEN ? AND ? ORDER BY work_date",
+                (employee_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+            attendance_by_day = {row["work_date"]: row for row in attendance_rows}
+            approved_leaves = self.db.execute(
+                """SELECT lr.id,lr.start_date,lr.end_date,lr.days,lr.reason,lr.status,
+                          lt.code AS leave_type_code,lt.name AS leave_type_name
+                     FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                    WHERE lr.employee_id=? AND lr.status='approved' AND lr.start_date<=? AND lr.end_date>=?
+                    ORDER BY lr.start_date,lr.id""",
+                (employee_id, end.isoformat(), start.isoformat()),
+            ).fetchall()
+
+            leave_dates: set[str] = set()
+            leave_items: list[dict[str, Any]] = []
+            for row in approved_leaves:
+                overlap_start = max(start, parse_date(row["start_date"]))
+                overlap_end = min(end, parse_date(row["end_date"]))
+                overlap_days = (overlap_end - overlap_start).days + 1
+                cursor = overlap_start
+                while cursor <= overlap_end:
+                    leave_dates.add(cursor.isoformat())
+                    cursor += timedelta(days=1)
+                leave_items.append({
+                    "id": row["id"], "leave_type_code": row["leave_type_code"], "leave_type_name": row["leave_type_name"],
+                    "start_date": row["start_date"], "end_date": row["end_date"], "days_in_period": overlap_days,
+                    "reason": row["reason"], "status": row["status"],
+                })
+
+            attendance_items: list[dict[str, Any]] = []
+            absence_dates: list[str] = []
+            weekly_rest_dates: list[str] = []
+            no_shift_days = 0
+            net_minutes = 0
+            late_minutes = 0
+            completed_days = 0
+            open_days = 0
+            cursor = start
+            while cursor <= end:
+                iso = cursor.isoformat()
+                shift = shift_on(cursor)
+                attendance = attendance_by_day.get(iso)
+                if shift is None:
+                    no_shift_days += 1
+                elif cursor.weekday() in shift["rest_days"]:
+                    weekly_rest_dates.append(iso)
+                elif (
+                    cursor.weekday() in shift["working_days"]
+                    and iso not in leave_dates
+                    and (attendance is None or not attendance["check_in_at"])
+                ):
+                    absence_dates.append(iso)
+                if attendance is not None:
+                    metrics = self.attendance_metrics(attendance, shift)
+                    is_completed = bool(attendance["check_in_at"] and attendance["check_out_at"])
+                    is_open = bool(attendance["check_in_at"] and not attendance["check_out_at"])
+                    if is_completed:
+                        completed_days += 1
+                        net_minutes += int(metrics["net_minutes"])
+                        late_minutes += int(metrics["late_minutes"])
+                    elif is_open:
+                        open_days += 1
+                    attendance_items.append({
+                        "id": attendance["id"], "work_date": iso, "check_in_at": attendance["check_in_at"],
+                        "check_out_at": attendance["check_out_at"], "net_minutes": int(metrics["net_minutes"]),
+                        "late_minutes": int(metrics["late_minutes"]), "day_status": metrics["day_status"],
+                        "shift_name": shift["name"] if shift else None,
+                    })
+                cursor += timedelta(days=1)
+
+            actions = [dict(row) for row in self.db.execute(
+                """SELECT id,action_type,action_date,description,penalty,status
+                     FROM employee_actions
+                    WHERE employee_id=? AND action_date BETWEEN ? AND ? AND status<>'cancelled'
+                    ORDER BY action_date,id""",
+                (employee_id, start.isoformat(), end.isoformat()),
+            ).fetchall()]
+            overtime = [dict(row) for row in self.db.execute(
+                """SELECT id,work_date,start_time,end_time,duration_minutes,reason,status
+                     FROM overtime_requests
+                    WHERE employee_id=? AND status='approved' AND work_date BETWEEN ? AND ?
+                    ORDER BY work_date,id""",
+                (employee_id, start.isoformat(), end.isoformat()),
+            ).fetchall()]
+
+            balance_year = end.year
+            balances = []
+            for row in self.db.execute(
+                """SELECT lt.code AS leave_type_code,lt.name AS leave_type_name,
+                          COALESCE(lb.entitlement,lt.annual_entitlement) AS entitlement,
+                          COALESCE(lb.carried,0) AS carried,COALESCE(lb.used,0) AS used
+                     FROM leave_types lt
+                     LEFT JOIN leave_balances lb ON lb.leave_type_id=lt.id AND lb.employee_id=? AND lb.year=?
+                    WHERE lt.active=1 ORDER BY lt.id""",
+                (employee_id, balance_year),
+            ).fetchall():
+                item = dict(row)
+                item["remaining"] = max(0, float(item["entitlement"] or 0) + float(item["carried"] or 0) - float(item["used"] or 0))
+                balances.append(item)
+
+            advances = []
+            advance_rows = self.db.execute("SELECT * FROM advances WHERE employee_id=? ORDER BY created_at,id", (employee_id,)).fetchall()
+            for advance in advance_rows:
+                created_date = parse_date(str(advance["created_at"])[:10], "advance_created_at")
+                active = advance["status"] in {"submitted", "approved"}
+                if not active and not (start <= created_date <= end):
+                    continue
+                installments = self.db.execute(
+                    "SELECT installment_no,due_month,amount_cents,status FROM advance_installments WHERE advance_id=? ORDER BY installment_no",
+                    (advance["id"],),
+                ).fetchall()
+                paid_cents = sum(int(item["amount_cents"]) for item in installments if item["status"] == "paid")
+                remaining_cents = sum(int(item["amount_cents"]) for item in installments if item["status"] == "scheduled")
+                due_months = [str(item["due_month"]) for item in installments if item["status"] != "cancelled"]
+                advances.append({
+                    "id": advance["id"], "amount_cents": int(advance["amount_cents"]), "months": int(advance["months"]),
+                    "reason": advance["reason"], "status": advance["status"], "created_at": advance["created_at"],
+                    "paid_cents": paid_cents, "remaining_cents": remaining_cents,
+                    "last_due_month": max(due_months) if due_months else None,
+                    "installments": [dict(item) for item in installments],
+                })
+
+            absence_months: dict[str, int] = {}
+            for value in absence_dates:
+                month = value[:7]
+                absence_months[month] = absence_months.get(month, 0) + 1
+            issued_at = now_iso()
+            reference_seed = f"{employee_id}|{start.isoformat()}|{end.isoformat()}|{actor['id']}|{issued_at}"
+            reference_hash = hashlib.sha256(reference_seed.encode("utf-8")).hexdigest()[:10].upper()
+            employee_token = re.sub(r"[^A-Za-z0-9]", "", str(employee["employee_no"]).upper())[-12:] or str(employee_id)
+            report_reference = f"ER-{local_now().year}-{employee_token}-{reference_hash}"
+            organization = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            total_overtime = sum(int(item["duration_minutes"]) for item in overtime)
+            active_advances = [item for item in advances if item["status"] in {"submitted", "approved"}]
+            return {
+                "report_reference": report_reference,
+                "issued_at": issued_at,
+                "issued_by": {"id": actor["id"], "name": actor.get("display_name") or actor.get("name") or actor.get("email")},
+                "confidentiality": "internal_confidential",
+                "organization": {
+                    "display_name": organization["display_name"], "legal_name": organization["legal_name"],
+                    "logo_data": organization["logo_data"], "primary_color": organization["primary_color"],
+                    "accent_color": organization["accent_color"], "currency": organization["currency"],
+                },
+                "employee": {
+                    "id": employee["id"], "employee_no": employee["employee_no"], "full_name": employee["full_name"],
+                    "job_title": employee["job_title"], "job_grade": employee["job_grade"],
+                    "job_grade_name": employee["job_grade_name"], "department_name": employee["department_name"],
+                    "branch_name": employee["branch_name"], "hire_date": period["hire_date"].isoformat(),
+                    "photo_data": employee["photo_data"], "active": bool(employee["active"]),
+                },
+                "period": {
+                    "requested_from": period["requested_from"].isoformat(), "requested_to": period["requested_to"].isoformat(),
+                    "effective_from": start.isoformat(), "effective_to": end.isoformat(), "adjusted_to_service": period["adjusted"],
+                    "service_end": period["service_end"].isoformat(), "service_end_source": period["service_end_source"],
+                    "calendar_days": (end - start).days + 1,
+                },
+                "summary": {
+                    "net_work_minutes": net_minutes, "attendance_completed_days": completed_days,
+                    "attendance_open_days": open_days, "late_minutes": late_minutes,
+                    "absence_days": len(absence_dates), "weekly_rest_days": len(weekly_rest_dates),
+                    "approved_leave_days": sum(int(item["days_in_period"]) for item in leave_items),
+                    "approved_overtime_minutes": total_overtime,
+                    "violation_count": sum(item["action_type"] == "violation" for item in actions),
+                    "undertaking_count": sum(item["action_type"] == "undertaking" for item in actions),
+                    "advance_count": len(advances), "active_advance_count": len(active_advances),
+                    "active_advance_remaining_cents": sum(int(item["remaining_cents"]) for item in active_advances),
+                },
+                "attendance": attendance_items, "leaves": leave_items,
+                "leave_balances": {"year": balance_year, "items": balances},
+                "actions": actions, "overtime": overtime, "advances": advances,
+                "absence": {"dates": absence_dates, "by_month": [{"month": key, "days": value} for key, value in sorted(absence_months.items())]},
+                "weekly_rest": {"dates": weekly_rest_dates},
+                "calculation_notes": [
+                    {"code": "live_sqlite_snapshot", "ar": "جميع القيم مشتقة من SQLite لحظة الإصدار.", "en": "All values are derived from SQLite at issue time."},
+                    {"code": "net_completed_only", "ar": "صافي العمل يخص سجلات الدخول والخروج المكتملة بعد خصم الاستراحة.", "en": "Net work includes completed check-in/out records after the scheduled break."},
+                    {"code": "absence_rule", "ar": "الغياب يحتسب في يوم عمل ذي مناوبة فقط عند غياب الحضور والإجازة المعتمدة.", "en": "Absence is counted only on a scheduled workday without attendance or approved leave."},
+                    {"code": "annual_balance", "ar": f"أرصدة الإجازات سنوية لسنة {balance_year}.", "en": f"Leave balances are annual for {balance_year}."},
+                ],
+                "calculation_sources": {
+                    "net_work_minutes": {"table": "attendance + employee_shift_assignments + shifts", "rule": "attendance_metrics.net_minutes"},
+                    "absence_days": {"table": "shifts + attendance + leave_requests", "rule": "scheduled working day without attendance or approved leave"},
+                    "weekly_rest_days": {"table": "employee_shift_assignments + shifts", "rule": "effective shift rest_days"},
+                    "approved_leave_days": {"table": "leave_requests", "rule": "approved overlap with effective period"},
+                    "actions": {"table": "employee_actions", "rule": "action_date in range and status is not cancelled"},
+                    "overtime": {"table": "overtime_requests", "rule": "approved duration_minutes in range"},
+                    "advances": {"table": "advances + advance_installments", "rule": "created in range or active; paid/scheduled exact cents"},
+                    "no_shift_days": {"table": "employee_shift_assignments", "value": no_shift_days},
+                },
+            }
+
+        def api_employee_report_generate(self, employee_id: int) -> None:
+            user = self.require_permission("employee_report.view")
+            report = self.build_employee_comprehensive_report(employee_id, self.read_json(), user)
+            with self.db:
+                audit(self.db, user["id"], "employee_report.generate", "employee", employee_id, {
+                    "date_from": report["period"]["effective_from"], "date_to": report["period"]["effective_to"],
+                    "report_reference": report["report_reference"],
+                })
+            self.send_json(200, {"report": report})
+
+        def api_employee_report_export(self, employee_id: int) -> None:
+            user = self.require_permission("employee_report.view")
+            if not has_permission(self.db, user, "employee_report.export"):
+                raise APIError(403, "لا تملك صلاحية طباعة أو حفظ تقرير الموظف.", "forbidden")
+            data = self.read_json()
+            if data.get("format") != "print_pdf":
+                raise APIError(422, "صيغة التصدير المتاحة هي print_pdf فقط.", "validation_error", {"field": "format"})
+            report = self.build_employee_comprehensive_report(employee_id, data, user)
+            supplied_reference = str(data.get("report_reference") or report["report_reference"])
+            if not re.fullmatch(r"ER-[A-Za-z0-9-]{8,80}", supplied_reference):
+                raise APIError(422, "مرجع التقرير غير صالح.", "validation_error", {"field": "report_reference"})
+            with self.db:
+                audit(self.db, user["id"], "employee_report.export", "employee", employee_id, {
+                    "date_from": report["period"]["effective_from"], "date_to": report["period"]["effective_to"],
+                    "format": "print_pdf", "report_reference": supplied_reference,
+                })
+            self.send_json(200, {"print_authorized": True, "format": "print_pdf", "report_reference": supplied_reference})
+
+        def api_employees_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            scope = "self"
+            if self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "employee.profile.edit"):
+                rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + " ORDER BY e.full_name").fetchall()
+                payload = [normalize_employee(row) for row in rows]
+                scope = "all"
+            elif has_permission(self.db, user, "employee.team") and user.get("employee_id"):
+                rows = self.db.execute(
+                    """SELECT DISTINCT e.id,e.employee_no,e.full_name
+                         FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                        WHERE e.active=1 AND e.id<>? AND (e.manager_id=? OR d.manager_employee_id=?)
+                        ORDER BY e.full_name""",
+                    (user["employee_id"], user["employee_id"], user["employee_id"]),
+                ).fetchall()
+                payload = [dict(row) for row in rows]
+                scope = "team_identity_only"
+            elif user.get("employee_id"):
+                rows = self.db.execute(employee_query(True) + " WHERE e.id=?", (user["employee_id"],)).fetchall()
+                payload = [normalize_employee(row) for row in rows]
+            else:
+                raise APIError(403, "لا تملك صلاحية عرض الموظفين.", "forbidden")
+            self.send_json(200, {"items": payload, "scope": scope})
+
+        def parse_employee(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, max_len in (("employee_no", 40), ("full_name", 180)):
+                if not partial or key in data:
+                    result[key] = require_text(data, key, max_len)
+            for key, max_len in (
+                ("email", 254), ("phone", 60), ("job_title", 180), ("job_grade", 80),
+                ("qualification", 300), ("nationality", 100), ("place_of_birth", 180),
+                ("passport_no", 80), ("emirates_id_no", 40), ("address_country", 100),
+                ("address_city", 120), ("address_area", 120), ("address_street", 180),
+                ("address_building", 120), ("address_po_box", 40), ("address_notes", 800),
+            ):
+                if key in data or not partial:
+                    result[key] = optional_text(data, key, max_len)
+            if "email" in result:
+                result["email"] = clean_email(result["email"]) or None
+                if result["email"] and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", result["email"]):
+                    raise APIError(422, "البريد الإلكتروني غير صالح.", "validation_error", {"field": "email"})
+            if result.get("passport_no") and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ./-]{3,79}", result["passport_no"]):
+                raise APIError(422, "رقم جواز السفر غير صالح.", "validation_error", {"field": "passport_no"})
+            if result.get("emirates_id_no") and not re.fullmatch(r"[0-9][0-9 -]{6,39}", result["emirates_id_no"]):
+                raise APIError(422, "رقم الهوية الإماراتية غير صالح.", "validation_error", {"field": "emirates_id_no"})
+            for key in ("department_id", "branch_id", "manager_id"):
+                if key in data:
+                    result[key] = as_int(data[key], key, 1) if data[key] not in (None, "") else None
+            if "job_title_id" in data:
+                result["job_title_id"] = as_int(data["job_title_id"], "job_title_id", 1) if data["job_title_id"] not in (None, "") else None
+                if result["job_title_id"]:
+                    title = self.db.execute("SELECT name FROM job_titles WHERE id=? AND active=1", (result["job_title_id"],)).fetchone()
+                    if not title: raise APIError(422, "المسمى الوظيفي غير موجود أو غير نشط.", "validation_error")
+                    result["job_title"] = title["name"]
+            if "job_grade_id" in data:
+                result["job_grade_id"] = as_int(data["job_grade_id"], "job_grade_id", 1) if data["job_grade_id"] not in (None, "") else None
+                if result["job_grade_id"]:
+                    grade = self.db.execute("SELECT code FROM job_grades WHERE id=? AND active=1", (result["job_grade_id"],)).fetchone()
+                    if not grade: raise APIError(422, "الدرجة الوظيفية غير موجودة أو غير نشطة.", "validation_error")
+                    result["job_grade"] = grade["code"]
+            if "hire_date" in data:
+                result["hire_date"] = parse_date(data["hire_date"], "hire_date").isoformat() if data["hire_date"] else None
+            if "birth_date" in data or not partial:
+                if data.get("birth_date"):
+                    birth_date = parse_date(data["birth_date"], "birth_date")
+                    if birth_date < date(1900, 1, 1) or birth_date > local_now().date():
+                        raise APIError(422, "تاريخ الميلاد خارج النطاق المنطقي.", "validation_error", {"field": "birth_date"})
+                    result["birth_date"] = birth_date.isoformat()
+                else:
+                    result["birth_date"] = None
+            for field in ("passport_expires_on", "emirates_id_expires_on"):
+                if field in data or not partial:
+                    result[field] = parse_date(data[field], field).isoformat() if data.get(field) else None
+                    if result[field] and result.get("birth_date") and result[field] <= result["birth_date"]:
+                        raise APIError(422, "تاريخ الانتهاء يجب أن يكون بعد تاريخ الميلاد.", "validation_error", {"field": field})
+            if "marital_status" in data or not partial:
+                marital_status = str(data.get("marital_status") or "unspecified").strip().lower()
+                if marital_status not in {"unspecified", "single", "married", "divorced", "widowed", "separated"}:
+                    raise APIError(422, "الحالة الاجتماعية غير صالحة.", "validation_error", {"field": "marital_status"})
+                result["marital_status"] = marital_status
+            if "salary" in data:
+                result["salary"] = as_float(data["salary"], "salary", 0, 100_000_000)
+            elif not partial:
+                result["salary"] = 0
+            if "photo_data" in data:
+                result["photo_data"] = validate_data_url(data["photo_data"], "صورة الموظف")
+            if "active" in data:
+                result["active"] = 1 if bool(data["active"]) else 0
+            elif not partial:
+                result["active"] = 1
+            return result
+
+        def api_employees_post(self) -> None:
+            user = self.require_permission("employee.manage")
+            data = self.read_json()
+            values = self.parse_employee(data)
+            languages = self.parse_languages(data["languages"]) if "languages" in data else []
+            stamp = now_iso()
+            columns = list(values) + ["created_at", "updated_at"]
+            try:
+                with self.db:
+                    cursor = self.db.execute(
+                        f"INSERT INTO employees({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                        (*values.values(), stamp, stamp),
+                    )
+                    employee_id = int(cursor.lastrowid)
+                    if data.get("create_user"):
+                        email = values.get("email")
+                        if not email:
+                            raise APIError(422, "البريد مطلوب لإنشاء حساب المستخدم.", "validation_error")
+                        password = str(data.get("password", ""))
+                        if len(password) < 8:
+                            raise APIError(422, "كلمة المرور يجب أن تكون 8 أحرف على الأقل.", "weak_password")
+                        role = str(data.get("role", "employee"))
+                        if role not in ROLE_PERMISSIONS:
+                            raise APIError(422, "الدور غير صالح.", "validation_error")
+                        digest, salt = password_record(password)
+                        self.db.execute(
+                            "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                            (email, values["full_name"], role, digest, salt, employee_id, stamp, stamp),
+                        )
+                    for leave in self.db.execute("SELECT id,annual_entitlement FROM leave_types WHERE active=1"):
+                        self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (employee_id, leave["id"], local_now().year, leave["annual_entitlement"]))
+                    self.replace_employee_languages(employee_id, languages, stamp)
+                    for cycle in self.db.execute("SELECT id,announced_by FROM evaluation_cycles WHERE status='announced'").fetchall():
+                        enroll_evaluation_cycle(self.db, int(cycle["id"]), cycle["announced_by"] or user["id"], notify=True)
+                    audit(self.db, user["id"], "employee.create", "employee", employee_id, {"language_codes": [row["code"] for row in languages]})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
+            include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")
+            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            employee = normalize_employee(row)
+            assert employee is not None
+            employee["languages"] = self.employee_languages(employee_id)
+            self.send_json(201, {"employee": employee})
+
+        def api_employee_get(self, employee_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            is_own = user.get("employee_id") == employee_id
+            can_edit_profile = has_permission(self.db, user, "employee.profile.edit")
+            if not is_own and not self.has_privileged_people_access(user, "employee.view") and not can_edit_profile:
+                if has_permission(self.db, user, "employee.team") and user.get("employee_id"):
+                    team_member = self.team_member_row(int(user["employee_id"]), employee_id)
+                    if team_member is not None:
+                        self.send_json(200, {"employee": dict(team_member), "scope": "team_identity_only"})
+                        return
+                raise APIError(403, "لا يمكنك عرض ملف هذا الموظف.", "forbidden")
+            include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")
+            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            employee = normalize_employee(row)
+            assert employee is not None
+            employee["languages"] = self.employee_languages(employee_id)
+            self.send_json(200, {"employee": employee, "scope": "self" if is_own else "full"})
+
+        def employee_languages(self, employee_id: int) -> list[dict[str, Any]]:
+            rows = self.db.execute(
+                "SELECT code,name,flag,flag_code,proficiency,display_order FROM employee_languages WHERE employee_id=? ORDER BY display_order,id",
+                (employee_id,),
+            ).fetchall()
+            return [dict(row) | {"proficiency_label": LANGUAGE_PROFICIENCIES[row["proficiency"]]} for row in rows]
+
+        def parse_languages(self, value: Any) -> list[dict[str, Any]]:
+            if not isinstance(value, list):
+                raise APIError(422, "يجب إرسال اللغات في قائمة.", "validation_error", {"field": "languages"})
+            if len(value) > len(LANGUAGE_CATALOG):
+                raise APIError(422, "عدد اللغات يتجاوز القائمة المتاحة.", "validation_error", {"field": "languages"})
+            parsed: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for index, item in enumerate(value):
+                if not isinstance(item, dict):
+                    raise APIError(422, "بيانات اللغة غير صالحة.", "validation_error", {"index": index})
+                code = str(item.get("code", "")).strip().lower()
+                proficiency = str(item.get("proficiency", "")).strip().lower()
+                if code not in LANGUAGE_CATALOG:
+                    raise APIError(422, "رمز اللغة غير معروف.", "unknown_language", {"code": code, "index": index})
+                if proficiency not in LANGUAGE_PROFICIENCIES:
+                    raise APIError(422, "مستوى إجادة اللغة غير معروف.", "unknown_proficiency", {"proficiency": proficiency, "index": index})
+                if code in seen:
+                    raise APIError(422, "لا يمكن تكرار اللغة نفسها.", "duplicate_language", {"code": code})
+                seen.add(code)
+                definition = LANGUAGE_CATALOG[code]
+                parsed.append({"code": code, **definition, "proficiency": proficiency, "display_order": index})
+            return parsed
+
+        def replace_employee_languages(self, employee_id: int, languages: list[dict[str, Any]], stamp: str) -> None:
+            self.db.execute("DELETE FROM employee_languages WHERE employee_id=?", (employee_id,))
+            self.db.executemany(
+                """INSERT INTO employee_languages(employee_id,code,name,flag,flag_code,proficiency,display_order,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                [(employee_id, row["code"], row["name"], row["flag"], row["flag_code"], row["proficiency"], row["display_order"], stamp, stamp) for row in languages],
+            )
+
+        def api_language_catalog(self) -> None:
+            self.current_user(True)
+            self.send_json(200, {"items": [dict(code=code, **definition) for code, definition in LANGUAGE_CATALOG.items()], "proficiencies": [{"code": code, "name": name} for code, name in LANGUAGE_PROFICIENCIES.items()]})
+
+        def api_employee_languages_get(self, employee_id: int) -> None:
+            if not self.may_access_employee(employee_id):
+                raise APIError(403, "لا يمكنك عرض لغات هذا الموظف.", "forbidden")
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            self.send_json(200, {"items": self.employee_languages(employee_id)})
+
+        def api_employee_languages_patch(self, employee_id: int) -> None:
+            user = self.require_permission("employee.profile.edit")
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            languages = self.parse_languages(self.read_json().get("languages"))
+            stamp = now_iso()
+            with self.db:
+                self.replace_employee_languages(employee_id, languages, stamp)
+                audit(self.db, user["id"], "employee.languages_update", "employee", employee_id, {"codes": [row["code"] for row in languages]})
+            self.send_json(200, {"items": self.employee_languages(employee_id)})
+
+        def api_employee_patch(self, employee_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            data = self.read_json()
+            values = self.parse_employee(data, partial=True)
+            languages = self.parse_languages(data["languages"]) if "languages" in data else None
+            profile_editor = has_permission(self.db, user, "employee.profile.edit")
+            reference_only = set(values).issubset({"job_title_id", "job_title", "job_grade_id", "job_grade"}) and has_permission(self.db, user, "reference.manage")
+            if not profile_editor and not reference_only:
+                raise APIError(403, "لا تملك صلاحية تعديل ملف الموظف.", "forbidden", {"permission": "employee.profile.edit"})
+            if "salary" in values and not has_permission(self.db, user, "salary.view"):
+                raise APIError(403, "لا تملك صلاحية تعديل الراتب.", "forbidden", {"permission": "salary.view"})
+            if values.get("manager_id") == employee_id:
+                raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
+            if not values and languages is None:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            stamp = now_iso()
+            if values:
+                values["updated_at"] = stamp
+            try:
+                with self.db:
+                    if values:
+                        self.db.execute("UPDATE employees SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), employee_id))
+                    if languages is not None:
+                        self.replace_employee_languages(employee_id, languages, stamp)
+                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
+            include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")
+            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            employee = normalize_employee(row)
+            assert employee is not None
+            employee["languages"] = self.employee_languages(employee_id)
+            self.send_json(200, {"employee": employee})
+
+        def may_view_emergency_contacts(self, employee_id: int) -> bool:
+            user = self.current_user(True)
+            assert user is not None
+            return user.get("employee_id") == employee_id or has_permission(self.db, user, "employee.emergency.manage")
+
+        def serialize_emergency_contact(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            result = dict(row)
+            result["is_primary"] = bool(result["is_primary"])
+            result["archived"] = bool(result["archived"])
+            for field in ("created_by", "archived_by", "archived_at"):
+                result.pop(field, None)
+            return result
+
+        def parse_emergency_contact(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            for key, max_len in (("full_name", 180), ("relationship", 100), ("phone", 60)):
+                if key in data or not partial:
+                    values[key] = require_text(data, key, max_len)
+            for key, max_len in (("alternate_phone", 60), ("email", 254), ("notes", 800)):
+                if key in data or not partial:
+                    values[key] = optional_text(data, key, max_len)
+            if "email" in values:
+                values["email"] = clean_email(values["email"]) or None
+                if values["email"] and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", values["email"]):
+                    raise APIError(422, "البريد الإلكتروني لجهة الطوارئ غير صالح.", "validation_error", {"field": "email"})
+            for field in ("phone", "alternate_phone"):
+                if values.get(field) and not re.fullmatch(r"[+0-9() ./-]{5,60}", values[field]):
+                    raise APIError(422, "رقم هاتف جهة الطوارئ غير صالح.", "validation_error", {"field": field})
+            if "is_primary" in data:
+                values["is_primary"] = 1 if bool(data["is_primary"]) else 0
+            elif not partial:
+                values["is_primary"] = 0
+            return values
+
+        def api_employee_emergency_contacts_get(self, employee_id: int) -> None:
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            if not self.may_view_emergency_contacts(employee_id):
+                raise APIError(403, "لا يمكنك عرض جهات اتصال الطوارئ لهذا الموظف.", "forbidden")
+            rows = self.db.execute(
+                "SELECT * FROM employee_emergency_contacts WHERE employee_id=? AND archived=0 ORDER BY is_primary DESC,id",
+                (employee_id,),
+            ).fetchall()
+            self.send_json(200, {"items": [self.serialize_emergency_contact(row) for row in rows]})
+
+        def api_employee_emergency_contact_post(self, employee_id: int) -> None:
+            user = self.require_permission("employee.emergency.manage")
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            values = self.parse_emergency_contact(self.read_json())
+            stamp = now_iso()
+            with self.db:
+                active_count = int(self.db.execute(
+                    "SELECT COUNT(*) FROM employee_emergency_contacts WHERE employee_id=? AND archived=0", (employee_id,)
+                ).fetchone()[0])
+                if active_count == 0:
+                    values["is_primary"] = 1
+                elif values["is_primary"]:
+                    self.db.execute("UPDATE employee_emergency_contacts SET is_primary=0,updated_at=? WHERE employee_id=? AND archived=0", (stamp, employee_id))
+                columns = ["employee_id", *values, "created_by", "created_at", "updated_at"]
+                cursor = self.db.execute(
+                    f"INSERT INTO employee_emergency_contacts({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                    (employee_id, *values.values(), user["id"], stamp, stamp),
+                )
+                contact_id = int(cursor.lastrowid)
+                audit(self.db, user["id"], "employee.emergency_contact.create", "employee", employee_id, {"contact_id": contact_id, "fields": sorted(values)})
+            row = self.db.execute("SELECT * FROM employee_emergency_contacts WHERE id=?", (contact_id,)).fetchone()
+            self.send_json(201, {"contact": self.serialize_emergency_contact(row)})
+
+        def api_employee_emergency_contact_patch(self, contact_id: int) -> None:
+            user = self.require_permission("employee.emergency.manage")
+            current = self.db.execute("SELECT * FROM employee_emergency_contacts WHERE id=? AND archived=0", (contact_id,)).fetchone()
+            if current is None:
+                raise APIError(404, "جهة اتصال الطوارئ غير موجودة.", "not_found")
+            values = self.parse_emergency_contact(self.read_json(), partial=True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            employee_id = int(current["employee_id"])
+            stamp = now_iso()
+            with self.db:
+                if values.get("is_primary"):
+                    self.db.execute("UPDATE employee_emergency_contacts SET is_primary=0,updated_at=? WHERE employee_id=? AND id<>? AND archived=0", (stamp, employee_id, contact_id))
+                values["updated_at"] = stamp
+                self.db.execute("UPDATE employee_emergency_contacts SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), contact_id))
+                if current["is_primary"] and values.get("is_primary") == 0:
+                    replacement = self.db.execute("SELECT id FROM employee_emergency_contacts WHERE employee_id=? AND archived=0 AND id<>? ORDER BY id LIMIT 1", (employee_id, contact_id)).fetchone()
+                    if replacement:
+                        self.db.execute("UPDATE employee_emergency_contacts SET is_primary=1,updated_at=? WHERE id=?", (stamp, replacement["id"]))
+                audit(self.db, user["id"], "employee.emergency_contact.update", "employee", employee_id, {"contact_id": contact_id, "fields": sorted(key for key in values if key != "updated_at")})
+            row = self.db.execute("SELECT * FROM employee_emergency_contacts WHERE id=?", (contact_id,)).fetchone()
+            self.send_json(200, {"contact": self.serialize_emergency_contact(row)})
+
+        def api_employee_emergency_contact_delete(self, contact_id: int) -> None:
+            user = self.require_permission("employee.emergency.manage")
+            current = self.db.execute("SELECT * FROM employee_emergency_contacts WHERE id=? AND archived=0", (contact_id,)).fetchone()
+            if current is None:
+                raise APIError(404, "جهة اتصال الطوارئ غير موجودة.", "not_found")
+            employee_id = int(current["employee_id"])
+            stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE employee_emergency_contacts SET archived=1,is_primary=0,archived_by=?,archived_at=?,updated_at=? WHERE id=?", (user["id"], stamp, stamp, contact_id))
+                if current["is_primary"]:
+                    replacement = self.db.execute("SELECT id FROM employee_emergency_contacts WHERE employee_id=? AND archived=0 ORDER BY id LIMIT 1", (employee_id,)).fetchone()
+                    if replacement:
+                        self.db.execute("UPDATE employee_emergency_contacts SET is_primary=1,updated_at=? WHERE id=?", (stamp, replacement["id"]))
+                audit(self.db, user["id"], "employee.emergency_contact.archive", "employee", employee_id, {"contact_id": contact_id})
+            self.send_json(200, {"archived": True, "id": contact_id})
+
+        def api_employee_documents_get(self, employee_id: int) -> None:
+            if not self.may_access_employee(employee_id): raise APIError(403,"لا يمكنك عرض مستندات هذا الموظف.","forbidden")
+            user=self.current_user(True); assert user is not None
+            visible_only=user.get("employee_id")==employee_id and not has_permission(self.db,user,"employee_document.manage")
+            conditions=["employee_id=?"]; params:[Any]=[employee_id]
+            if visible_only: conditions.append("visible_to_employee=1")
+            if self.query.get("type"): conditions.append("document_type=?"); params.append(self.query["type"])
+            if self.query.get("archived") in {"0","1"}: conditions.append("archived=?"); params.append(int(self.query["archived"]))
+            rows=self.db.execute("SELECT * FROM employee_documents WHERE "+" AND ".join(conditions)+" ORDER BY archived,COALESCE(expires_on,'9999-12-31'),created_at DESC",params).fetchall()
+            documents=[self.serialize_document(r) for r in rows]
+            if self.query.get("status"): documents=[d for d in documents if d["status"]==self.query["status"]]
+            alerts=[d for d in documents if d["status"] in {"expiring_soon","expired"}]
+            self.send_json(200,{"items":documents,"alerts":alerts,"counts":{"total":len(documents),"expired":sum(d["status"]=="expired" for d in documents),"expiring_soon":sum(d["status"]=="expiring_soon" for d in documents)}})
+
+        def serialize_document(self, row: sqlite3.Row | dict[str, Any], include_data: bool=False) -> dict[str, Any]:
+            result=dict(row); result["visible_to_employee"]=bool(result["visible_to_employee"]); result["no_expiry"]=bool(result.get("no_expiry")); result["archived"]=bool(result.get("archived"))
+            if result["archived"]: status="archived"; days_remaining=None; alert_window=None
+            elif result["no_expiry"] or not result.get("expires_on"): status="no_expiry"; days_remaining=None; alert_window=None
+            else:
+                days_remaining=(date.fromisoformat(result["expires_on"])-local_now().date()).days
+                status="expired" if days_remaining<0 else "expiring_soon" if days_remaining<=90 else "valid"
+                alert_window=30 if 0<=days_remaining<=30 else 60 if 0<=days_remaining<=60 else 90 if 0<=days_remaining<=90 else None
+            result.update({"status":status,"days_remaining":days_remaining,"alert_window":alert_window})
+            if not include_data: result.pop("data_url",None)
+            return result
+
+        def api_employee_documents_post(self, employee_id: int) -> None:
+            user=self.require_permission("employee_document.manage")
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?",(employee_id,)).fetchone(): raise APIError(404,"الموظف غير موجود.","not_found")
+            data=self.read_json(); document_type=str(data.get("document_type",""))
+            if document_type not in DOCUMENT_TYPES: raise APIError(422,"نوع المستند غير صالح.","validation_error")
+            data_url=validate_data_url(data.get("data_url"),"مستند الموظف",("image/png","image/jpeg","image/webp","application/pdf"),2_000_000)
+            assert data_url is not None
+            mime_type=data_url[5:data_url.index(";")]
+            file_name=require_text(data,"file_name",240)
+            allowed_extensions={"image/png":{".png"},"image/jpeg":{".jpg",".jpeg"},"image/webp":{".webp"},"application/pdf":{".pdf"}}
+            if Path(file_name).suffix.lower() not in allowed_extensions[mime_type]:
+                raise APIError(422,"امتداد الملف لا يطابق نوع محتواه.","invalid_upload")
+            issued_on=parse_date(data["issued_on"],"issued_on").isoformat() if data.get("issued_on") else None
+            no_expiry=bool(data.get("no_expiry")); expires_on=parse_date(data["expires_on"],"expires_on").isoformat() if data.get("expires_on") and not no_expiry else None
+            if issued_on and expires_on and expires_on<issued_on: raise APIError(422,"تاريخ الانتهاء يسبق تاريخ الإصدار.","validation_error")
+            if document_type=="contract" and (no_expiry or not expires_on): raise APIError(422,"تاريخ انتهاء عقد العمل مطلوب لإصدار البطاقة.","contract_expiry_required")
+            stamp=now_iso()
+            with self.db:
+                cur=self.db.execute("""INSERT INTO employee_documents(employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at)
+                                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(employee_id,document_type,require_text(data,"title",180),optional_text(data,"document_number",120),optional_text(data,"issuer",180),issued_on,expires_on,1 if no_expiry else 0,file_name,mime_type,data_url,optional_text(data,"notes",2000),0,1 if data.get("visible_to_employee",True) else 0,user["id"],stamp,stamp))
+                audit(self.db,user["id"],"employee_document.upload","employee_document",cur.lastrowid,{"employee_id":employee_id,"document_type":document_type})
+            self.send_json(201,{"document":self.serialize_document(self.db.execute("SELECT * FROM employee_documents WHERE id=?",(cur.lastrowid,)).fetchone())})
+
+        def api_document_get(self, document_id: int) -> None:
+            row=self.db.execute("SELECT * FROM employee_documents WHERE id=?",(document_id,)).fetchone()
+            if not row: raise APIError(404,"المستند غير موجود.","not_found")
+            user=self.current_user(True); assert user is not None
+            if not self.may_access_employee(row["employee_id"]) or (user.get("employee_id")==row["employee_id"] and not row["visible_to_employee"] and not has_permission(self.db,user,"employee_document.manage")): raise APIError(403,"لا يمكنك عرض هذا المستند.","forbidden")
+            audit(self.db,user["id"],"employee_document.view","employee_document",document_id)
+            self.db.commit()
+            self.send_json(200,{"document":self.serialize_document(row,True)})
+
+        def api_document_patch(self, document_id: int) -> None:
+            user=self.require_permission("employee_document.manage"); row=self.db.execute("SELECT * FROM employee_documents WHERE id=?",(document_id,)).fetchone()
+            if not row: raise APIError(404,"المستند غير موجود.","not_found")
+            data=self.read_json(); values={}
+            for key,limit in (("title",180),("document_number",120),("issuer",180),("notes",2000)):
+                if key in data: values[key]=require_text(data,key,limit) if key=="title" else optional_text(data,key,limit)
+            if "document_type" in data:
+                if data["document_type"] not in DOCUMENT_TYPES: raise APIError(422,"نوع المستند غير صالح.","validation_error")
+                values["document_type"]=data["document_type"]
+            for key in ("issued_on","expires_on"):
+                if key in data: values[key]=parse_date(data[key],key).isoformat() if data[key] else None
+            for key in ("no_expiry","archived","visible_to_employee"):
+                if key in data: values[key]=1 if bool(data[key]) else 0
+            effective_type=values.get("document_type",row["document_type"]); effective_no_expiry=bool(values.get("no_expiry",row["no_expiry"])); effective_expiry=values.get("expires_on",row["expires_on"])
+            if effective_no_expiry: values["expires_on"]=None; effective_expiry=None
+            if effective_type=="contract" and (effective_no_expiry or not effective_expiry): raise APIError(422,"تاريخ انتهاء عقد العمل مطلوب لإصدار البطاقة.","contract_expiry_required")
+            if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            values["updated_at"]=now_iso()
+            with self.db:
+                self.db.execute("UPDATE employee_documents SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),document_id)); audit(self.db,user["id"],"employee_document.update","employee_document",document_id,values)
+            self.send_json(200,{"document":self.serialize_document(self.db.execute("SELECT * FROM employee_documents WHERE id=?",(document_id,)).fetchone())})
+
+        def api_document_delete(self, document_id: int) -> None:
+            user=self.require_permission("employee_document.manage")
+            with self.db:
+                result=self.db.execute("DELETE FROM employee_documents WHERE id=?",(document_id,))
+                if not result.rowcount: raise APIError(404,"المستند غير موجود.","not_found")
+                audit(self.db,user["id"],"employee_document.delete","employee_document",document_id)
+            self.send_json(200,{"ok":True})
+
+        def api_employee_actions_get(self, employee_id: int) -> None:
+            if not self.may_access_employee(employee_id): raise APIError(403,"لا يمكنك عرض سجل هذا الموظف.","forbidden")
+            rows=self.db.execute("SELECT a.*,u.display_name AS created_by_name FROM employee_actions a LEFT JOIN users u ON u.id=a.created_by WHERE a.employee_id=? ORDER BY a.action_date DESC,a.id DESC",(employee_id,)).fetchall()
+            self.send_json(200,{"items":[dict(r) for r in rows],"counts":{"violations":sum(r["action_type"]=="violation" for r in rows),"undertakings":sum(r["action_type"]=="undertaking" for r in rows),"open":sum(r["status"]=="open" for r in rows)}})
+
+        def api_employee_actions_post(self, employee_id: int) -> None:
+            user=self.require_permission("employee_action.manage"); data=self.read_json(); action_type=str(data.get("action_type",""))
+            if action_type not in {"violation","undertaking"}: raise APIError(422,"نوع السجل غير صالح.","validation_error")
+            attachment=None
+            if data.get("attachment_data"): attachment=validate_data_url(data["attachment_data"],"مرفق السجل",("image/png","image/jpeg","image/webp","application/pdf"),2_000_000)
+            stamp=now_iso(); action_date=parse_date(data.get("action_date",local_now().date().isoformat()),"action_date").isoformat()
+            with self.db:
+                cur=self.db.execute("INSERT INTO employee_actions(employee_id,action_type,action_date,description,penalty,attachment_data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",(employee_id,action_type,action_date,require_text(data,"description",2000),optional_text(data,"penalty",500),attachment,user["id"],stamp,stamp))
+                audit(self.db,user["id"],"employee_action.create","employee_action",cur.lastrowid,{"employee_id":employee_id,"action_type":action_type})
+            self.send_json(201,{"action":dict(self.db.execute("SELECT * FROM employee_actions WHERE id=?",(cur.lastrowid,)).fetchone())})
+
+        def api_employee_action_patch(self, action_id: int) -> None:
+            user=self.require_permission("employee_action.manage"); data=self.read_json(); row=self.db.execute("SELECT * FROM employee_actions WHERE id=?",(action_id,)).fetchone()
+            if not row: raise APIError(404,"السجل غير موجود.","not_found")
+            values={}
+            for key in ("description","penalty"):
+                if key in data: values[key]=optional_text(data,key,2000 if key=="description" else 500)
+            if "status" in data:
+                if data["status"] not in {"open","closed","cancelled"}: raise APIError(422,"الحالة غير صالحة.","validation_error")
+                values["status"]=data["status"]
+                if data["status"]=="closed": values.update({"closed_by":user["id"],"closed_at":now_iso()})
+            if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            values["updated_at"]=now_iso()
+            with self.db:
+                self.db.execute("UPDATE employee_actions SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),action_id)); audit(self.db,user["id"],"employee_action.update","employee_action",action_id,values)
+            self.send_json(200,{"action":dict(self.db.execute("SELECT * FROM employee_actions WHERE id=?",(action_id,)).fetchone())})
+
+        def employee_card_payload(self, employee_id: int) -> dict[str, Any]:
+            employee = self.db.execute(employee_query(False) + " WHERE e.id=?", (employee_id,)).fetchone()
+            if employee is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            organization = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            org_data = serialize_org(organization)
+            org_data.pop("stamp_data", None)
+            contract=self.db.execute("SELECT * FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END,expires_on DESC,id DESC LIMIT 1",(employee_id,)).fetchone()
+            today=local_now().date(); employee_data=normalize_employee(employee); assert employee_data is not None
+            if not employee_data["active"]: status,status_label,reason,valid_until="closed","مغلقة","تم إنهاء خدمة الموظف، ولا يمكن إصدار بطاقة جديدة.",None
+            elif contract is None: status,status_label,reason,valid_until="not_issuable","غير قابلة للإصدار","أضف عقد عمل سارياً بتاريخ انتهاء لإصدار البطاقة.",None
+            else:
+                valid_until=contract["expires_on"]; expired=not valid_until or date.fromisoformat(valid_until)<today
+                status,status_label,reason=("expired","منتهية","عقد العمل المرتبط بالبطاقة منتهٍ.") if expired else ("active","سارية","")
+            reference=f"CARD-{employee_data['employee_no']}-{employee_id:06d}"
+            languages=self.employee_languages(employee_id)
+            employee_data["languages"]=languages
+            template=org_data.get("card_template") or "portrait_orbit"
+            orientation="horizontal" if template=="executive_horizontal" else "vertical"
+            dimensions={"width_mm":85.6,"height_mm":53.98} if orientation=="horizontal" else {"width_mm":53.98,"height_mm":85.6}
+            contact_phone=org_data.get("card_contact_phone") or org_data.get("phone") or "غير محدد"
+            contact_email=org_data.get("card_contact_email") or org_data.get("email") or "غير محدد"
+            instructions=org_data.get("card_back_instructions") or DEFAULT_CARD_INSTRUCTIONS
+            design={"template":template,"orientation":orientation,"dimensions_mm":dimensions,"primary_color":org_data.get("card_primary_color") or "#123d34","accent_color":org_data.get("card_accent_color") or "#c6a15b","back_instructions":instructions,"contact_phone":contact_phone,"contact_email":contact_email}
+            front={"side":"front","fields":["organization","photo","full_name","job_title","employee_no","department","job_grade","languages","valid_until","reference"]}
+            back={"side":"back","fields":["organization","instructions","contact_phone","contact_email","reference","status","valid_until","verification_path"]}
+            return {"employee": employee_data, "organization": org_data,"status":status,"status_label":status_label,"reason":reason,"valid_until":valid_until,"can_print":status=="active","verification_reference":reference,"verification_path":f"/api/cards/verify/{reference}","contract_document_id":contract["id"] if contract else None,"languages":languages,"design":design,"faces":{"front":front,"back":back}}
+
+        def api_employee_card(self, employee_id: int) -> None:
+            if not self.may_access_employee(employee_id):
+                raise APIError(403, "لا يمكنك عرض بطاقة هذا الموظف.", "forbidden")
+            self.send_json(200, {"card": self.employee_card_payload(employee_id)})
+
+        def api_employee_card_print(self, employee_id: int) -> None:
+            if not self.may_access_employee(employee_id): raise APIError(403,"لا يمكنك طباعة بطاقة هذا الموظف.","forbidden")
+            user=self.current_user(True); assert user is not None; card=self.employee_card_payload(employee_id)
+            data=self.read_json() if int(self.headers.get("Content-Length","0") or 0)>0 else {}
+            face=str(data.get("face","both"))
+            if face not in {"front","back","both"}: raise APIError(422,"وجه الطباعة غير صالح.","validation_error",{"field":"face"})
+            if not card["can_print"]: raise APIError(409,card["reason"],"card_not_printable",{"status":card["status"]})
+            with self.db: audit(self.db,user["id"],"employee_card.print","employee",employee_id,{"reference":card["verification_reference"],"valid_until":card["valid_until"],"face":face,"template":card["design"]["template"]})
+            self.send_json(200,{"card":card,"print_authorized":True,"print_face":face})
+
+        def api_card_verify(self, reference: str) -> None:
+            user = self.current_user(True); assert user is not None
+            try: employee_id=int(reference.rsplit("-",1)[1])
+            except (IndexError,ValueError): raise APIError(404,"مرجع البطاقة غير موجود.","not_found")
+            if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "لا يمكنك التحقق من بطاقة موظف آخر.", "forbidden")
+            card=self.employee_card_payload(employee_id)
+            if not hmac.compare_digest(card["verification_reference"],reference): raise APIError(404,"مرجع البطاقة غير موجود.","not_found")
+            self.send_json(200,{"verification":{"reference":reference,"status":card["status"],"status_label":card["status_label"],"valid_until":card["valid_until"],"employee_no":card["employee"]["employee_no"],"full_name":card["employee"]["full_name"],"organization":card["organization"]["display_name"]}})
+
+        def api_my_card(self) -> None:
+            self.send_json(200, {"card": self.employee_card_payload(self.own_employee_id())})
+
+        def api_my_dashboard(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            employee = self.db.execute(employee_query(True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            year = local_now().year
+            balances = self.leave_balance_rows(employee_id, year)
+            attendance = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, local_now().date().isoformat())).fetchone()
+            overtime = self.db.execute("SELECT * FROM overtime_requests WHERE employee_id=? ORDER BY created_at DESC LIMIT 10", (employee_id,)).fetchall()
+            leaves = self.db.execute("SELECT lr.*,lt.name AS leave_type_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id WHERE lr.employee_id=? ORDER BY lr.created_at DESC LIMIT 10", (employee_id,)).fetchall()
+            evaluation = self.db.execute("SELECT e.*,c.year,c.name AS cycle_name FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id WHERE e.employee_id=? ORDER BY c.year DESC LIMIT 1", (employee_id,)).fetchone()
+            unread = self.db.execute(
+                """SELECT COUNT(*) FROM notification_recipients r
+                   JOIN notifications n ON n.id=r.notification_id
+                   WHERE r.user_id=? AND r.read_at IS NULL
+                     AND (n.available_at IS NULL OR n.available_at<=?)""",
+                (user["id"], now_iso()),
+            ).fetchone()[0]
+            self.send_json(200, {
+                "employee": normalize_employee(employee), "organization": serialize_org(org),
+                "leave_balances": balances, "attendance_today": row_dict(attendance),
+                "overtime_requests": [dict(r) for r in overtime], "leave_requests": [self.leave_request_payload(r, user) for r in leaves],
+                "evaluation": row_dict(evaluation), "notifications_unread": unread,
+            })
+
+        # Attendance and work shifts
+        def shift_for_employee(self, employee_id: int, work_date: date) -> dict[str, Any] | None:
+            row = self.db.execute(
+                """SELECT s.*,a.effective_from,a.effective_to
+                   FROM employee_shift_assignments a JOIN shifts s ON s.id=a.shift_id
+                   WHERE a.employee_id=? AND a.effective_from<=?
+                     AND (a.effective_to IS NULL OR a.effective_to>=?) AND s.active=1
+                   ORDER BY a.effective_from DESC,a.id DESC LIMIT 1""",
+                (employee_id, work_date.isoformat(), work_date.isoformat()),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["working_days"] = parse_json_text(result["working_days"], [])
+            result["rest_days"] = parse_json_text(result["rest_days"], [])
+            result["active"] = bool(result["active"])
+            return result
+
+        def attendance_metrics(self, row: sqlite3.Row, shift: dict[str, Any] | None, approved_overtime: int = 0) -> dict[str, Any]:
+            result = dict(row)
+            result.update({"shift": shift, "required_minutes": 0, "late_minutes": 0, "early_minutes": 0, "gross_minutes": 0, "net_minutes": 0, "approved_overtime_minutes": approved_overtime, "day_status": "working_day"})
+            work_day = date.fromisoformat(row["work_date"])
+            if shift is None:
+                result["day_status"] = "no_shift"
+            elif work_day.weekday() in shift["rest_days"]:
+                result["day_status"] = "weekly_rest"
+            else:
+                result["required_minutes"] = int(shift["daily_limit_minutes"])
+            check_in = datetime.fromisoformat(row["check_in_at"]) if row["check_in_at"] else None
+            check_out = datetime.fromisoformat(row["check_out_at"]) if row["check_out_at"] else None
+            if check_in and check_out:
+                gross = max(0, int((check_out - check_in).total_seconds() // 60))
+                result["gross_minutes"] = gross
+                result["net_minutes"] = max(0, gross - (int(shift["break_minutes"]) if shift else 0))
+            elif check_in:
+                result["day_status"] = "open"
+            elif result["day_status"] == "working_day":
+                result["day_status"] = "absent"
+            if shift and check_in and work_day.weekday() not in shift["rest_days"]:
+                expected_start = datetime.combine(work_day, parse_clock(shift["start_time"], "start_time"), UAE_TZ)
+                grace_end = expected_start + timedelta(minutes=int(shift["grace_minutes"]))
+                result["late_minutes"] = max(0, int((check_in - grace_end).total_seconds() // 60))
+                if check_out:
+                    expected_end = datetime.combine(work_day, parse_clock(shift["end_time"], "end_time"), UAE_TZ)
+                    if expected_end <= expected_start:
+                        expected_end += timedelta(days=1)
+                    result["early_minutes"] = max(0, int((expected_end - check_out).total_seconds() // 60))
+            return result
+
+        def api_attendance_punch(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"check_in", "check_out"}:
+                raise APIError(422, "نوع التسجيل يجب أن يكون check_in أو check_out.", "validation_error")
+            latitude = as_float(data.get("latitude"), "latitude", -90, 90)
+            longitude = as_float(data.get("longitude"), "longitude", -180, 180)
+            accuracy = as_float(data.get("accuracy", 0), "accuracy", 0, 100_000)
+            employee = self.db.execute("SELECT branch_id,active FROM employees WHERE id=?", (employee_id,)).fetchone()
+            if not employee or not bool(employee["active"]):
+                raise APIError(403, "ملف الموظف غير نشط.", "inactive_employee")
+            branch = self.db.execute("SELECT * FROM branches WHERE id=?", (employee["branch_id"],)).fetchone() if employee["branch_id"] else None
+            if branch is None or not bool(branch["active"]):
+                with self.db:
+                    self.db.execute("INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,accepted,reason,created_at) VALUES(?,?,?,?,?,?,0,?,?)", (employee_id, employee["branch_id"], action, latitude, longitude, accuracy, "no_active_branch", now_iso()))
+                raise APIError(403, "لا يوجد فرع نشط مرتبط بملفك. راجع الموارد البشرية.", "no_active_branch")
+            distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
+            inside = distance <= branch["radius_m"]
+            stamp = local_now().isoformat(timespec="seconds")
+            with self.db:
+                self.db.execute(
+                    "INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,distance_m,accepted,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (employee_id, branch["id"], action, latitude, longitude, accuracy, round(distance, 2), int(inside), None if inside else "outside_geofence", stamp),
+                )
+            if not inside:
+                raise APIError(
+                    403,
+                    f"أنت خارج نطاق فرع «{branch['name']}». المسافة الحالية {round(distance)} م، والنطاق المطلوب {branch['radius_m']} م.",
+                    "outside_geofence",
+                    {"distance_m": round(distance, 1), "radius_m": branch["radius_m"], "branch": branch["name"]},
+                )
+            work_date = local_now().date().isoformat()
+            current = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, work_date)).fetchone()
+            with self.db:
+                if action == "check_in":
+                    if current and current["check_in_at"]:
+                        raise APIError(409, "تم تسجيل الدخول لهذا اليوم بالفعل.", "already_checked_in")
+                    if current:
+                        self.db.execute("UPDATE attendance SET check_in_at=?,check_in_lat=?,check_in_lng=?,check_in_accuracy=?,check_in_distance_m=?,updated_at=? WHERE id=?", (stamp, latitude, longitude, accuracy, round(distance, 2), stamp, current["id"]))
+                    else:
+                        self.db.execute("INSERT INTO attendance(employee_id,work_date,branch_id,check_in_at,check_in_lat,check_in_lng,check_in_accuracy,check_in_distance_m,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", (employee_id, work_date, branch["id"], stamp, latitude, longitude, accuracy, round(distance, 2), stamp, stamp))
+                else:
+                    if not current or not current["check_in_at"]:
+                        raise APIError(409, "يجب تسجيل الدخول قبل تسجيل الخروج.", "not_checked_in")
+                    if current["check_out_at"]:
+                        raise APIError(409, "تم تسجيل الخروج لهذا اليوم بالفعل.", "already_checked_out")
+                    self.db.execute("UPDATE attendance SET check_out_at=?,check_out_lat=?,check_out_lng=?,check_out_accuracy=?,check_out_distance_m=?,updated_at=? WHERE id=?", (stamp, latitude, longitude, accuracy, round(distance, 2), stamp, current["id"]))
+                audit(self.db, user["id"], f"attendance.{action}", "employee", employee_id, {"branch_id": branch["id"], "distance_m": round(distance, 2)})
+            saved = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, work_date)).fetchone()
+            shift = self.shift_for_employee(employee_id, date.fromisoformat(work_date))
+            overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee_id, work_date)).fetchone()[0]
+            self.send_json(200, {"attendance": self.attendance_metrics(saved, shift, overtime), "distance_m": round(distance, 1)})
+
+        def api_attendance_daily(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            work_date = parse_date(self.query.get("date", local_now().date().isoformat())).isoformat()
+            employee_filter = self.query.get("employee_id")
+            params: list[Any] = []
+            conditions = ["e.active=1"]
+            broad_scope = self.has_privileged_people_access(user, "attendance.view")
+            team_scope = bool(not broad_scope and has_permission(self.db, user, "attendance.team") and user.get("employee_id"))
+            response_scope = "all" if broad_scope else "team_attendance" if team_scope else "self"
+            if employee_filter:
+                employee_id = as_int(employee_filter, "employee_id", 1)
+                is_own = employee_id == user.get("employee_id")
+                is_team_member = bool(team_scope and self.team_member_row(int(user["employee_id"]), employee_id))
+                if not is_own and not broad_scope and not is_team_member:
+                    raise APIError(403, "لا يمكنك عرض حضور هذا الموظف.", "forbidden")
+                conditions.append("e.id=?")
+                params.append(employee_id)
+                response_scope = "self" if is_own else "all" if broad_scope else "team_attendance"
+            elif broad_scope:
+                pass
+            elif team_scope:
+                conditions.append("e.id<>? AND (e.manager_id=? OR EXISTS (SELECT 1 FROM departments td WHERE td.id=e.department_id AND td.manager_employee_id=?))")
+                params.extend([user["employee_id"], user["employee_id"], user["employee_id"]])
+            else:
+                conditions.append("e.id=?")
+                params.append(self.own_employee_id())
+            employees = self.db.execute(
+                "SELECT e.id,e.employee_no,e.full_name,e.branch_id,b.name AS branch_name FROM employees e LEFT JOIN branches b ON b.id=e.branch_id WHERE " + " AND ".join(conditions) + " ORDER BY e.full_name",
+                params,
+            ).fetchall()
+            items = []
+            for employee in employees:
+                attendance = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee["id"], work_date)).fetchone()
+                if attendance:
+                    source = dict(attendance)
+                else:
+                    source = {
+                        "id": None, "employee_id": employee["id"], "work_date": work_date,
+                        "branch_id": employee["branch_id"], "check_in_at": None, "check_out_at": None,
+                        "check_in_lat": None, "check_in_lng": None, "check_in_accuracy": None,
+                        "check_in_distance_m": None, "check_out_lat": None, "check_out_lng": None,
+                        "check_out_accuracy": None, "check_out_distance_m": None, "decision": "missing",
+                        "rejection_reason": None, "created_at": None, "updated_at": None,
+                    }
+                source.update({"employee_no": employee["employee_no"], "full_name": employee["full_name"], "branch_name": employee["branch_name"]})
+                shift = self.shift_for_employee(employee["id"], date.fromisoformat(work_date))
+                overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee["id"], work_date)).fetchone()[0]
+                metrics = self.attendance_metrics(source, shift, overtime)
+                if response_scope == "team_attendance":
+                    items.append({
+                        "id": employee["id"], "employee_no": employee["employee_no"],
+                        "full_name": employee["full_name"], "work_date": work_date,
+                        "check_in_at": metrics.get("check_in_at"), "check_out_at": metrics.get("check_out_at"),
+                    })
+                else:
+                    items.append(metrics)
+            self.send_json(200, {"date": work_date, "scope": response_scope, "items": items})
+
+        def attendance_range_payload(self, user: dict[str, Any]) -> dict[str, Any]:
+            today = local_now().date()
+            date_from = parse_date(self.query.get("date_from", today.replace(day=1).isoformat()), "date_from")
+            date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to")
+            if date_from > date_to:
+                raise APIError(400, "تاريخ البداية يجب ألا يكون بعد تاريخ النهاية.", "invalid_date_range", {"field": "date_from"})
+            if date_to > today:
+                raise APIError(422, "لا يمكن أن تنتهي فترة الحضور في تاريخ مستقبلي.", "validation_error", {"field": "date_to"})
+            if (date_to - date_from).days > 366:
+                raise APIError(422, "فترة الحضور لا يمكن أن تتجاوز 367 يوماً.", "validation_error", {"field": "date_from"})
+
+            employee_filter = self.query.get("employee_id")
+            params: list[Any] = []
+            conditions = ["e.active=1"]
+            broad_scope = self.has_privileged_people_access(user, "attendance.view")
+            team_scope = bool(not broad_scope and has_permission(self.db, user, "attendance.team") and user.get("employee_id"))
+            response_scope = "all" if broad_scope else "team_attendance" if team_scope else "self"
+            if employee_filter:
+                employee_id = as_int(employee_filter, "employee_id", 1)
+                is_own = employee_id == user.get("employee_id")
+                is_team_member = bool(team_scope and self.team_member_row(int(user["employee_id"]), employee_id))
+                if not is_own and not broad_scope and not is_team_member:
+                    raise APIError(403, "لا يمكنك عرض حضور هذا الموظف.", "forbidden")
+                conditions.append("e.id=?")
+                params.append(employee_id)
+                response_scope = "self" if is_own else "all" if broad_scope else "team_attendance"
+            elif broad_scope:
+                pass
+            elif team_scope:
+                conditions.append("e.id<>? AND (e.manager_id=? OR EXISTS (SELECT 1 FROM departments td WHERE td.id=e.department_id AND td.manager_employee_id=?))")
+                params.extend([user["employee_id"], user["employee_id"], user["employee_id"]])
+            else:
+                conditions.append("e.id=?")
+                params.append(self.own_employee_id())
+
+            q = str(self.query.get("q", "")).strip()
+            if len(q) > 120:
+                raise APIError(422, "عبارة البحث طويلة جداً.", "validation_error", {"field": "q"})
+            department_filter = as_int(self.query["department_id"], "department_id", 1) if self.query.get("department_id") else None
+            branch_filter = as_int(self.query["branch_id"], "branch_id", 1) if self.query.get("branch_id") else None
+            status_filter = str(self.query.get("status", "")).strip()
+            allowed_statuses = {"", "present", "open", "late", "absent", "weekly_rest", "approved_leave", "no_shift"}
+            if status_filter not in allowed_statuses:
+                raise APIError(422, "حالة الحضور المطلوبة غير صالحة.", "validation_error", {"field": "status"})
+            if response_scope == "team_attendance" and (department_filter or branch_filter or status_filter):
+                raise APIError(403, "فلاتر القسم والفرع والحالة غير متاحة في عرض أوقات الفريق المحدود.", "forbidden")
+            if q:
+                conditions.append("(LOWER(e.full_name) LIKE LOWER(?) OR LOWER(e.employee_no) LIKE LOWER(?))")
+                params.extend([f"%{q}%", f"%{q}%"])
+            if department_filter:
+                conditions.append("e.department_id=?")
+                params.append(department_filter)
+            if branch_filter:
+                conditions.append("e.branch_id=?")
+                params.append(branch_filter)
+            employees = self.db.execute(
+                "SELECT e.id,e.employee_no,e.full_name,e.branch_id,e.department_id,e.hire_date,b.name AS branch_name,d.name AS department_name FROM employees e LEFT JOIN branches b ON b.id=e.branch_id LEFT JOIN departments d ON d.id=e.department_id WHERE "
+                + " AND ".join(conditions) + " ORDER BY e.full_name", params,
+            ).fetchall()
+            employee_ids = [int(employee["id"]) for employee in employees]
+            attendance_by_key: dict[tuple[int, str], sqlite3.Row] = {}
+            overtime_by_key: dict[tuple[int, str], int] = {}
+            approved_leave_days: set[tuple[int, str]] = set()
+            if employee_ids:
+                placeholders = ",".join("?" for _ in employee_ids)
+                for row in self.db.execute(
+                    f"SELECT * FROM attendance WHERE employee_id IN ({placeholders}) AND work_date BETWEEN ? AND ?",
+                    (*employee_ids, date_from.isoformat(), date_to.isoformat()),
+                ).fetchall():
+                    attendance_by_key[(int(row["employee_id"]), row["work_date"])] = row
+                for row in self.db.execute(
+                    f"SELECT employee_id,work_date,COALESCE(SUM(duration_minutes),0) AS minutes FROM overtime_requests WHERE employee_id IN ({placeholders}) AND work_date BETWEEN ? AND ? AND status='approved' GROUP BY employee_id,work_date",
+                    (*employee_ids, date_from.isoformat(), date_to.isoformat()),
+                ).fetchall():
+                    overtime_by_key[(int(row["employee_id"]), row["work_date"])] = int(row["minutes"] or 0)
+                leave_rows = self.db.execute(
+                    f"SELECT employee_id,start_date,end_date FROM leave_requests WHERE employee_id IN ({placeholders}) AND status='approved' AND start_date<=? AND end_date>=?",
+                    (*employee_ids, date_to.isoformat(), date_from.isoformat()),
+                ).fetchall()
+                for leave in leave_rows:
+                    cursor = max(date_from, date.fromisoformat(leave["start_date"]))
+                    leave_end = min(date_to, date.fromisoformat(leave["end_date"]))
+                    while cursor <= leave_end:
+                        approved_leave_days.add((int(leave["employee_id"]), cursor.isoformat()))
+                        cursor += timedelta(days=1)
+
+            items: list[dict[str, Any]] = []
+            summary = {
+                "work_days": 0, "net_work_minutes": 0, "late_minutes": 0,
+                "absence_days": 0, "weekly_rest_days": 0, "leave_days": 0,
+                "approved_overtime_minutes": 0, "attendance_records": 0,
+                "expected_employee_days": 0, "present_days": 0, "open_days": 0, "late_days": 0,
+            }
+            cursor = date_from
+            while cursor <= date_to:
+                work_date = cursor.isoformat()
+                for employee in employees:
+                    employee_id = int(employee["id"])
+                    attendance = attendance_by_key.get((employee_id, work_date))
+                    if employee["hire_date"] and cursor < date.fromisoformat(employee["hire_date"]) and attendance is None:
+                        continue
+                    if response_scope == "team_attendance" and attendance is None:
+                        continue
+                    source: dict[str, Any]
+                    if attendance is not None:
+                        source = dict(attendance)
+                    else:
+                        source = {
+                            "id": None, "employee_id": employee_id, "work_date": work_date,
+                            "branch_id": employee["branch_id"], "check_in_at": None, "check_out_at": None,
+                        }
+                    if response_scope == "team_attendance":
+                        if attendance is not None:
+                            summary["attendance_records"] += 1
+                        items.append({
+                            "id": source.get("id"), "employee_id": employee_id,
+                            "employee_no": employee["employee_no"], "full_name": employee["full_name"],
+                            "work_date": work_date, "check_in_at": source.get("check_in_at"),
+                            "check_out_at": source.get("check_out_at"),
+                        })
+                        continue
+                    shift = self.shift_for_employee(employee_id, cursor)
+                    approved_overtime = overtime_by_key.get((employee_id, work_date), 0)
+                    metrics = self.attendance_metrics(source, shift, approved_overtime)
+                    has_leave = (employee_id, work_date) in approved_leave_days
+                    if has_leave and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent"}:
+                        metrics["day_status"] = "approved_leave"
+                    metrics.update({
+                        "employee_no": employee["employee_no"], "full_name": employee["full_name"],
+                        "branch_name": employee["branch_name"], "department_name": employee["department_name"], "approved_leave": has_leave,
+                    })
+                    matches_status = (
+                        not status_filter
+                        or (status_filter == "present" and bool(metrics.get("check_in_at")))
+                        or (status_filter == "late" and int(metrics.get("late_minutes") or 0) > 0)
+                        or status_filter == metrics["day_status"]
+                    )
+                    if not matches_status:
+                        continue
+                    if attendance is not None:
+                        summary["attendance_records"] += 1
+                    summary["net_work_minutes"] += int(metrics["net_minutes"])
+                    summary["late_minutes"] += int(metrics["late_minutes"])
+                    summary["approved_overtime_minutes"] += int(metrics["approved_overtime_minutes"])
+                    if metrics["required_minutes"]:
+                        summary["work_days"] += 1
+                        summary["expected_employee_days"] += 1
+                    if metrics.get("check_in_at"):
+                        summary["present_days"] += 1
+                    if metrics["day_status"] == "open":
+                        summary["open_days"] += 1
+                    if int(metrics.get("late_minutes") or 0) > 0:
+                        summary["late_days"] += 1
+                    if metrics["day_status"] == "absent":
+                        summary["absence_days"] += 1
+                    elif metrics["day_status"] == "weekly_rest":
+                        summary["weekly_rest_days"] += 1
+                    elif metrics["day_status"] == "approved_leave":
+                        summary["leave_days"] += 1
+                    items.append(metrics)
+                cursor += timedelta(days=1)
+            if response_scope == "team_attendance":
+                summary = {"attendance_records": summary["attendance_records"]}
+            filter_options: dict[str, list[dict[str, Any]]] = {"employees": []}
+            if response_scope in {"all", "team_attendance"}:
+                filter_options["employees"] = [
+                    {"id": int(employee["id"]), "employee_no": employee["employee_no"], "full_name": employee["full_name"]}
+                    for employee in employees
+                ]
+            if response_scope == "all":
+                filter_options["departments"] = [
+                    {"id": int(value[0]), "name": value[1]}
+                    for value in sorted({(employee["department_id"], employee["department_name"]) for employee in employees if employee["department_id"]}, key=lambda item: item[1] or "")
+                ]
+                filter_options["branches"] = [
+                    {"id": int(value[0]), "name": value[1]}
+                    for value in sorted({(employee["branch_id"], employee["branch_name"]) for employee in employees if employee["branch_id"]}, key=lambda item: item[1] or "")
+                ]
+            return {
+                "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                "scope": response_scope, "employee_count": len(employees), "summary": summary, "items": items,
+                "filters": {"q": q, "employee_id": employee_filter or None, "department_id": department_filter, "branch_id": branch_filter, "status": status_filter},
+                "filter_options": filter_options,
+            }
+
+        def api_attendance_range(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            self.send_json(200, self.attendance_range_payload(user))
+
+        def api_attendance_range_csv(self) -> None:
+            user = self.require_permission("attendance.export")
+            payload = self.attendance_range_payload(user)
+            if payload["scope"] == "team_attendance":
+                rows: list[list[Any]] = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "تسجيل الدخول", "تسجيل الخروج"]]
+                rows.extend([[item["work_date"], item["full_name"], item["employee_no"], item.get("check_in_at") or "", item.get("check_out_at") or ""] for item in payload["items"]])
+            else:
+                rows = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "المناوبة", "الدخول", "الخروج", "صافي الدقائق", "دقائق التأخير", "الإضافي المعتمد", "الموقع بالمتر", "الحالة"]]
+                rows.extend([
+                    [
+                        item["work_date"], item["full_name"], item["employee_no"], item.get("department_name") or "",
+                        item.get("branch_name") or "", (item.get("shift") or {}).get("name") or "", item.get("check_in_at") or "",
+                        item.get("check_out_at") or "", item.get("net_minutes") or 0, item.get("late_minutes") or 0,
+                        item.get("approved_overtime_minutes") or 0, item.get("check_in_distance_m") if item.get("check_in_distance_m") is not None else "",
+                        item.get("day_status") or "",
+                    ]
+                    for item in payload["items"]
+                ])
+            with self.db:
+                audit(self.db, user["id"], "attendance.range_export", "attendance", None, {"date_from": payload["date_from"], "date_to": payload["date_to"], "row_count": len(payload["items"]), "filters": payload["filters"]})
+            self.send_csv(f"attendance-{payload['date_from']}-{payload['date_to']}.csv", rows)
+
+        def serialize_shift(self, row: sqlite3.Row) -> dict[str, Any]:
+            data = dict(row)
+            data["working_days"] = parse_json_text(data["working_days"], [])
+            data["rest_days"] = parse_json_text(data["rest_days"], [])
+            data["active"] = bool(data["active"])
+            return data
+
+        def parse_shift(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not partial or "name" in data:
+                result["name"] = require_text(data, "name", 120)
+            for key in ("start_time", "end_time"):
+                if not partial or key in data:
+                    result[key] = parse_clock(data.get(key), key).strftime("%H:%M")
+            for key, default, lower, upper in (("break_minutes", 60, 0, 480), ("grace_minutes", 10, 0, 240), ("daily_limit_minutes", 480, 60, 1440)):
+                if key in data or not partial:
+                    result[key] = as_int(data.get(key, default), key, lower, upper)
+            if "working_days" in data or not partial:
+                days = data.get("working_days", [0, 1, 2, 3, 4])
+                if not isinstance(days, list) or not days or any(not isinstance(day, int) or day < 0 or day > 6 for day in days):
+                    raise APIError(422, "أيام العمل يجب أن تكون قائمة أرقام من 0 إلى 6.", "validation_error")
+                result["working_days"] = json_text(sorted(set(days)))
+            if "rest_days" in data or not partial:
+                days = data.get("rest_days", [5, 6])
+                if not isinstance(days, list) or any(not isinstance(day, int) or day < 0 or day > 6 for day in days):
+                    raise APIError(422, "أيام الراحة يجب أن تكون قائمة أرقام من 0 إلى 6.", "validation_error")
+                result["rest_days"] = json_text(sorted(set(days)))
+            if "active" in data:
+                result["active"] = 1 if bool(data["active"]) else 0
+            elif not partial:
+                result["active"] = 1
+            return result
+
+        def api_shifts_get(self) -> None:
+            user = self.current_user(True); assert user is not None
+            rows = self.db.execute("SELECT s.*,(SELECT COUNT(*) FROM employee_shift_assignments a WHERE a.shift_id=s.id AND (a.effective_to IS NULL OR a.effective_to>=date('now'))) AS assigned_count FROM shifts s ORDER BY s.active DESC,s.name").fetchall()
+            assignment_sql = \
+                """SELECT a.id,a.employee_id,e.employee_no,e.full_name AS employee_name,
+                          a.shift_id,s.name AS shift_name,a.effective_from,a.effective_to,
+                          s.working_days,s.rest_days,a.created_at
+                   FROM employee_shift_assignments a JOIN employees e ON e.id=a.employee_id
+                   JOIN shifts s ON s.id=a.shift_id
+                """
+            assignment_params: tuple[Any, ...] = ()
+            if not self.has_privileged_people_access(user, "shift.view"):
+                assignment_sql += " WHERE a.employee_id=?"
+                assignment_params = (self.own_employee_id(),)
+            assignment_sql += " ORDER BY a.effective_from DESC,a.id DESC"
+            assignment_rows = self.db.execute(assignment_sql, assignment_params).fetchall()
+            assignments = []
+            for row in assignment_rows:
+                item = dict(row)
+                item["working_days"] = parse_json_text(item["working_days"], [])
+                item["rest_days"] = parse_json_text(item["rest_days"], [])
+                assignments.append(item)
+            self.send_json(200, {"items": [self.serialize_shift(r) for r in rows], "assignments": assignments})
+
+        def api_shifts_post(self) -> None:
+            user = self.require_permission("shift.manage")
+            values = self.parse_shift(self.read_json())
+            stamp = now_iso()
+            try:
+                with self.db:
+                    cols = list(values) + ["created_at", "updated_at"]
+                    cur = self.db.execute(f"INSERT INTO shifts({','.join(cols)}) VALUES({','.join('?' for _ in cols)})", (*values.values(), stamp, stamp))
+                    shift_id = int(cur.lastrowid)
+                    audit(self.db, user["id"], "shift.create", "shift", shift_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد مناوبة بالاسم نفسه.", "duplicate_shift") from exc
+            row = self.db.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+            self.send_json(201, {"shift": self.serialize_shift(row)})
+
+        def api_shift_patch(self, shift_id: int) -> None:
+            user = self.require_permission("shift.manage")
+            if not self.db.execute("SELECT 1 FROM shifts WHERE id=?", (shift_id,)).fetchone():
+                raise APIError(404, "المناوبة غير موجودة.", "not_found")
+            values = self.parse_shift(self.read_json(), partial=True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute("UPDATE shifts SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), shift_id))
+                    audit(self.db, user["id"], "shift.update", "shift", shift_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد مناوبة بالاسم نفسه.", "duplicate_shift") from exc
+            row = self.db.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+            self.send_json(200, {"shift": self.serialize_shift(row)})
+
+        def api_shift_delete(self, shift_id: int) -> None:
+            user = self.require_permission("shift.manage")
+            if self.db.execute("SELECT 1 FROM employee_shift_assignments WHERE shift_id=?", (shift_id,)).fetchone():
+                raise APIError(409, "لا يمكن حذف مناوبة لها تعيينات محفوظة. يمكن تعطيلها بدلاً من ذلك.", "shift_has_assignments")
+            with self.db:
+                result = self.db.execute("DELETE FROM shifts WHERE id=?", (shift_id,))
+                if not result.rowcount:
+                    raise APIError(404, "المناوبة غير موجودة.", "not_found")
+                audit(self.db, user["id"], "shift.delete", "shift", shift_id)
+            self.send_json(200, {"ok": True})
+
+        def api_shift_assign(self, shift_id: int) -> None:
+            user = self.require_permission("shift.manage")
+            if not self.db.execute("SELECT 1 FROM shifts WHERE id=? AND active=1", (shift_id,)).fetchone():
+                raise APIError(404, "المناوبة غير موجودة أو غير نشطة.", "not_found")
+            data = self.read_json()
+            employee_id = as_int(data.get("employee_id"), "employee_id", 1)
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            effective_from = parse_date(data.get("effective_from"), "effective_from")
+            effective_to = parse_date(data["effective_to"], "effective_to") if data.get("effective_to") else None
+            if effective_to and effective_to < effective_from:
+                raise APIError(422, "تاريخ نهاية التعيين يسبق تاريخ بدايته.", "validation_error")
+            previous_day = (effective_from - timedelta(days=1)).isoformat()
+            with self.db:
+                self.db.execute("UPDATE employee_shift_assignments SET effective_to=? WHERE employee_id=? AND effective_from<? AND (effective_to IS NULL OR effective_to>=?)", (previous_day, employee_id, effective_from.isoformat(), effective_from.isoformat()))
+                self.db.execute("DELETE FROM employee_shift_assignments WHERE employee_id=? AND effective_from>=? AND (? IS NULL OR effective_from<=?)", (employee_id, effective_from.isoformat(), effective_to.isoformat() if effective_to else None, effective_to.isoformat() if effective_to else None))
+                cur = self.db.execute("INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,effective_to,created_by,created_at) VALUES(?,?,?,?,?,?)", (employee_id, shift_id, effective_from.isoformat(), effective_to.isoformat() if effective_to else None, user["id"], now_iso()))
+                audit(self.db, user["id"], "shift.assign", "employee", employee_id, {"shift_id": shift_id, "assignment_id": cur.lastrowid})
+            assignment = self.db.execute("SELECT a.*,s.name AS shift_name FROM employee_shift_assignments a JOIN shifts s ON s.id=a.shift_id WHERE a.id=?", (cur.lastrowid,)).fetchone()
+            self.send_json(201, {"assignment": dict(assignment)})
+
+        # Overtime
+        def api_overtime_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            status = self.query.get("status")
+            params: list[Any] = []
+            conditions: list[str] = []
+            if status:
+                conditions.append("o.status=?")
+                params.append(status)
+            if not self.has_privileged_people_access(user, "overtime.view"):
+                conditions.append("o.employee_id=?")
+                params.append(self.own_employee_id())
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            rows = self.db.execute("SELECT o.*,e.employee_no,e.full_name,d.name AS department_name,u.display_name AS decided_by_name FROM overtime_requests o JOIN employees e ON e.id=o.employee_id LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN users u ON u.id=o.decided_by" + where + " ORDER BY o.created_at DESC", params).fetchall()
+            self.send_json(200, {"items": [dict(r) for r in rows]})
+
+        def api_overtime_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            work_date = parse_date(data.get("work_date"), "work_date").isoformat()
+            start = parse_clock(data.get("start_time"), "start_time")
+            end = parse_clock(data.get("end_time"), "end_time")
+            start_dt = datetime.combine(date.fromisoformat(work_date), start)
+            end_dt = datetime.combine(date.fromisoformat(work_date), end)
+            if end_dt <= start_dt:
+                end_dt += timedelta(days=1)
+            duration = int((end_dt - start_dt).total_seconds() // 60)
+            if duration <= 0 or duration > 720:
+                raise APIError(422, "مدة العمل الإضافي يجب أن تكون بين دقيقة و12 ساعة.", "validation_error")
+            reason = require_text(data, "reason", 1000)
+            stamp = now_iso()
+            with self.db:
+                cur = self.db.execute("INSERT INTO overtime_requests(employee_id,work_date,start_time,end_time,duration_minutes,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'submitted',?,?)", (employee_id, work_date, start.strftime("%H:%M"), end.strftime("%H:%M"), duration, reason, stamp, stamp))
+                request_id = int(cur.lastrowid)
+                self.db.execute("INSERT INTO overtime_audit(request_id,actor_user_id,from_status,to_status,comment,created_at) VALUES(?,?,NULL,'submitted','',?)", (request_id, user["id"], stamp))
+                audit(self.db, user["id"], "overtime.submit", "overtime_request", request_id)
+            row = self.db.execute("SELECT * FROM overtime_requests WHERE id=?", (request_id,)).fetchone()
+            self.send_json(201, {"request": dict(row)})
+
+        def api_overtime_decision(self, request_id: int) -> None:
+            user = self.require_permission("overtime.approve")
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"approve", "reject"}:
+                raise APIError(422, "القرار يجب أن يكون approve أو reject.", "validation_error")
+            request_row = self.db.execute("SELECT * FROM overtime_requests WHERE id=?", (request_id,)).fetchone()
+            if request_row is None:
+                raise APIError(404, "طلب العمل الإضافي غير موجود.", "not_found")
+            if request_row["status"] != "submitted":
+                raise APIError(409, "تم اتخاذ قرار على هذا الطلب سابقاً.", "invalid_status")
+            if user.get("employee_id") == request_row["employee_id"]:
+                raise APIError(403, "لا يمكن اعتماد طلبك الشخصي.", "self_approval_forbidden")
+            reason = optional_text(data, "reason", 1000)
+            if action == "reject" and not reason:
+                raise APIError(422, "سبب الرفض مطلوب.", "validation_error")
+            status = "approved" if action == "approve" else "rejected"
+            stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE overtime_requests SET status=?,rejection_reason=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, reason if status == "rejected" else None, user["id"], stamp, stamp, request_id))
+                self.db.execute("INSERT INTO overtime_audit(request_id,actor_user_id,from_status,to_status,comment,created_at) VALUES(?,?,'submitted',?,?,?)", (request_id, user["id"], status, reason, stamp))
+                audit(self.db, user["id"], f"overtime.{status}", "overtime_request", request_id, {"reason": reason})
+            saved = self.db.execute("SELECT * FROM overtime_requests WHERE id=?", (request_id,)).fetchone()
+            self.send_json(200, {"request": dict(saved)})
+
+        # Leave balances and requests
+        def leave_hr_recipient_ids(self) -> list[int]:
+            recipients: list[int] = []
+            for row in self.db.execute("SELECT * FROM users WHERE active=1 AND role IN ('hr','admin')"):
+                user = dict(row) | {"active": bool(row["active"]), "is_super_admin": bool(row["is_super_admin"])}
+                if has_permission(self.db, user, "leave.approve"):
+                    recipients.append(int(row["id"]))
+            return recipients
+
+        def leave_request_payload(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
+            data = dict(row)
+            status = data.get("status")
+            manager_decision = data.get("manager_decision") or "pending"
+            if status == "approved":
+                workflow_stage = "approved"
+            elif status == "rejected":
+                workflow_stage = "manager_rejected" if manager_decision == "rejected" else "hr_rejected"
+            elif status == "cancelled":
+                workflow_stage = "cancelled"
+            elif manager_decision == "approved":
+                workflow_stage = "pending_hr"
+            else:
+                workflow_stage = "pending_manager"
+            is_direct_manager = bool(
+                user.get("employee_id")
+                and int(user["employee_id"]) == int(data.get("manager_employee_id") or 0)
+                and has_permission(self.db, user, "leave.team")
+            )
+            is_hr_final_approver = bool(
+                str(user.get("role")) in {"hr", "admin"}
+                and has_permission(self.db, user, "leave.approve")
+            )
+            can_decide = bool(
+                status == "submitted"
+                and (
+                    (manager_decision == "pending" and is_direct_manager)
+                    or (manager_decision == "approved" and is_hr_final_approver)
+                )
+            )
+            data.update({
+                "workflow_stage": workflow_stage,
+                "can_decide": can_decide,
+                "decision_role": "manager" if can_decide and manager_decision == "pending" else "hr" if can_decide else None,
+            })
+            is_team_record = bool(is_direct_manager and data.get("employee_id") != user.get("employee_id"))
+            if is_team_record and not self.has_privileged_people_access(user, "leave.view"):
+                allowed = {
+                    "id", "employee_id", "employee_no", "full_name", "leave_type_id",
+                    "leave_type_code", "leave_type_name", "start_date", "end_date", "days",
+                    "reason", "status", "manager_decision", "workflow_stage", "can_decide", "decision_role",
+                }
+                data = {key: value for key, value in data.items() if key in allowed}
+            return data
+
+        def leave_balance_rows(self, employee_id: int, year: int) -> list[dict[str, Any]]:
+            leave_types = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
+            rows: list[dict[str, Any]] = []
+            for leave in leave_types:
+                balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (employee_id, leave["id"], year)).fetchone()
+                entitlement = float(balance["entitlement"] if balance else leave["annual_entitlement"])
+                carried = float(balance["carried"] if balance else 0)
+                used = float(balance["used"] if balance else 0)
+                pending = float(self.db.execute("SELECT COALESCE(SUM(days),0) FROM leave_requests WHERE employee_id=? AND leave_type_id=? AND status='submitted' AND substr(start_date,1,4)=?", (employee_id, leave["id"], str(year))).fetchone()[0])
+                rows.append({
+                    "leave_type_id": leave["id"], "code": leave["code"], "name": leave["name"],
+                    "year": year, "entitlement": entitlement, "carried": carried, "used": used,
+                    "pending": pending, "available": max(0, entitlement + carried - used - pending),
+                    "requires_attachment": bool(leave["requires_attachment"]), "min_notice_days": leave["min_notice_days"], "paid": bool(leave["paid"]),
+                })
+            return rows
+
+        def api_leave_types(self) -> None:
+            self.current_user(True)
+            rows = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
+            self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"]), "paid": bool(r["paid"]), "requires_attachment": bool(r["requires_attachment"])} for r in rows]})
+
+        def api_leave_balances(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            year = as_int(self.query.get("year", local_now().year), "year", 2000, 2200)
+            employee_id = as_int(self.query["employee_id"], "employee_id", 1) if "employee_id" in self.query else self.own_employee_id()
+            if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "leave.view"):
+                raise APIError(403, "لا يمكنك عرض رصيد هذا الموظف.", "forbidden")
+            self.send_json(200, {"employee_id": employee_id, "year": year, "items": self.leave_balance_rows(employee_id, year)})
+
+        def api_leave_requests_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            params: list[Any] = []
+            where = ""
+            if self.has_privileged_people_access(user, "leave.view"):
+                pass
+            elif has_permission(self.db, user, "leave.team") and user.get("employee_id"):
+                where = " WHERE (lr.employee_id=? OR (lr.manager_employee_id=? AND lr.status='submitted' AND lr.manager_decision='pending'))"
+                params = [user["employee_id"], user["employee_id"]]
+            else:
+                where = " WHERE lr.employee_id=?"
+                params = [self.own_employee_id()]
+            if self.query.get("status"):
+                where += (" AND " if where else " WHERE ") + "lr.status=?"
+                params.append(self.query["status"])
+            rows = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name,u.display_name AS decided_by_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id LEFT JOIN users u ON u.id=lr.decided_by" + where + " ORDER BY lr.created_at DESC", params).fetchall()
+            self.send_json(200, {"items": [self.leave_request_payload(row, user) for row in rows]})
+
+        def api_leave_requests_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            leave_type_id = as_int(data.get("leave_type_id"), "leave_type_id", 1)
+            leave_type = self.db.execute("SELECT * FROM leave_types WHERE id=? AND active=1", (leave_type_id,)).fetchone()
+            if leave_type is None:
+                raise APIError(404, "نوع الإجازة غير موجود.", "not_found")
+            start = parse_date(data.get("start_date"), "start_date")
+            end = parse_date(data.get("end_date"), "end_date")
+            if end < start:
+                raise APIError(422, "تاريخ نهاية الإجازة يسبق بدايتها.", "validation_error")
+            if start.year != end.year:
+                raise APIError(422, "قسّم الطلب الذي يمتد بين سنتين إلى طلبين.", "cross_year_leave")
+            days = float((end - start).days + 1)
+            notice = (start - local_now().date()).days
+            if notice < int(leave_type["min_notice_days"]):
+                raise APIError(422, f"هذا النوع يتطلب التقديم قبل {leave_type['min_notice_days']} أيام على الأقل.", "notice_period")
+            attachment = None
+            if data.get("attachment_data"):
+                attachment = validate_data_url(data["attachment_data"], "مرفق الإجازة", ("image/png", "image/jpeg", "image/webp", "application/pdf"), 2_000_000)
+            if leave_type["requires_attachment"] and not attachment:
+                raise APIError(422, "المرفق مطلوب لهذا النوع من الإجازات.", "attachment_required")
+            overlap = self.db.execute("SELECT 1 FROM leave_requests WHERE employee_id=? AND status IN ('submitted','approved') AND start_date<=? AND end_date>=?", (employee_id, end.isoformat(), start.isoformat())).fetchone()
+            if overlap:
+                raise APIError(409, "يوجد طلب إجازة متداخل مع هذه الفترة.", "overlapping_leave")
+            balance = next((x for x in self.leave_balance_rows(employee_id, start.year) if x["leave_type_id"] == leave_type_id), None)
+            if balance and leave_type["annual_entitlement"] > 0 and days > balance["available"]:
+                raise APIError(422, "الرصيد المتاح لا يكفي لهذا الطلب.", "insufficient_balance", {"requested": days, "available": balance["available"]})
+            manager_employee_id = self.direct_manager_employee_id(employee_id)
+            if manager_employee_id is None:
+                raise APIError(409, "لا يمكن إرسال الطلب قبل تعيين مسؤول مباشر للموظف.", "direct_manager_required")
+            manager_user = self.db.execute("SELECT * FROM users WHERE employee_id=? AND active=1", (manager_employee_id,)).fetchone()
+            if manager_user is None or not has_permission(self.db, dict(manager_user), "leave.team"):
+                raise APIError(409, "المسؤول المباشر لا يملك حساباً نشطاً وصلاحية مراجعة إجازات الفريق.", "manager_account_required")
+            employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
+            stamp = now_iso()
+            with self.db:
+                cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,reason,attachment_data,status,manager_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'submitted',?,'pending',?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, optional_text(data, "reason", 1000), attachment, manager_employee_id, stamp, stamp))
+                request_id = int(cur.lastrowid)
+                create_internal_notification(
+                    self.db, int(user["id"]), [int(manager_user["id"])],
+                    "طلب إجازة بانتظار قرارك",
+                    f"قدم {employee['full_name']} ({employee['employee_no']}) طلب {leave_type['name']} من {start.isoformat()} إلى {end.isoformat()}.",
+                )
+                audit(self.db, user["id"], "leave.submit", "leave_request", request_id, {"manager_employee_id": manager_employee_id})
+            row = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id WHERE lr.id=?", (request_id,)).fetchone()
+            self.send_json(201, {"request": self.leave_request_payload(row, user)})
+
+        def api_leave_request_decision(self, request_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            request_row = self.db.execute("SELECT lr.*,e.employee_no,e.full_name,lt.name AS leave_type_name,lt.code AS leave_type_code,lt.annual_entitlement FROM leave_requests lr JOIN employees e ON e.id=lr.employee_id JOIN leave_types lt ON lt.id=lr.leave_type_id WHERE lr.id=?", (request_id,)).fetchone()
+            if request_row is None:
+                raise APIError(404, "طلب الإجازة غير موجود.", "not_found")
+            if user.get("employee_id") == request_row["employee_id"]:
+                raise APIError(403, "لا يمكن اعتماد طلبك الشخصي.", "self_approval_forbidden")
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"approve", "reject"}:
+                raise APIError(422, "القرار يجب أن يكون approve أو reject.", "validation_error")
+            reason = optional_text(data, "reason", 1000)
+            if action == "reject" and not reason:
+                raise APIError(422, "سبب الرفض مطلوب.", "validation_error")
+            is_direct_manager = bool(
+                user.get("employee_id")
+                and int(user["employee_id"]) == int(request_row["manager_employee_id"] or 0)
+                and has_permission(self.db, user, "leave.team")
+            )
+            is_hr_final_approver = bool(
+                str(user.get("role")) in {"hr", "admin"}
+                and has_permission(self.db, user, "leave.approve")
+            )
+            if not is_direct_manager and not is_hr_final_approver:
+                raise APIError(403, "لا تملك صلاحية اتخاذ قرار على هذا الطلب.", "forbidden")
+            if request_row["status"] != "submitted":
+                raise APIError(409, "تم اتخاذ قرار نهائي على هذا الطلب سابقاً.", "invalid_status")
+            stamp = now_iso()
+            employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["employee_id"],)).fetchone()
+            manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["manager_employee_id"],)).fetchone()
+            with self.db:
+                if request_row["manager_decision"] == "pending":
+                    if not is_direct_manager:
+                        raise APIError(409, "يجب أن يعتمد المسؤول المباشر الطلب أولاً.", "manager_approval_required")
+                    manager_decision = "approved" if action == "approve" else "rejected"
+                    status = "submitted" if action == "approve" else "rejected"
+                    self.db.execute(
+                        "UPDATE leave_requests SET manager_decision=?,manager_comment=?,manager_decided_by=?,manager_decided_at=?,status=?,rejection_reason=?,updated_at=? WHERE id=?",
+                        (manager_decision, reason, user["id"], stamp, status, reason if action == "reject" else None, stamp, request_id),
+                    )
+                    hr_recipients = self.leave_hr_recipient_ids()
+                    create_internal_notification(
+                        self.db, int(user["id"]), hr_recipients,
+                        "قرار المسؤول المباشر على طلب إجازة",
+                        f"{('وافق' if action == 'approve' else 'رفض')} المسؤول المباشر طلب {request_row['leave_type_name']} للموظف {request_row['full_name']} ({request_row['employee_no']})."
+                        + (" الطلب بانتظار الاعتماد النهائي من الموارد البشرية." if action == "approve" else f" سبب الرفض: {reason}"),
+                    )
+                    if employee_user:
+                        create_internal_notification(
+                            self.db, int(user["id"]), [int(employee_user["id"])],
+                            "تحديث طلب الإجازة",
+                            "وافق مسؤولك المباشر على الطلب وأرسله للاعتماد النهائي لدى الموارد البشرية."
+                            if action == "approve" else f"رفض مسؤولك المباشر طلب الإجازة. السبب: {reason}",
+                        )
+                    audit(self.db, user["id"], f"leave.manager_{manager_decision}", "leave_request", request_id, {"reason": reason, "hr_recipient_count": len(hr_recipients)})
+                else:
+                    if request_row["manager_decision"] != "approved":
+                        raise APIError(409, "رفض المسؤول المباشر هذا الطلب ولا يمكن اعتماده نهائياً.", "manager_rejected")
+                    if not is_hr_final_approver:
+                        raise APIError(403, "الاعتماد النهائي متاح لموظف الموارد البشرية المخول فقط.", "hr_final_approval_required")
+                    status = "approved" if action == "approve" else "rejected"
+                    if status == "approved" and float(request_row["annual_entitlement"]) > 0:
+                        year = date.fromisoformat(request_row["start_date"]).year
+                        balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["employee_id"], request_row["leave_type_id"], year)).fetchone()
+                        if balance is None:
+                            self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (request_row["employee_id"], request_row["leave_type_id"], year, request_row["annual_entitlement"]))
+                            balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["employee_id"], request_row["leave_type_id"], year)).fetchone()
+                        available = float(balance["entitlement"] + balance["carried"] - balance["used"])
+                        if float(request_row["days"]) > available:
+                            raise APIError(409, "لم يعد الرصيد كافياً لاعتماد الطلب.", "insufficient_balance", {"available": available})
+                        self.db.execute("UPDATE leave_balances SET used=used+? WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["days"], request_row["employee_id"], request_row["leave_type_id"], year))
+                    self.db.execute("UPDATE leave_requests SET status=?,rejection_reason=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, reason if status == "rejected" else None, user["id"], stamp, stamp, request_id))
+                    recipients = [int(row["id"]) for row in (employee_user, manager_user) if row]
+                    create_internal_notification(
+                        self.db, int(user["id"]), recipients,
+                        "القرار النهائي لطلب الإجازة",
+                        f"{('اعتمدت' if action == 'approve' else 'رفضت')} الموارد البشرية نهائياً طلب {request_row['leave_type_name']} للموظف {request_row['full_name']}."
+                        + (f" السبب: {reason}" if action == "reject" else ""),
+                    )
+                    audit(self.db, user["id"], f"leave.hr_{status}", "leave_request", request_id, {"reason": reason})
+            saved = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id WHERE lr.id=?", (request_id,)).fetchone()
+            self.send_json(200, {"request": self.leave_request_payload(saved, user)})
+
+        # Annual evaluations
+        def evaluation_goal_template_scope(self) -> tuple[dict[str, Any], sqlite3.Row]:
+            user = self.current_user(True)
+            assert user is not None
+            requested = as_int(self.query["job_title_id"], "job_title_id", 1) if self.query.get("job_title_id") else None
+            if requested is not None and has_permission(self.db, user, "reference.manage"):
+                job_title_id = requested
+            else:
+                employee_id = user.get("employee_id")
+                if not employee_id:
+                    raise APIError(422, "اختر مسمى وظيفياً لعرض أهدافه.", "job_title_required")
+                employee = self.db.execute("SELECT job_title_id FROM employees WHERE id=?", (employee_id,)).fetchone()
+                if employee is None or not employee["job_title_id"]:
+                    raise APIError(409, "ملفك غير مرتبط بمسمى وظيفي معتمد.", "job_title_missing")
+                job_title_id = int(employee["job_title_id"])
+                if requested is not None and requested != job_title_id:
+                    raise APIError(403, "لا يمكنك عرض أهداف مسمى وظيفي آخر.", "forbidden")
+            title = self.db.execute("SELECT id,name,active FROM job_titles WHERE id=?", (job_title_id,)).fetchone()
+            if title is None:
+                raise APIError(404, "المسمى الوظيفي غير موجود.", "not_found")
+            return user, title
+
+        def api_evaluation_goal_templates_get(self) -> None:
+            user, title = self.evaluation_goal_template_scope()
+            include_inactive = has_permission(self.db, user, "reference.manage") and self.query.get("include_inactive") == "1"
+            sql = "SELECT * FROM evaluation_goal_templates WHERE job_title_id=?"
+            if not include_inactive:
+                sql += " AND active=1"
+            rows = self.db.execute(sql + " ORDER BY sort_order,id", (title["id"],)).fetchall()
+            self.send_json(200, {
+                "job_title": {"id": title["id"], "name": title["name"], "active": bool(title["active"])},
+                "items": [dict(row) | {"active": bool(row["active"])} for row in rows],
+                "weight_total": round(sum(float(row["default_weight"]) for row in rows if bool(row["active"])), 2),
+                "can_manage": has_permission(self.db, user, "reference.manage"),
+            })
+
+        def parse_goal_template(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            if not partial or "title" in data:
+                values["title"] = require_text(data, "title", 240)
+            for key, max_len in (("description", 2000), ("measure", 500)):
+                if key in data or not partial:
+                    values[key] = optional_text(data, key, max_len)
+            if not partial or "default_weight" in data:
+                values["default_weight"] = as_float(data.get("default_weight"), "default_weight", 0.01, 100)
+            if "sort_order" in data or not partial:
+                values["sort_order"] = as_int(data.get("sort_order", 0), "sort_order", 0, 999)
+            if "active" in data:
+                values["active"] = 1 if bool(data["active"]) else 0
+            return values
+
+        def api_evaluation_goal_template_post(self) -> None:
+            user = self.require_permission("reference.manage")
+            data = self.read_json()
+            job_title_id = as_int(data.get("job_title_id"), "job_title_id", 1)
+            if self.db.execute("SELECT 1 FROM job_titles WHERE id=?", (job_title_id,)).fetchone() is None:
+                raise APIError(404, "المسمى الوظيفي غير موجود.", "not_found")
+            values = self.parse_goal_template(data)
+            stamp = now_iso()
+            try:
+                with self.db:
+                    columns = ["job_title_id", *values.keys(), "created_at", "updated_at"]
+                    cursor = self.db.execute(
+                        f"INSERT INTO evaluation_goal_templates({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                        (job_title_id, *values.values(), stamp, stamp),
+                    )
+                    template_id = int(cursor.lastrowid)
+                    audit(self.db, user["id"], "evaluation_goal_template.create", "evaluation_goal_template", template_id, {"job_title_id": job_title_id, **values})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "هذا الهدف موجود مسبقاً للمسمى الوظيفي.", "duplicate_goal_template") from exc
+            row = self.db.execute("SELECT * FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone()
+            self.send_json(201, {"template": dict(row) | {"active": bool(row["active"])}})
+
+        def api_evaluation_goal_template_patch(self, template_id: int) -> None:
+            user = self.require_permission("reference.manage")
+            if self.db.execute("SELECT 1 FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone() is None:
+                raise APIError(404, "الهدف الرئيسي غير موجود.", "not_found")
+            values = self.parse_goal_template(self.read_json(), partial=True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute(
+                        "UPDATE evaluation_goal_templates SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
+                        (*values.values(), template_id),
+                    )
+                    audit(self.db, user["id"], "evaluation_goal_template.update", "evaluation_goal_template", template_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "هذا الهدف موجود مسبقاً للمسمى الوظيفي.", "duplicate_goal_template") from exc
+            row = self.db.execute("SELECT * FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone()
+            self.send_json(200, {"template": dict(row) | {"active": bool(row["active"])}})
+
+        def evaluation_access(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
+            user = self.current_user(True)
+            assert user is not None
+            evaluation = self.db.execute("SELECT e.*,c.year,c.name AS cycle_name,emp.full_name,emp.employee_no FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id JOIN employees emp ON emp.id=e.employee_id WHERE e.id=?", (evaluation_id,)).fetchone()
+            if evaluation is None:
+                raise APIError(404, "التقييم غير موجود.", "not_found")
+            is_approver = bool(user.get("employee_id") and self.db.execute("SELECT 1 FROM evaluation_approvals WHERE evaluation_id=? AND approver_employee_id=?", (evaluation_id, user["employee_id"])).fetchone())
+            if evaluation["employee_id"] != user.get("employee_id") and not is_approver and not self.has_privileged_people_access(user, "evaluation.view"):
+                raise APIError(403, "لا يمكنك عرض هذا التقييم.", "forbidden")
+            return evaluation, user
+
+        def evaluation_payload(self, evaluation_id: int) -> dict[str, Any]:
+            evaluation = self.db.execute("SELECT e.*,c.year,c.name AS cycle_name,emp.full_name,emp.employee_no FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id JOIN employees emp ON emp.id=e.employee_id WHERE e.id=?", (evaluation_id,)).fetchone()
+            goals = self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,)).fetchall()
+            approvals = self.db.execute("SELECT a.*,e.full_name AS approver_name,u.role AS approver_role FROM evaluation_approvals a JOIN employees e ON e.id=a.approver_employee_id LEFT JOIN users u ON u.employee_id=e.id WHERE a.evaluation_id=? ORDER BY a.step_no", (evaluation_id,)).fetchall()
+            weight_total = sum(float(g["weight"]) for g in goals)
+            return {"evaluation": dict(evaluation), "goals": [dict(g) for g in goals], "weight_total": weight_total, "approvals": [dict(a) for a in approvals]}
+
+        def api_evaluations_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            if self.has_privileged_people_access(user, "evaluation.view"):
+                rows = self.db.execute("SELECT e.*,c.year,c.name AS cycle_name,emp.full_name,emp.employee_no FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id JOIN employees emp ON emp.id=e.employee_id ORDER BY c.year DESC,emp.full_name").fetchall()
+            else:
+                employee_id = self.own_employee_id()
+                rows = self.db.execute("SELECT DISTINCT e.*,c.year,c.name AS cycle_name,emp.full_name,emp.employee_no FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id JOIN employees emp ON emp.id=e.employee_id LEFT JOIN evaluation_approvals a ON a.evaluation_id=e.id WHERE e.employee_id=? OR a.approver_employee_id=? ORDER BY c.year DESC", (employee_id, employee_id)).fetchall()
+            pending = [dict(r) for r in rows if user.get("employee_id") and self.db.execute("SELECT 1 FROM evaluation_approvals WHERE evaluation_id=? AND approver_employee_id=? AND step_no=? AND status='pending'", (r["id"], user["employee_id"], r["current_step"])).fetchone()]
+            self.send_json(200, {"items": [dict(r) for r in rows], "pending_for_me": pending})
+
+        def api_evaluations_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            year = as_int(data.get("year", local_now().year), "year", 2000, 2200)
+            cycle = self.db.execute("SELECT * FROM evaluation_cycles WHERE year=? AND active=1", (year,)).fetchone()
+            if cycle is None:
+                raise APIError(404, "لا توجد دورة تقييم نشطة لهذه السنة.", "cycle_not_found")
+            existing = self.db.execute("SELECT id FROM evaluations WHERE cycle_id=? AND employee_id=?", (cycle["id"], employee_id)).fetchone()
+            if existing:
+                self.send_json(200, self.evaluation_payload(existing["id"]))
+                return
+            stamp = now_iso()
+            with self.db:
+                cur = self.db.execute("INSERT INTO evaluations(cycle_id,employee_id,created_at,updated_at) VALUES(?,?,?,?)", (cycle["id"], employee_id, stamp, stamp))
+                evaluation_id = int(cur.lastrowid)
+                audit(self.db, user["id"], "evaluation.create", "evaluation", evaluation_id)
+            self.send_json(201, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_get(self, evaluation_id: int) -> None:
+            self.evaluation_access(evaluation_id)
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def ensure_goal_owner(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if evaluation["employee_id"] != user.get("employee_id"):
+                raise APIError(403, "الموظف وحده يحرر أهداف تقييمه.", "forbidden")
+            if evaluation["status"] not in {"draft", "returned"}:
+                raise APIError(409, "لا يمكن تعديل الأهداف بعد إرسال التقييم.", "invalid_status")
+            return evaluation, user
+
+        def parse_goal(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not partial or "title" in data:
+                result["title"] = require_text(data, "title", 240)
+            if not partial or "measure" in data:
+                result["measure"] = require_text(data, "measure", 500)
+            for key, max_len in (("description", 2000), ("employee_comment", 2000), ("evidence_note", 4000)):
+                if key in data or not partial:
+                    result[key] = optional_text(data, key, max_len)
+            if not partial or "weight" in data:
+                result["weight"] = as_float(data.get("weight"), "weight", 0.01, 100)
+            if "achievement" in data or not partial:
+                result["achievement"] = as_float(data.get("achievement", 0), "achievement", 0, 100)
+            if not partial or "goal_type" in data:
+                goal_type = str(data.get("goal_type", "result"))
+                if goal_type not in {"result", "behaviour", "development"}:
+                    raise APIError(422, "نوع الهدف غير صالح.", "invalid_goal_type")
+                result["goal_type"] = goal_type
+            if not partial or "progress_status" in data:
+                progress = str(data.get("progress_status", "not_completed"))
+                if progress not in {"completed", "in_progress", "not_completed"}:
+                    raise APIError(422, "حالة تقدم الهدف غير صالحة.", "invalid_progress_status")
+                result["progress_status"] = progress
+            for field in ("start_date", "end_date"):
+                if not partial or field in data:
+                    result[field] = parse_date(data.get(field), field).isoformat()
+            return result
+
+        def validate_evaluation_goal(self, evaluation: sqlite3.Row | dict[str, Any], goal: dict[str, Any], require_evidence: bool = False) -> None:
+            if str(goal.get("goal_type") or "") not in {"result", "behaviour", "development"}:
+                raise APIError(422, "نوع الهدف غير صالح.", "invalid_goal_type")
+            start = parse_date(goal.get("start_date"), "start_date")
+            end = parse_date(goal.get("end_date"), "end_date")
+            period_start = parse_date(evaluation["period_start"], "period_start")
+            period_end = parse_date(evaluation["period_end"], "period_end")
+            if start > end:
+                raise APIError(422, "تاريخ بداية الهدف يجب أن يسبق نهايته.", "invalid_goal_dates")
+            if start < period_start or end > period_end:
+                raise APIError(422, "تواريخ الهدف يجب أن تقع داخل فترة أداء الدورة.", "goal_outside_cycle_period", {"period_start": period_start.isoformat(), "period_end": period_end.isoformat()})
+            achievement = float(goal.get("achievement") or 0)
+            progress = str(goal.get("progress_status") or "")
+            if progress not in {"completed", "in_progress", "not_completed"}:
+                raise APIError(422, "حالة تقدم الهدف غير صالحة.", "invalid_progress_status")
+            if (progress == "completed" and abs(achievement - 100) > 0.000001) or (progress == "not_completed" and abs(achievement) > 0.000001) or (progress == "in_progress" and not 0 < achievement < 100):
+                raise APIError(422, "حالة التقدم لا تتوافق مع نسبة الإنجاز: منجز 100٪، لم يُنجز 0٪، وقيد التقدم بينهما.", "goal_progress_mismatch")
+            if require_evidence and not str(goal.get("evidence_note") or "").strip():
+                raise APIError(422, "أدخل نتيجة أو دليل إنجاز لكل هدف قبل الإرسال.", "goal_evidence_required", {"goal_id": goal.get("id")})
+
+        def api_evaluation_goal_post(self, evaluation_id: int) -> None:
+            evaluation, user = self.ensure_goal_owner(evaluation_id)
+            data = self.read_json()
+            template_id = as_int(data["template_id"], "template_id", 1) if data.get("template_id") else None
+            if template_id:
+                template = self.db.execute(
+                    """SELECT t.* FROM evaluation_goal_templates t
+                       JOIN employees e ON e.job_title_id=t.job_title_id
+                       WHERE t.id=? AND e.id=? AND t.active=1""",
+                    (template_id, evaluation["employee_id"]),
+                ).fetchone()
+                if template is None:
+                    raise APIError(403, "الهدف المختار لا يتبع مسماك الوظيفي أو أنه متوقف.", "invalid_goal_template")
+                values = {
+                    "source_template_id": template_id,
+                    "title": template["title"],
+                    "description": template["description"],
+                    "weight": float(template["default_weight"]),
+                    "measure": template["measure"],
+                    "achievement": as_float(data.get("achievement", 0), "achievement", 0, 100),
+                    "employee_comment": optional_text(data, "employee_comment", 2000),
+                    "goal_type": str(data.get("goal_type", "result")),
+                    "start_date": parse_date(data.get("start_date", evaluation["period_start"]), "start_date").isoformat(),
+                    "end_date": parse_date(data.get("end_date", evaluation["period_end"]), "end_date").isoformat(),
+                    "progress_status": str(data.get("progress_status", "not_completed")),
+                    "evidence_note": optional_text(data, "evidence_note", 4000),
+                }
+            else:
+                values = self.parse_goal(data)
+            self.validate_evaluation_goal(evaluation, values)
+            current = float(self.db.execute("SELECT COALESCE(SUM(weight),0) FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchone()[0])
+            if current + values["weight"] > 100.000001:
+                raise APIError(422, "مجموع الأوزان لا يمكن أن يتجاوز 100.", "invalid_weight_total", {"current": current})
+            stamp = now_iso()
+            try:
+                with self.db:
+                    cols = ["evaluation_id"] + list(values) + ["created_at", "updated_at"]
+                    cur = self.db.execute(f"INSERT INTO evaluation_goals({','.join(cols)}) VALUES({','.join('?' for _ in cols)})", (evaluation_id, *values.values(), stamp, stamp))
+                    goal_id = int(cur.lastrowid)
+                    audit(self.db, user["id"], "evaluation.goal_create", "evaluation_goal", goal_id, {"source_template_id": template_id, "goal_type": values.get("goal_type"), "start_date": values.get("start_date"), "end_date": values.get("end_date")})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "سبق اختيار هذا الهدف الرئيسي في تقييمك.", "duplicate_goal_template") from exc
+            self.send_json(201, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_goals_from_templates(self, evaluation_id: int) -> None:
+            evaluation, user = self.ensure_goal_owner(evaluation_id)
+            data = self.read_json()
+            raw_ids = data.get("template_ids")
+            if data.get("all") is True:
+                rows = self.db.execute(
+                    """SELECT t.* FROM evaluation_goal_templates t JOIN employees e ON e.job_title_id=t.job_title_id
+                       WHERE e.id=? AND t.active=1 ORDER BY t.sort_order,t.id""",
+                    (evaluation["employee_id"],),
+                ).fetchall()
+            else:
+                if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 25:
+                    raise APIError(422, "اختر هدفاً رئيسياً واحداً على الأقل.", "template_ids_required")
+                template_ids = list(dict.fromkeys(as_int(item, "template_id", 1) for item in raw_ids))
+                marks = ",".join("?" for _ in template_ids)
+                rows = self.db.execute(
+                    f"""SELECT t.* FROM evaluation_goal_templates t JOIN employees e ON e.job_title_id=t.job_title_id
+                        WHERE e.id=? AND t.active=1 AND t.id IN ({marks}) ORDER BY t.sort_order,t.id""",
+                    (evaluation["employee_id"], *template_ids),
+                ).fetchall()
+                if len(rows) != len(template_ids):
+                    raise APIError(403, "تتضمن القائمة هدفاً لا يتبع مسماك الوظيفي.", "invalid_goal_template")
+            if not rows:
+                raise APIError(404, "لا توجد أهداف رئيسية نشطة لمسماك الوظيفي.", "goal_templates_missing")
+            existing = {int(row[0]) for row in self.db.execute("SELECT source_template_id FROM evaluation_goals WHERE evaluation_id=? AND source_template_id IS NOT NULL", (evaluation_id,)).fetchall()}
+            rows = [row for row in rows if int(row["id"]) not in existing]
+            if not rows:
+                raise APIError(409, "أضفت جميع الأهداف المختارة مسبقاً.", "goal_templates_already_added")
+            current = float(self.db.execute("SELECT COALESCE(SUM(weight),0) FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchone()[0])
+            added_weight = sum(float(row["default_weight"]) for row in rows)
+            if current + added_weight > 100.000001:
+                raise APIError(422, "الأوزان المختارة ستتجاوز 100. اختر أهدافاً أقل أو عدّل أهدافك المخصصة.", "invalid_weight_total", {"current": current, "selected": added_weight})
+            stamp = now_iso()
+            with self.db:
+                added_ids = []
+                for template in rows:
+                    cursor = self.db.execute(
+                        """INSERT INTO evaluation_goals
+                           (evaluation_id,source_template_id,title,description,weight,measure,achievement,employee_comment,
+                            goal_type,start_date,end_date,progress_status,evidence_note,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,0,'','result',?,?,'not_completed','',?,?)""",
+                        (evaluation_id, template["id"], template["title"], template["description"], template["default_weight"], template["measure"], evaluation["period_start"], evaluation["period_end"], stamp, stamp),
+                    )
+                    added_ids.append(int(cursor.lastrowid))
+                audit(self.db, user["id"], "evaluation.goals_from_templates", "evaluation", evaluation_id, {"template_ids": [int(row["id"]) for row in rows], "goal_ids": added_ids})
+            self.send_json(201, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_goal_patch(self, goal_id: int) -> None:
+            goal = self.db.execute("SELECT * FROM evaluation_goals WHERE id=?", (goal_id,)).fetchone()
+            if goal is None:
+                raise APIError(404, "الهدف غير موجود.", "not_found")
+            evaluation, user = self.ensure_goal_owner(goal["evaluation_id"])
+            values = self.parse_goal(self.read_json(), partial=True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            if "weight" in values:
+                other = float(self.db.execute("SELECT COALESCE(SUM(weight),0) FROM evaluation_goals WHERE evaluation_id=? AND id<>?", (goal["evaluation_id"], goal_id)).fetchone()[0])
+                if other + values["weight"] > 100.000001:
+                    raise APIError(422, "مجموع الأوزان لا يمكن أن يتجاوز 100.", "invalid_weight_total", {"other_goals": other})
+            self.validate_evaluation_goal(evaluation, dict(goal) | values)
+            values["updated_at"] = now_iso()
+            with self.db:
+                self.db.execute("UPDATE evaluation_goals SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), goal_id))
+                audit(self.db, user["id"], "evaluation.goal_update", "evaluation_goal", goal_id, values)
+            self.send_json(200, self.evaluation_payload(goal["evaluation_id"]))
+
+        def api_evaluation_goal_delete(self, goal_id: int) -> None:
+            goal = self.db.execute("SELECT * FROM evaluation_goals WHERE id=?", (goal_id,)).fetchone()
+            if goal is None:
+                raise APIError(404, "الهدف غير موجود.", "not_found")
+            _, user = self.ensure_goal_owner(goal["evaluation_id"])
+            with self.db:
+                self.db.execute("DELETE FROM evaluation_goals WHERE id=?", (goal_id,))
+                audit(self.db, user["id"], "evaluation.goal_delete", "evaluation_goal", goal_id)
+            self.send_json(200, self.evaluation_payload(goal["evaluation_id"]))
+
+        def build_approval_chain(self, employee_id: int) -> list[int]:
+            chain: list[int] = []
+            seen = {employee_id}
+            current = self.db.execute("SELECT manager_id FROM employees WHERE id=?", (employee_id,)).fetchone()
+            manager_id = current["manager_id"] if current else None
+            found_gm = False
+            while manager_id and manager_id not in seen and len(chain) < 20:
+                seen.add(manager_id)
+                account = self.db.execute("SELECT role,active FROM users WHERE employee_id=?", (manager_id,)).fetchone()
+                if account and bool(account["active"]):
+                    chain.append(int(manager_id))
+                    if account["role"] == "general_manager":
+                        found_gm = True
+                        break
+                next_row = self.db.execute("SELECT manager_id FROM employees WHERE id=?", (manager_id,)).fetchone()
+                manager_id = next_row["manager_id"] if next_row else None
+            if not chain or not found_gm:
+                raise APIError(409, "سلسلة الاعتماد غير مكتملة حتى المدير العام. حدّث المدير المباشر في ملف الموظف.", "approval_chain_incomplete")
+            return chain
+
+        def api_evaluation_submit(self, evaluation_id: int) -> None:
+            evaluation, user = self.ensure_goal_owner(evaluation_id)
+            goals = self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
+            total = sum(float(g["weight"]) for g in goals)
+            if not goals or abs(total - 100.0) > 0.000001:
+                raise APIError(422, "لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.", "invalid_weight_total", {"weight_total": total})
+            score = sum(float(g["weight"]) * float(g["achievement"]) / 100.0 for g in goals)
+            rating = "ممتاز" if score >= 90 else "جيد جداً" if score >= 80 else "جيد" if score >= 70 else "مقبول" if score >= 60 else "ضعيف / لم يستوف المتطلبات"
+            chain = self.build_approval_chain(evaluation["employee_id"])
+            stamp = now_iso()
+            with self.db:
+                self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
+                for step, approver in enumerate(chain, 1):
+                    self.db.execute("INSERT INTO evaluation_approvals(evaluation_id,step_no,approver_employee_id,created_at) VALUES(?,?,?,?)", (evaluation_id, step, approver, stamp))
+                self.db.execute("UPDATE evaluations SET status='in_review',weighted_score=?,rating=?,current_step=1,submitted_at=?,finalized_at=NULL,updated_at=? WHERE id=?", (round(score, 2), rating, stamp, stamp, evaluation_id))
+                audit(self.db, user["id"], "evaluation.submit", "evaluation", evaluation_id, {"score": score, "approval_steps": len(chain)})
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_decision(self, evaluation_id: int) -> None:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if evaluation["status"] != "in_review":
+                raise APIError(409, "التقييم ليس في مرحلة الاعتماد.", "invalid_status")
+            if not user.get("employee_id"):
+                raise APIError(403, "يجب ربط حساب المعتمد بملف موظف.", "employee_not_linked")
+            approval = self.db.execute("SELECT * FROM evaluation_approvals WHERE evaluation_id=? AND step_no=?", (evaluation_id, evaluation["current_step"])).fetchone()
+            if approval is None or approval["approver_employee_id"] != user["employee_id"]:
+                raise APIError(403, "هذا التقييم لا ينتظر إجراءك في المرحلة الحالية.", "not_current_approver")
+            if evaluation["employee_id"] == user["employee_id"]:
+                raise APIError(403, "لا يمكن اعتماد تقييمك الشخصي.", "self_approval_forbidden")
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"approve", "reject", "return"}:
+                raise APIError(422, "القرار يجب أن يكون approve أو reject أو return.", "validation_error")
+            comment = optional_text(data, "comment", 2000)
+            if action in {"reject", "return"} and not comment:
+                raise APIError(422, "التعليق مطلوب للرفض أو الإعادة.", "validation_error")
+            stamp = now_iso()
+            with self.db:
+                approval_status = "approved" if action == "approve" else "rejected" if action == "reject" else "returned"
+                self.db.execute("UPDATE evaluation_approvals SET status=?,comment=?,decided_at=? WHERE id=?", (approval_status, comment, stamp, approval["id"]))
+                if action == "approve":
+                    next_step = self.db.execute("SELECT step_no FROM evaluation_approvals WHERE evaluation_id=? AND step_no>? ORDER BY step_no LIMIT 1", (evaluation_id, approval["step_no"])).fetchone()
+                    if next_step:
+                        self.db.execute("UPDATE evaluations SET current_step=?,updated_at=? WHERE id=?", (next_step["step_no"], stamp, evaluation_id))
+                    else:
+                        self.db.execute("UPDATE evaluations SET status='approved',finalized_at=?,updated_at=? WHERE id=?", (stamp, stamp, evaluation_id))
+                elif action == "return":
+                    self.db.execute("UPDATE evaluations SET status='returned',current_step=0,updated_at=? WHERE id=?", (stamp, evaluation_id))
+                else:
+                    self.db.execute("UPDATE evaluations SET status='rejected',updated_at=? WHERE id=?", (stamp, evaluation_id))
+                audit(self.db, user["id"], f"evaluation.{action}", "evaluation", evaluation_id, {"step": approval["step_no"], "comment": comment})
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        # V5.1 HR-governed performance cycles
+        def evaluation_cycle_row(self, cycle_id: int) -> sqlite3.Row:
+            row = self.db.execute(
+                """SELECT c.*,creator.display_name AS creator_name,announcer.display_name AS announcer_name
+                     FROM evaluation_cycles c
+                     LEFT JOIN users creator ON creator.id=c.created_by
+                     LEFT JOIN users announcer ON announcer.id=c.announced_by
+                    WHERE c.id=?""",
+                (cycle_id,),
+            ).fetchone()
+            if row is None:
+                raise APIError(404, "دورة التقييم غير موجودة.", "not_found")
+            return row
+
+        def parse_evaluation_cycle(self, data: dict[str, Any], current: sqlite3.Row | None = None) -> dict[str, Any]:
+            merged = dict(current) if current is not None else {}
+            values: dict[str, Any] = {}
+            if current is None or "year" in data:
+                values["year"] = as_int(data.get("year"), "year", 2000, 2200)
+            if current is None or "name" in data:
+                values["name"] = require_text(data, "name", 180)
+            for field in ("period_start", "period_end", "self_opens_on", "self_due_on", "manager_due_on", "hr_due_on"):
+                if current is None or field in data:
+                    values[field] = parse_date(data.get(field), field).isoformat()
+            for field, limit in (("announcement_title", 240), ("announcement_body", 3000)):
+                if field in data or current is None:
+                    values[field] = optional_text(data, field, limit)
+            merged.update(values)
+            period_start = parse_date(merged.get("period_start"), "period_start")
+            period_end = parse_date(merged.get("period_end"), "period_end")
+            self_open = parse_date(merged.get("self_opens_on"), "self_opens_on")
+            self_due = parse_date(merged.get("self_due_on"), "self_due_on")
+            manager_due = parse_date(merged.get("manager_due_on"), "manager_due_on")
+            hr_due = parse_date(merged.get("hr_due_on"), "hr_due_on")
+            if period_start > period_end:
+                raise APIError(422, "بداية فترة الأداء يجب أن تسبق نهايتها.", "invalid_cycle_dates")
+            if not (self_open <= self_due <= manager_due <= hr_due):
+                raise APIError(422, "يجب ترتيب فتح التقييم وموعد الموظف ثم المسؤول ثم الموارد البشرية.", "invalid_cycle_dates")
+            if self_open > period_end:
+                raise APIError(422, "لا يمكن فتح التقييم الذاتي بعد نهاية فترة الأداء.", "invalid_cycle_dates")
+            return values
+
+        def evaluation_cycle_counts(self, cycle: sqlite3.Row) -> dict[str, int]:
+            today = local_now().date()
+            due = parse_date(cycle["self_due_on"], "self_due_on")
+            rows = self.db.execute("SELECT * FROM evaluations WHERE cycle_id=?", (cycle["id"],)).fetchall()
+            counts = {
+                "total": len(rows), "not_started": 0, "submitted_to_manager": 0,
+                "returned_to_manager": 0, "waiting_hr": 0,
+                "approved_waiting_disclosure": 0, "published": 0,
+                "late": 0, "missing_manager": 0,
+            }
+            for evaluation in rows:
+                status = str(evaluation["status"])
+                if status == "draft": counts["not_started"] += 1
+                elif status == "submitted": counts["submitted_to_manager"] += 1
+                elif status == "returned": counts["returned_to_manager"] += 1
+                elif status == "in_review": counts["waiting_hr"] += 1
+                elif status == "approved":
+                    disclosure = evaluation["disclosure_date"]
+                    if int(evaluation["workflow_version"] or 1) < 2 or (disclosure and parse_date(disclosure, "disclosure_date") <= today):
+                        counts["published"] += 1
+                    else:
+                        counts["approved_waiting_disclosure"] += 1
+                if bool(evaluation["submitted_late"]) or (status == "draft" and today > due):
+                    counts["late"] += 1
+                if evaluation["manager_employee_id"] is None:
+                    counts["missing_manager"] += 1
+            return counts
+
+        def evaluation_cycle_payload(self, cycle_id: int, include_recipients: bool = False) -> dict[str, Any]:
+            cycle = self.evaluation_cycle_row(cycle_id)
+            data = dict(cycle)
+            data["active"] = bool(data["active"])
+            counts = self.evaluation_cycle_counts(cycle)
+            data["counts"] = counts
+            data["preview"] = {
+                "eligible": int(self.db.execute("SELECT COUNT(*) FROM employees WHERE active=1").fetchone()[0]),
+                "already_assigned": counts["total"],
+                "missing_manager": int(self.db.execute(
+                    """SELECT COUNT(*) FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                        WHERE e.active=1 AND (COALESCE(e.manager_id,d.manager_employee_id) IS NULL OR COALESCE(e.manager_id,d.manager_employee_id)=e.id)"""
+                ).fetchone()[0]),
+            }
+            if include_recipients:
+                today = local_now().date()
+                due = parse_date(cycle["self_due_on"], "self_due_on")
+                recipients = []
+                rows = self.db.execute(
+                    """SELECT ev.id AS evaluation_id,ev.status,ev.submitted_late,ev.manager_employee_id,
+                              emp.id AS employee_id,emp.full_name,emp.employee_no,mgr.full_name AS manager_name
+                         FROM evaluations ev JOIN employees emp ON emp.id=ev.employee_id
+                         LEFT JOIN employees mgr ON mgr.id=ev.manager_employee_id
+                        WHERE ev.cycle_id=? ORDER BY emp.full_name""",
+                    (cycle_id,),
+                ).fetchall()
+                for row in rows:
+                    item = dict(row)
+                    item["due_state"] = "missing_manager" if row["manager_employee_id"] is None else "late" if (bool(row["submitted_late"]) or (row["status"] == "draft" and today > due)) else "on_track"
+                    item["submitted_late"] = bool(row["submitted_late"])
+                    recipients.append(item)
+                data["recipients"] = recipients
+            return data
+
+        def require_cycle_console(self) -> dict[str, Any]:
+            user = self.current_user(True)
+            assert user is not None
+            if not (has_permission(self.db, user, "evaluation.cycle.manage") or has_permission(self.db, user, "evaluation.review")):
+                raise APIError(403, "لا تملك صلاحية عرض إدارة دورات التقييم.", "forbidden")
+            return user
+
+        def api_evaluation_cycles_get(self) -> None:
+            self.require_cycle_console()
+            rows = self.db.execute("SELECT id FROM evaluation_cycles ORDER BY year DESC,id DESC").fetchall()
+            self.send_json(200, {"items": [self.evaluation_cycle_payload(int(row["id"])) for row in rows]})
+
+        def api_evaluation_cycle_get(self, cycle_id: int) -> None:
+            self.require_cycle_console()
+            self.send_json(200, {"cycle": self.evaluation_cycle_payload(cycle_id, include_recipients=True)})
+
+        def api_evaluation_cycle_post(self) -> None:
+            user = self.require_permission("evaluation.cycle.manage")
+            data = self.read_json()
+            values = self.parse_evaluation_cycle(data)
+            values["announcement_title"] = values["announcement_title"] or f"إعلان {values['name']}"
+            preview_values = values | {"name": values["name"]}
+            values["announcement_body"] = values["announcement_body"] or evaluation_cycle_announcement_body(preview_values)
+            stamp = now_iso()
+            columns = ["year", "name", "starts_on", "ends_on", "active", "status", "created_by", "created_at", "updated_at", *[key for key in values if key not in {"year", "name"}]]
+            params = [values["year"], values["name"], values["period_start"], values["period_end"], 1, "draft", user["id"], stamp, stamp, *[values[key] for key in values if key not in {"year", "name"}]]
+            try:
+                with self.db:
+                    cursor = self.db.execute(
+                        f"INSERT INTO evaluation_cycles({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                        params,
+                    )
+                    cycle_id = int(cursor.lastrowid)
+                    audit(self.db, user["id"], "evaluation.cycle_create", "evaluation_cycle", cycle_id, {key: values[key] for key in values})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "توجد دورة تقييم لهذه السنة بالفعل.", "duplicate_cycle") from exc
+            self.send_json(201, {"cycle": self.evaluation_cycle_payload(cycle_id, include_recipients=True)})
+
+        def api_evaluation_cycle_patch(self, cycle_id: int) -> None:
+            user = self.require_permission("evaluation.cycle.manage")
+            cycle = self.evaluation_cycle_row(cycle_id)
+            data = self.read_json()
+            stamp = now_iso()
+            if str(cycle["status"]) == "closed":
+                raise APIError(409, "الدورة مغلقة ولا يمكن تعديلها.", "cycle_closed")
+            if str(cycle["status"]) == "draft":
+                values = self.parse_evaluation_cycle(data, cycle)
+                if not values:
+                    raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+                if "period_start" in values: values["starts_on"] = values["period_start"]
+                if "period_end" in values: values["ends_on"] = values["period_end"]
+            else:
+                if data.get("status") == "closed":
+                    reason = require_text(data, "reason", 1000)
+                    values = {"status": "closed", "active": 0, "extension_reason": reason}
+                else:
+                    reason = require_text(data, "reason", 1000)
+                    allowed = {"self_due_on", "manager_due_on", "hr_due_on"}
+                    if not any(field in data for field in allowed) or any(key not in allowed | {"reason"} for key in data):
+                        raise APIError(422, "بعد الإعلان لا يسمح إلا بتمديد المواعيد مع ذكر السبب.", "announced_cycle_locked")
+                    values = self.parse_evaluation_cycle({key: data[key] for key in allowed if key in data}, cycle)
+                    for field in allowed:
+                        if field in values and parse_date(values[field], field) < parse_date(cycle[field], field):
+                            raise APIError(422, "لا يمكن تقصير موعد دورة معلنة.", "cycle_date_cannot_shorten", {"field": field})
+                    values["extension_reason"] = reason
+            values["updated_at"] = stamp
+            with self.db:
+                self.db.execute("UPDATE evaluation_cycles SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), cycle_id))
+                audit(self.db, user["id"], "evaluation.cycle_close" if values.get("status") == "closed" else "evaluation.cycle_update", "evaluation_cycle", cycle_id, values)
+            self.send_json(200, {"cycle": self.evaluation_cycle_payload(cycle_id, include_recipients=True)})
+
+        def api_evaluation_cycle_announce(self, cycle_id: int) -> None:
+            user = self.require_permission("evaluation.cycle.manage")
+            cycle = self.evaluation_cycle_row(cycle_id)
+            if cycle["status"] == "closed":
+                raise APIError(409, "لا يمكن إعلان دورة مغلقة.", "cycle_closed")
+            if cycle["status"] == "announced":
+                self.send_json(200, {"cycle": self.evaluation_cycle_payload(cycle_id, include_recipients=True), "idempotent": True})
+                return
+            stamp = now_iso()
+            title = cycle["announcement_title"] or f"إعلان {cycle['name']}"
+            body = cycle["announcement_body"] or evaluation_cycle_announcement_body(cycle)
+            with self.db:
+                self.db.execute(
+                    """UPDATE evaluation_cycles SET status='announced',active=1,announcement_title=?,announcement_body=?,
+                       announced_by=?,announced_at=?,updated_at=? WHERE id=?""",
+                    (title, body, user["id"], stamp, stamp, cycle_id),
+                )
+                scope = enroll_evaluation_cycle(self.db, cycle_id, user["id"], notify=True)
+                audit(self.db, user["id"], "evaluation.cycle_announce", "evaluation_cycle", cycle_id, scope)
+            self.send_json(200, {"cycle": self.evaluation_cycle_payload(cycle_id, include_recipients=True), "idempotent": False})
+
+        def api_evaluation_cycle_reminders(self, cycle_id: int) -> None:
+            user = self.require_permission("evaluation.cycle.manage")
+            cycle = self.evaluation_cycle_row(cycle_id)
+            if cycle["status"] != "announced":
+                raise APIError(409, "لا ترسل التذكيرات إلا لدورة معلنة.", "cycle_not_announced")
+            data = self.read_json()
+            raw_ids = data.get("employee_ids")
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 500:
+                raise APIError(422, "اختر موظفاً واحداً على الأقل للتذكير.", "employee_ids_required")
+            employee_ids = list(dict.fromkeys(as_int(item, "employee_id", 1) for item in raw_ids))
+            key = f"manual:{local_now().date().isoformat()}"
+            sent = 0
+            skipped = 0
+            with self.db:
+                for employee_id in employee_ids:
+                    evaluation = self.db.execute(
+                        "SELECT id FROM evaluations WHERE cycle_id=? AND employee_id=? AND status='draft'",
+                        (cycle_id, employee_id),
+                    ).fetchone()
+                    account = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
+                    if evaluation is None or account is None:
+                        skipped += 1
+                        continue
+                    cursor = self.db.execute(
+                        """INSERT OR IGNORE INTO evaluation_reminders
+                           (cycle_id,employee_id,reminder_type,notification_id,created_by,sent_at)
+                           VALUES(?,?,?,NULL,?,?)""",
+                        (cycle_id, employee_id, key, user["id"], now_iso()),
+                    )
+                    if cursor.rowcount == 0:
+                        skipped += 1
+                        continue
+                    notification_id = create_internal_notification(
+                        self.db, user["id"], [int(account["id"])], "تذكير بإكمال التقييم الذاتي",
+                        f"الدورة: {cycle['name']}. آخر موعد للإرسال {cycle['self_due_on']}. افتح صفحة التقييم السنوي (#evaluations).",
+                    )
+                    self.db.execute("UPDATE evaluation_reminders SET notification_id=? WHERE cycle_id=? AND employee_id=? AND reminder_type=?", (notification_id, cycle_id, employee_id, key))
+                    sent += 1
+                audit(self.db, user["id"], "evaluation.cycle_remind", "evaluation_cycle", cycle_id, {"employee_ids": employee_ids, "sent": sent, "skipped": skipped, "rate_key": key})
+            self.send_json(200, {"sent": sent, "skipped": skipped, "rate_key": key})
+
+        # V5 annual evaluation workflow. Initialization upgrades actionable V1
+        # rows that have a direct manager; terminal history and configuration-
+        # blocked rows remain V1. Every new row uses employee -> manager -> HR
+        # with a server-side disclosure gate.
+        @staticmethod
+        def evaluation_rating(score: float) -> str:
+            return "ممتاز" if score >= 90 else "جيد جداً" if score >= 80 else "جيد" if score >= 70 else "مقبول" if score >= 60 else "ضعيف / لم يستوف المتطلبات"
+
+        def evaluation_row(self, evaluation_id: int) -> sqlite3.Row:
+            row = self.db.execute(
+                """SELECT e.*,c.year,c.name AS cycle_name,emp.full_name,emp.employee_no,
+                          c.period_start,c.period_end,c.self_opens_on,c.self_due_on,c.manager_due_on,c.hr_due_on,
+                          c.status AS cycle_status,c.announcement_title,c.announcement_body,c.announced_at,
+                          mgr.full_name AS manager_name,hr.display_name AS hr_reviewer_name
+                     FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id
+                     JOIN employees emp ON emp.id=e.employee_id
+                     LEFT JOIN employees mgr ON mgr.id=e.manager_employee_id
+                     LEFT JOIN users hr ON hr.id=e.hr_reviewed_by WHERE e.id=?""",
+                (evaluation_id,),
+            ).fetchone()
+            if row is None:
+                raise APIError(404, "التقييم غير موجود.", "not_found")
+            return row
+
+        def evaluation_is_published(self, evaluation: sqlite3.Row | dict[str, Any]) -> bool:
+            if int(evaluation.get("workflow_version", 1) if isinstance(evaluation, dict) else evaluation["workflow_version"]) < 2:
+                return str(evaluation["status"]) == "approved"
+            disclosure = evaluation["disclosure_date"]
+            return str(evaluation["status"]) == "approved" and bool(disclosure) and parse_date(disclosure, "disclosure_date") <= local_now().date()
+
+        def evaluation_access(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
+            user = self.current_user(True)
+            assert user is not None
+            evaluation = self.evaluation_row(evaluation_id)
+            own = evaluation["employee_id"] == user.get("employee_id")
+            current_manager = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
+            hr_reviewer = has_permission(self.db, user, "evaluation.review")
+            legacy_approver = bool(
+                int(evaluation["workflow_version"] or 1) < 2
+                and user.get("employee_id")
+                and self.db.execute("SELECT 1 FROM evaluation_approvals WHERE evaluation_id=? AND approver_employee_id=?", (evaluation_id, user["employee_id"])).fetchone()
+            )
+            if not (own or direct_manager or hr_reviewer or legacy_approver):
+                raise APIError(403, "لا يمكنك عرض هذا التقييم.", "forbidden")
+            return evaluation, user
+
+        def evaluation_payload(self, evaluation_id: int) -> dict[str, Any]:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            evaluation_data = dict(evaluation)
+            goal_rows = [dict(row) for row in self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,))]
+            approvals = [dict(row) for row in self.db.execute(
+                """SELECT a.*,e.full_name AS approver_name,u.role AS approver_role
+                     FROM evaluation_approvals a JOIN employees e ON e.id=a.approver_employee_id
+                     LEFT JOIN users u ON u.employee_id=e.id WHERE a.evaluation_id=? ORDER BY a.step_no""",
+                (evaluation_id,),
+            )]
+            grievance_row = self.db.execute("SELECT * FROM evaluation_grievances WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+            own = evaluation["employee_id"] == user.get("employee_id")
+            published = self.evaluation_is_published(evaluation)
+            hr_reviewer = has_permission(self.db, user, "evaluation.review")
+            current_manager = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
+            if own and not published and int(evaluation["workflow_version"] or 1) >= 2:
+                for field in ("weighted_score", "rating", "manager_report", "manager_submitted_at", "hr_comment", "finalized_at"):
+                    evaluation_data[field] = None
+                for goal in goal_rows:
+                    goal.pop("awarded_points", None)
+            grievance = dict(grievance_row) if grievance_row and (own or hr_reviewer) else None
+            weight_total = sum(float(goal["weight"]) for goal in goal_rows)
+            score_visible = published or (not own and (direct_manager or hr_reviewer))
+            score_total = sum(float(goal.get("awarded_points") or 0) for goal in goal_rows) if score_visible else None
+            evaluation_data.update({
+                "published": published,
+                "can_manager_review": bool(direct_manager and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
+                "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
+                "can_grieve": bool(own and published and grievance_row is None),
+                "score_total": round(score_total, 2) if score_total is not None else None,
+            })
+            return {"evaluation": evaluation_data, "goals": goal_rows, "weight_total": weight_total, "approvals": approvals, "grievance": grievance}
+
+        def evaluation_summary_for_user(self, evaluation_id: int) -> dict[str, Any]:
+            payload = self.evaluation_payload(evaluation_id)
+            evaluation = payload["evaluation"]
+            return {key: evaluation.get(key) for key in (
+                "id", "cycle_id", "employee_id", "year", "cycle_name", "full_name", "employee_no", "status",
+                "workflow_version", "manager_employee_id", "manager_name", "weighted_score", "rating", "disclosure_date",
+                "published", "can_manager_review", "can_hr_review", "can_grieve", "score_total", "submitted_late",
+                "period_start", "period_end", "self_opens_on", "self_due_on", "manager_due_on", "hr_due_on",
+                "cycle_status", "announcement_title", "announcement_body", "announced_at",
+            )} | {"grievance_status": payload["grievance"]["status"] if payload["grievance"] else None}
+
+        def api_evaluations_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            rows = self.db.execute(
+                """SELECT e.id,e.employee_id,e.manager_employee_id,e.workflow_version,c.status AS cycle_status
+                     FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id ORDER BY c.year DESC,e.id DESC"""
+            ).fetchall()
+            visible_ids: list[int] = []
+            for row in rows:
+                cycle_visible = row["cycle_status"] in {"announced", "closed"}
+                own = cycle_visible and row["employee_id"] == user.get("employee_id")
+                direct = bool(cycle_visible and user.get("employee_id") and row["manager_employee_id"] == user["employee_id"] and self.direct_manager_employee_id(int(row["employee_id"])) == user["employee_id"])
+                legacy = bool(int(row["workflow_version"] or 1) < 2 and user.get("employee_id") and self.db.execute("SELECT 1 FROM evaluation_approvals WHERE evaluation_id=? AND approver_employee_id=?", (row["id"], user["employee_id"])).fetchone())
+                if own or direct or has_permission(self.db, user, "evaluation.review") or legacy:
+                    visible_ids.append(int(row["id"]))
+            summaries = [self.evaluation_summary_for_user(evaluation_id) for evaluation_id in visible_ids]
+            pending = [
+                row for row in summaries
+                if row.get("can_manager_review") or row.get("can_hr_review")
+                or (has_permission(self.db, user, "evaluation.review") and row.get("grievance_status") == "submitted")
+            ]
+            self.send_json(200, {"items": summaries, "pending_for_me": pending})
+
+        def api_evaluations_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            if "employee_id" in data:
+                raise APIError(403, "لا يمكن اختيار موظف آخر للتقييم.", "employee_selection_forbidden")
+            params: list[Any] = [employee_id]
+            where = "e.employee_id=? AND c.status IN ('announced','closed')"
+            if data.get("cycle_id") not in (None, ""):
+                where += " AND c.id=?"; params.append(as_int(data["cycle_id"], "cycle_id", 1))
+            elif data.get("year") not in (None, ""):
+                where += " AND c.year=?"; params.append(as_int(data["year"], "year", 2000, 2200))
+            existing = self.db.execute(
+                f"""SELECT e.id FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id
+                      WHERE {where} ORDER BY c.year DESC LIMIT 1""",
+                params,
+            ).fetchone()
+            if existing is None:
+                raise APIError(403, "لم تعلن الموارد البشرية دورة مسندة إلى حسابك.", "evaluation_not_assigned")
+            self.send_json(200, self.evaluation_payload(int(existing["id"])))
+
+        def api_evaluation_get(self, evaluation_id: int) -> None:
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def ensure_goal_owner(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if evaluation["employee_id"] != user.get("employee_id"):
+                raise APIError(403, "الموظف وحده يحرر أهداف تقييمه.", "forbidden")
+            allowed = {"draft", "returned"} if int(evaluation["workflow_version"] or 1) < 2 else {"draft"}
+            if evaluation["status"] not in allowed:
+                raise APIError(409, "لا يمكن تعديل الأهداف بعد إرسال التقييم.", "invalid_status")
+            if int(evaluation["workflow_version"] or 1) >= 2:
+                if evaluation["cycle_status"] != "announced":
+                    raise APIError(409, "دورة التقييم ليست مفتوحة للعمل.", "cycle_not_open")
+                if local_now().date() < parse_date(evaluation["self_opens_on"], "self_opens_on"):
+                    raise APIError(409, "لم تبدأ نافذة التقييم الذاتي بعد.", "self_window_not_open")
+            return evaluation, user
+
+        def api_evaluation_submit(self, evaluation_id: int) -> None:
+            evaluation, user = self.ensure_goal_owner(evaluation_id)
+            if int(evaluation["workflow_version"] or 1) < 2:
+                goals = self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
+                total = sum(float(goal["weight"]) for goal in goals)
+                if not goals or abs(total - 100.0) > 0.000001:
+                    raise APIError(422, "لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.", "invalid_weight_total")
+                chain = self.build_approval_chain(evaluation["employee_id"])
+                stamp = now_iso()
+                score = sum(float(goal["weight"]) * float(goal["achievement"]) / 100 for goal in goals)
+                with self.db:
+                    self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
+                    for step, approver in enumerate(chain, 1):
+                        self.db.execute("INSERT INTO evaluation_approvals(evaluation_id,step_no,approver_employee_id,created_at) VALUES(?,?,?,?)", (evaluation_id, step, approver, stamp))
+                    self.db.execute("UPDATE evaluations SET status='in_review',weighted_score=?,rating=?,current_step=1,submitted_at=?,updated_at=? WHERE id=?", (round(score, 2), self.evaluation_rating(score), stamp, stamp, evaluation_id))
+                    audit(self.db, user["id"], "evaluation.submit", "evaluation", evaluation_id, {"legacy": True})
+                self.send_json(200, self.evaluation_payload(evaluation_id))
+                return
+            goals = self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
+            total = sum(float(goal["weight"]) for goal in goals)
+            if not goals or abs(total - 100.0) > 0.000001:
+                raise APIError(422, "لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.", "invalid_weight_total", {"weight_total": total})
+            for goal in goals:
+                self.validate_evaluation_goal(evaluation, dict(goal), require_evidence=True)
+            manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (manager_id,)).fetchone() if manager_id else None
+            if not manager_id or manager_user is None:
+                raise APIError(409, "يجب ربط الموظف بمسؤول مباشر له حساب نشط.", "manager_missing")
+            stamp = now_iso()
+            submitted_late = int(local_now().date() > parse_date(evaluation["self_due_on"], "self_due_on"))
+            with self.db:
+                self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
+                self.db.execute("INSERT INTO evaluation_approvals(evaluation_id,step_no,approver_employee_id,created_at) VALUES(?,1,?,?)", (evaluation_id, manager_id, stamp))
+                self.db.execute("UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?", (stamp, evaluation_id))
+                self.db.execute("UPDATE evaluations SET status='submitted',manager_employee_id=?,weighted_score=NULL,rating=NULL,current_step=1,submitted_at=?,submitted_late=?,finalized_at=NULL,manager_report='',manager_submitted_at=NULL,hr_comment='',disclosure_date=NULL,updated_at=? WHERE id=?", (manager_id, stamp, submitted_late, stamp, evaluation_id))
+                create_internal_notification(self.db, user["id"], [manager_user["id"]], "تقييم سنوي بانتظار تقييمك", "أرسل موظفك أهدافه. أدخل نقاط كل هدف وتقريرك ثم أرسلها إلى الموارد البشرية.")
+                audit(self.db, user["id"], "evaluation.employee_submit_late" if submitted_late else "evaluation.employee_submit", "evaluation", evaluation_id, {"manager_employee_id": manager_id, "submitted_late": bool(submitted_late), "self_due_on": evaluation["self_due_on"]})
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_manager_review(self, evaluation_id: int) -> None:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if int(evaluation["workflow_version"] or 1) < 2:
+                raise APIError(409, "هذا السجل يستخدم مسار الاعتماد القديم.", "legacy_workflow")
+            manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            if not user.get("employee_id") or manager_id != user["employee_id"] or evaluation["manager_employee_id"] != user["employee_id"]:
+                raise APIError(403, "المسؤول المباشر الحالي وحده يقيّم هذا الموظف.", "not_direct_manager")
+            if evaluation["status"] not in {"submitted", "returned"}:
+                raise APIError(409, "التقييم ليس في مرحلة تقييم المسؤول.", "invalid_status")
+            data = self.read_json()
+            report = require_text(data, "manager_report", 5000)
+            submitted_goals = data.get("goals")
+            goals = self.db.execute("SELECT id,weight FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,)).fetchall()
+            if not isinstance(submitted_goals, list) or len(submitted_goals) != len(goals):
+                raise APIError(422, "أدخل نقاط كل هدف.", "goal_scores_required")
+            submitted_map: dict[int, float] = {}
+            for item in submitted_goals:
+                if not isinstance(item, dict):
+                    raise APIError(422, "بيانات النقاط غير صالحة.", "validation_error")
+                goal_id = as_int(item.get("id"), "goal_id", 1)
+                if goal_id in submitted_map:
+                    raise APIError(422, "تكرر الهدف في كشف النقاط.", "duplicate_goal")
+                submitted_map[goal_id] = as_float(item.get("awarded_points"), "awarded_points", 0, 100)
+            expected_ids = {int(goal["id"]) for goal in goals}
+            if set(submitted_map) != expected_ids:
+                raise APIError(422, "كشف النقاط لا يطابق أهداف التقييم.", "goal_mismatch")
+            for goal in goals:
+                if submitted_map[int(goal["id"])] > float(goal["weight"]) + 0.000001:
+                    raise APIError(422, "نقاط الهدف لا يمكن أن تتجاوز وزنه.", "points_exceed_weight", {"goal_id": goal["id"], "weight": goal["weight"]})
+            score = round(sum(submitted_map.values()), 2)
+            stamp = now_iso()
+            resubmission = evaluation["status"] == "returned"
+            reviewers = [int(row["id"]) for row in self.db.execute("SELECT * FROM users WHERE active=1") if has_permission(self.db, dict(row), "evaluation.review") and row["id"] != user["id"]]
+            with self.db:
+                for goal_id, points in submitted_map.items():
+                    self.db.execute("UPDATE evaluation_goals SET awarded_points=?,updated_at=? WHERE id=? AND evaluation_id=?", (points, stamp, goal_id, evaluation_id))
+                self.db.execute("UPDATE evaluation_approvals SET status='approved',comment=?,decided_at=? WHERE evaluation_id=? AND step_no=1", (report, stamp, evaluation_id))
+                self.db.execute("UPDATE evaluations SET status='in_review',manager_report=?,manager_submitted_at=?,weighted_score=?,rating=?,hr_comment='',updated_at=? WHERE id=?", (report, stamp, score, self.evaluation_rating(score), stamp, evaluation_id))
+                create_internal_notification(self.db, user["id"], reviewers, "تقييم سنوي بانتظار مراجعة HR", "أكمل المسؤول المباشر النقاط وتقرير الموظف.")
+                audit(self.db, user["id"], "evaluation.manager_resubmit" if resubmission else "evaluation.manager_submit", "evaluation", evaluation_id, {"score": score})
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_hr_review(self, evaluation_id: int) -> None:
+            user = self.require_permission("evaluation.review")
+            evaluation = self.evaluation_row(evaluation_id)
+            if evaluation["employee_id"] == user.get("employee_id"):
+                raise APIError(403, "لا يمكن مراجعة تقييمك الشخصي.", "self_review_forbidden")
+            if int(evaluation["workflow_version"] or 1) < 2 or evaluation["status"] != "in_review":
+                raise APIError(409, "التقييم ليس بانتظار مراجعة الموارد البشرية.", "invalid_status")
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"return", "approve"}:
+                raise APIError(422, "القرار يجب أن يكون return أو approve.", "validation_error")
+            comment = optional_text(data, "comment", 3000)
+            stamp = now_iso()
+            manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["manager_employee_id"],)).fetchone()
+            employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["employee_id"],)).fetchone()
+            with self.db:
+                if action == "return":
+                    if not comment:
+                        raise APIError(422, "تعليق الإعادة مطلوب.", "comment_required")
+                    self.db.execute("UPDATE evaluations SET status='returned',hr_reviewed_by=?,hr_comment=?,updated_at=? WHERE id=?", (user["id"], comment, stamp, evaluation_id))
+                    if manager_user:
+                        create_internal_notification(self.db, user["id"], [manager_user["id"]], "أعيد التقييم من HR", comment)
+                    audit(self.db, user["id"], "evaluation.hr_return", "evaluation", evaluation_id, {"comment": comment})
+                else:
+                    disclosure = parse_date(data.get("disclosure_date"), "disclosure_date")
+                    if disclosure < local_now().date():
+                        raise APIError(422, "تاريخ الإفصاح لا يمكن أن يكون في الماضي.", "invalid_disclosure_date")
+                    goals = self.db.execute("SELECT awarded_points FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
+                    if not goals or any(goal["awarded_points"] is None for goal in goals):
+                        raise APIError(409, "لم يكتمل كشف نقاط المسؤول.", "scores_incomplete")
+                    score = round(sum(float(goal["awarded_points"]) for goal in goals), 2)
+                    self.db.execute("UPDATE evaluations SET status='approved',weighted_score=?,rating=?,hr_reviewed_by=?,hr_comment=?,disclosure_date=?,finalized_at=?,updated_at=? WHERE id=?", (score, self.evaluation_rating(score), user["id"], comment, disclosure.isoformat(), stamp, stamp, evaluation_id))
+                    available_at = datetime.combine(disclosure, time.min, UAE_TZ).astimezone(timezone.utc).isoformat(timespec="seconds")
+                    if employee_user:
+                        create_internal_notification(self.db, user["id"], [employee_user["id"]], "نتيجة التقييم السنوي", "أصبحت نتيجة تقييمك متاحة في صفحة التقييم السنوي.", available_at)
+                    audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {"score": score, "disclosure_date": disclosure.isoformat()})
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def published_evaluation_summaries(self, employee_id: int) -> list[dict[str, Any]]:
+            rows = self.db.execute(
+                """SELECT e.id FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id
+                    WHERE e.employee_id=? AND e.status='approved'
+                      AND (e.workflow_version<2 OR e.disclosure_date<=?) ORDER BY c.year DESC""",
+                (employee_id, local_now().date().isoformat()),
+            ).fetchall()
+            return [self.evaluation_summary_for_user(int(row["id"])) for row in rows]
+
+        def api_evaluation_history(self) -> None:
+            employee_id = self.own_employee_id()
+            self.send_json(200, {"items": self.published_evaluation_summaries(employee_id)})
+
+        def api_employee_evaluation_history(self, employee_id: int) -> None:
+            self.require_permission("evaluation.review")
+            if self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone() is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            self.send_json(200, {"items": self.published_evaluation_summaries(employee_id)})
+
+        def api_evaluation_grievance_post(self, evaluation_id: int) -> None:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if evaluation["employee_id"] != user.get("employee_id"):
+                raise APIError(403, "الموظف وحده يقدم التظلم.", "forbidden")
+            if not self.evaluation_is_published(evaluation):
+                raise APIError(409, "لا يمكن التظلم قبل نشر النتيجة.", "not_published")
+            if self.db.execute("SELECT 1 FROM evaluation_grievances WHERE evaluation_id=?", (evaluation_id,)).fetchone():
+                raise APIError(409, "سبق تقديم تظلم على هذا التقييم.", "grievance_exists")
+            data = self.read_json()
+            reason = require_text(data, "reason", 240)
+            note = require_text(data, "note", 4000)
+            stamp = now_iso()
+            reviewers = [int(row["id"]) for row in self.db.execute("SELECT * FROM users WHERE active=1") if has_permission(self.db, dict(row), "evaluation.review") and row["id"] != user["id"]]
+            with self.db:
+                cursor = self.db.execute("INSERT INTO evaluation_grievances(evaluation_id,employee_id,reason,note,submitted_at,updated_at) VALUES(?,?,?,?,?,?)", (evaluation_id, evaluation["employee_id"], reason, note, stamp, stamp))
+                grievance_id = int(cursor.lastrowid)
+                create_internal_notification(self.db, user["id"], reviewers, "تظلم على نتيجة تقييم", "قدم الموظف تظلماً يتطلب قرار الموارد البشرية.")
+                audit(self.db, user["id"], "evaluation.grievance_submit", "evaluation_grievance", grievance_id, {"evaluation_id": evaluation_id, "reason": reason})
+            self.send_json(201, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_grievance_resolve(self, grievance_id: int) -> None:
+            user = self.require_permission("evaluation.review")
+            grievance = self.db.execute("SELECT * FROM evaluation_grievances WHERE id=?", (grievance_id,)).fetchone()
+            if grievance is None:
+                raise APIError(404, "التظلم غير موجود.", "not_found")
+            if grievance["status"] != "submitted":
+                raise APIError(409, "سبق حل هذا التظلم.", "already_resolved")
+            evaluation = self.evaluation_row(int(grievance["evaluation_id"]))
+            if evaluation["employee_id"] == user.get("employee_id"):
+                raise APIError(403, "لا يمكن حل تظلمك الشخصي.", "self_review_forbidden")
+            data = self.read_json()
+            action = str(data.get("action", ""))
+            if action not in {"reject", "amend"}:
+                raise APIError(422, "القرار يجب أن يكون reject أو amend.", "validation_error")
+            note = require_text(data, "resolution_note", 4000)
+            before = float(evaluation["weighted_score"] or 0)
+            stamp = now_iso()
+            after = before
+            with self.db:
+                if action == "amend":
+                    score_rows = data.get("goals")
+                    if not isinstance(score_rows, list) or not score_rows:
+                        raise APIError(422, "أدخل النقاط المعدلة.", "goal_scores_required")
+                    known = {int(row["id"]): row for row in self.db.execute("SELECT id,weight FROM evaluation_goals WHERE evaluation_id=?", (evaluation["id"],))}
+                    changes: dict[int, float] = {}
+                    for item in score_rows:
+                        goal_id = as_int(item.get("id") if isinstance(item, dict) else None, "goal_id", 1)
+                        if goal_id not in known:
+                            raise APIError(422, "الهدف المعدل لا يتبع لهذا التقييم.", "goal_mismatch")
+                        points = as_float(item.get("awarded_points"), "awarded_points", 0, float(known[goal_id]["weight"]))
+                        changes[goal_id] = points
+                    for goal_id, points in changes.items():
+                        self.db.execute("UPDATE evaluation_goals SET awarded_points=?,updated_at=? WHERE id=?", (points, stamp, goal_id))
+                    after = round(sum(float(row[0] or 0) for row in self.db.execute("SELECT awarded_points FROM evaluation_goals WHERE evaluation_id=?", (evaluation["id"],))), 2)
+                    self.db.execute("UPDATE evaluations SET weighted_score=?,rating=?,updated_at=? WHERE id=?", (after, self.evaluation_rating(after), stamp, evaluation["id"]))
+                status = "amended" if action == "amend" else "rejected"
+                self.db.execute("UPDATE evaluation_grievances SET status=?,resolution_note=?,resolved_by=?,score_before=?,score_after=?,resolved_at=?,updated_at=? WHERE id=?", (status, note, user["id"], before, after, stamp, stamp, grievance_id))
+                employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["employee_id"],)).fetchone()
+                if employee_user:
+                    create_internal_notification(self.db, user["id"], [employee_user["id"]], "تم حل تظلم التقييم", note)
+                audit(self.db, user["id"], "evaluation.grievance_amend" if action == "amend" else "evaluation.grievance_reject", "evaluation_grievance", grievance_id, {"evaluation_id": evaluation["id"], "score_before": before, "score_after": after, "resolution_note": note})
+            self.send_json(200, self.evaluation_payload(int(evaluation["id"])))
+
+        # Notifications
+        def api_notification_send(self) -> None:
+            user = self.require_permission("notification.send")
+            data = self.read_json()
+            title = require_text(data, "title", 240)
+            body = require_text(data, "body", 5000)
+            type_aliases = {"قانون": "law", "إشعار": "notice", "تهنئة": "congratulation"}
+            message_type = type_aliases.get(str(data.get("message_type", "")), str(data.get("message_type", "")))
+            if message_type not in {"law", "notice", "congratulation"}:
+                raise APIError(422, "نوع الرسالة غير صالح.", "validation_error")
+            audience_aliases = {"الجميع": "all", "قسم": "department", "فرع": "branch", "موظفون": "employees"}
+            audience_type = audience_aliases.get(str(data.get("audience_type", "")), str(data.get("audience_type", "")))
+            if audience_type not in {"all", "department", "branch", "employees"}:
+                raise APIError(422, "نوع الجمهور غير صالح.", "validation_error")
+            audience_ref: Any = data.get("audience_ref")
+            if audience_type == "all":
+                recipient_rows = self.db.execute("SELECT id FROM users WHERE active=1").fetchall()
+                stored_ref = None
+            elif audience_type == "department":
+                department_id = as_int(audience_ref, "audience_ref", 1)
+                recipient_rows = self.db.execute("SELECT u.id FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.active=1 AND e.active=1 AND e.department_id=?", (department_id,)).fetchall()
+                stored_ref = str(department_id)
+            elif audience_type == "branch":
+                branch_id = as_int(audience_ref, "audience_ref", 1)
+                recipient_rows = self.db.execute("SELECT u.id FROM users u JOIN employees e ON e.id=u.employee_id WHERE u.active=1 AND e.active=1 AND e.branch_id=?", (branch_id,)).fetchall()
+                stored_ref = str(branch_id)
+            else:
+                employee_ids = data.get("employee_ids", audience_ref)
+                if not isinstance(employee_ids, list) or not employee_ids:
+                    raise APIError(422, "اختر موظفاً واحداً على الأقل.", "validation_error")
+                normalized = sorted(set(as_int(x, "employee_ids", 1) for x in employee_ids))
+                placeholders = ",".join("?" for _ in normalized)
+                recipient_rows = self.db.execute(f"SELECT id FROM users WHERE active=1 AND employee_id IN ({placeholders})", normalized).fetchall()
+                stored_ref = json_text(normalized)
+            recipient_ids = sorted(set(int(r["id"]) for r in recipient_rows))
+            if not recipient_ids:
+                raise APIError(422, "لا يوجد مستلمون نشطون ضمن الجمهور المحدد.", "empty_audience")
+            stamp = now_iso()
+            with self.db:
+                cur = self.db.execute("INSERT INTO notifications(sender_user_id,title,body,message_type,audience_type,audience_ref,created_at) VALUES(?,?,?,?,?,?,?)", (user["id"], title, body, message_type, audience_type, stored_ref, stamp))
+                notification_id = int(cur.lastrowid)
+                self.db.executemany("INSERT INTO notification_recipients(notification_id,user_id) VALUES(?,?)", [(notification_id, recipient_id) for recipient_id in recipient_ids])
+                audit(self.db, user["id"], "notification.send", "notification", notification_id, {"recipient_count": len(recipient_ids), "audience_type": audience_type})
+            self.send_json(201, {"notification": {"id": notification_id, "title": title, "body": body, "message_type": message_type, "audience_type": audience_type, "audience_ref": stored_ref, "created_at": stamp, "recipient_count": len(recipient_ids)}})
+
+        def api_notification_inbox(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            rows = self.db.execute(
+                """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
+                          u.display_name AS sender_name,r.read_at
+                   FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
+                   JOIN users u ON u.id=n.sender_user_id
+                   WHERE r.user_id=? AND (n.available_at IS NULL OR n.available_at<=?)
+                   ORDER BY n.created_at DESC""",
+                (user["id"], now_iso()),
+            ).fetchall()
+            unread = sum(1 for row in rows if row["read_at"] is None)
+            self.send_json(200, {"items": [dict(r) for r in rows], "unread_count": unread})
+
+        def api_notification_unread_count(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            count = self.db.execute(
+                """SELECT COUNT(*) FROM notification_recipients r
+                   JOIN notifications n ON n.id=r.notification_id
+                   WHERE r.user_id=? AND r.read_at IS NULL
+                     AND (n.available_at IS NULL OR n.available_at<=?)""",
+                (user["id"], now_iso()),
+            ).fetchone()[0]
+            self.send_json(200, {"unread_count": count})
+
+        def api_notification_get(self, notification_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            row = self.db.execute(
+                """SELECT n.*,u.display_name AS sender_name,r.read_at,
+                          (SELECT COUNT(*) FROM notification_recipients x WHERE x.notification_id=n.id) AS recipient_count
+                   FROM notifications n JOIN users u ON u.id=n.sender_user_id
+                   LEFT JOIN notification_recipients r ON r.notification_id=n.id AND r.user_id=? WHERE n.id=?""",
+                (user["id"], notification_id),
+            ).fetchone()
+            if row is None:
+                raise APIError(404, "الإشعار غير موجود.", "not_found")
+            privileged = row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
+            if row["available_at"] and row["available_at"] > now_iso() and not privileged:
+                raise APIError(404, "الإشعار غير موجود.", "not_found")
+            if not privileged:
+                recipient = self.db.execute("SELECT 1 FROM notification_recipients WHERE notification_id=? AND user_id=?", (notification_id, user["id"])).fetchone()
+                if not recipient:
+                    raise APIError(403, "هذا الإشعار ليس موجهاً إليك.", "forbidden")
+            self.send_json(200, {"notification": dict(row)})
+
+        def api_notification_read(self, notification_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            with self.db:
+                stamp = now_iso()
+                result = self.db.execute(
+                    """UPDATE notification_recipients SET read_at=COALESCE(read_at,?)
+                       WHERE notification_id=? AND user_id=?
+                         AND notification_id IN (
+                           SELECT id FROM notifications WHERE available_at IS NULL OR available_at<=?
+                         )""",
+                    (stamp, notification_id, user["id"], stamp),
+                )
+            if not result.rowcount:
+                raise APIError(404, "الإشعار غير موجود في صندوقك.", "not_found")
+            self.send_json(200, {"ok": True})
+
+        def api_notification_read_all(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            stamp = now_iso()
+            with self.db:
+                result = self.db.execute(
+                    """UPDATE notification_recipients SET read_at=?
+                       WHERE user_id=? AND read_at IS NULL
+                         AND notification_id IN (
+                           SELECT id FROM notifications WHERE available_at IS NULL OR available_at<=?
+                         )""",
+                    (stamp, user["id"], stamp),
+                )
+            self.send_json(200, {"ok": True, "updated": result.rowcount})
+
+        # Salary certificates
+        def certificate_payload(self, row: sqlite3.Row) -> dict[str, Any]:
+            expected = certificate_integrity_hash(db_path, row)
+            integrity_valid = bool(row["integrity_hash"]) and hmac.compare_digest(str(row["integrity_hash"]), expected)
+            return {
+                "id": row["id"], "certificate_no": row["certificate_no"], "employee_id": row["employee_id"],
+                "verification_code": row["verification_code"], "verification_status": row["verification_status"],
+                "request_status": row["request_status"] if "request_status" in row.keys() else "issued",
+                "requester_id": row["requester_id"] if "requester_id" in row.keys() else None,
+                "requested_at": row["requested_at"] if "requested_at" in row.keys() else None,
+                "approved_by": row["approved_by"] if "approved_by" in row.keys() else None,
+                "approved_at": row["approved_at"] if "approved_at" in row.keys() else None,
+                "decision_note": row["decision_note"] if "decision_note" in row.keys() else "",
+                "email_outbox_id": row["email_outbox_id"] if "email_outbox_id" in row.keys() else None,
+                "integrity_valid": integrity_valid, "document_fingerprint": expected[:16].upper(),
+                "issued_by": row["issued_by"], "purpose": row["purpose"], "salary": row["salary_snapshot"],
+                "organization": parse_json_text(row["organization_snapshot"], {}),
+                "employee": parse_json_text(row["employee_snapshot"], {}),
+                "issued_at": row["issued_at"], "print_count": row["print_count"], "last_printed_at": row["last_printed_at"],
+                "verification_count": row["verification_count"], "last_verified_at": row["last_verified_at"],
+            }
+
+        def _certificate_safe_request(self, row: sqlite3.Row, privileged: bool = False) -> dict[str, Any]:
+            payload = self.certificate_payload(row)
+            if privileged:
+                issuer = self.db.execute("SELECT display_name AS name,email FROM users WHERE id=?", (row["issued_by"],)).fetchone()
+                payload["issuer"] = dict(issuer) if issuer else None
+                keys = row.keys()
+                payload["employee_name"] = row["employee_name"] if "employee_name" in keys else (payload.get("employee") or {}).get("full_name")
+                payload["employee_no"] = row["employee_no"] if "employee_no" in keys else (payload.get("employee") or {}).get("employee_no")
+                payload["requester_name"] = row["requester_name"] if "requester_name" in keys else None
+                return payload
+            # An employee can track the workflow and recipient only.  Salary,
+            # snapshots, verification codes and issuer data remain server-side.
+            return {key: payload.get(key) for key in ("id","employee_id","purpose","request_status","requested_at","approved_at","decision_note")}
+
+        def api_certificate_requests_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            privileged = has_permission(self.db, user, "salary_certificate.issue")
+            if privileged:
+                rows = self.db.execute(
+                    """SELECT c.*,e.full_name AS employee_name,e.employee_no,u.display_name AS requester_name
+                       FROM salary_certificates c JOIN employees e ON e.id=c.employee_id
+                       LEFT JOIN users u ON u.id=c.requester_id
+                       WHERE c.request_status IN ('requested','approved','rejected')
+                       ORDER BY COALESCE(c.requested_at,c.issued_at) DESC,c.id DESC"""
+                ).fetchall()
+            else:
+                if not user.get("employee_id"):
+                    return self.send_json(200, {"items": []})
+                rows = self.db.execute(
+                    "SELECT * FROM salary_certificates WHERE employee_id=? AND request_status IN ('requested','approved','rejected') ORDER BY COALESCE(requested_at,issued_at) DESC,id DESC",
+                    (user["employee_id"],),
+                ).fetchall()
+            self.send_json(200, {"items": [self._certificate_safe_request(row, privileged) for row in rows]})
+
+        def api_certificate_history_get(self) -> None:
+            user = self.require_permission("salary_certificate.verify")
+            if str(user.get("role")) not in {"admin", "hr"}:
+                raise APIError(403, "سجل شهادات الراتب متاح للموارد البشرية ومدير النظام فقط.", "forbidden")
+            rows = self.db.execute(
+                """SELECT c.*,e.full_name AS employee_name,e.employee_no,u.display_name AS requester_name
+                   FROM salary_certificates c JOIN employees e ON e.id=c.employee_id
+                   LEFT JOIN users u ON u.id=c.requester_id
+                   ORDER BY c.id DESC"""
+            ).fetchall()
+            self.send_json(200, {"items": [self._certificate_safe_request(row, True) for row in rows]})
+
+        def api_certificate_request_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = user.get("employee_id")
+            if not employee_id:
+                raise APIError(403, "يجب ربط حسابك بملف موظف لتقديم الطلب.", "employee_required")
+            purpose = require_text(self.read_json(), "purpose", 500)
+            if self.db.execute("SELECT 1 FROM salary_certificates WHERE employee_id=? AND request_status='requested'", (employee_id,)).fetchone():
+                raise APIError(409, "لديك طلب شهادة راتب قيد المراجعة بالفعل.", "request_pending")
+            stamp = now_iso(); year = local_now().year
+            with self.db:
+                sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
+                certificate_no = f"REQ-{year}-{sequence:06d}"
+                verification_code = f"REQ-{year}-{secrets.token_hex(6).upper()}"
+                cur = self.db.execute(
+                    """INSERT INTO salary_certificates(certificate_no,verification_code,integrity_hash,verification_status,employee_id,issued_by,purpose,salary_snapshot,organization_snapshot,employee_snapshot,issued_at,request_status,requester_id,requested_at)
+                       SELECT ?,?,'','valid',e.id,?, ?,e.salary,'{}','{}',?,?,?,? FROM employees e WHERE e.id=? AND e.active=1""",
+                    (certificate_no, verification_code, user["id"], purpose, stamp, "requested", user["id"], stamp, employee_id),
+                )
+                if not cur.rowcount:
+                    raise APIError(404, "ملف الموظف غير موجود أو غير نشط.", "not_found")
+                request_id = int(cur.lastrowid)
+                hr_recipients = [item["id"] for item in self.db.execute("SELECT id FROM users WHERE active=1 AND role IN ('admin','hr')").fetchall() if item["id"] != user["id"]]
+                if hr_recipients:
+                    create_internal_notification(self.db, user["id"], hr_recipients, "طلب شهادة راتب جديد", "يوجد طلب شهادة راتب جديد يحتاج مراجعة الموارد البشرية.")
+                audit(self.db, user["id"], "salary_certificate.request", "salary_certificate", request_id, {"employee_id": employee_id, "purpose": purpose})
+            self.send_json(201, {"request": self._certificate_safe_request(self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (request_id,)).fetchone())})
+
+        def api_certificate_request_decision(self, certificate_id: int) -> None:
+            user = self.require_permission("salary_certificate.issue")
+            data = self.read_json(); action = str(data.get("action") or data.get("decision") or "").strip().lower()
+            if action in {"approve", "approved", "اعتماد", "اعتمد"}: action = "approve"
+            elif action in {"reject", "rejected", "رفض", "ارفض"}: action = "reject"
+            else: raise APIError(422, "اختر الاعتماد أو الرفض.", "validation_error")
+            note = optional_text(data, "decision_note", 1000) or optional_text(data, "note", 1000)
+            row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
+            if row is None: raise APIError(404, "طلب شهادة الراتب غير موجود.", "not_found")
+            if row["request_status"] != "requested": raise APIError(409, "تمت معالجة هذا الطلب مسبقاً ولا يمكن تغييره.", "request_already_decided")
+            if row["requester_id"] == user["id"]: raise APIError(403, "لا يمكنك اعتماد طلبك الشخصي.", "self_approval_forbidden")
+            stamp = now_iso(); email_outbox_id = None; email_status = None
+            requester = self.db.execute("SELECT id,email,display_name FROM users WHERE id=? AND active=1", (row["requester_id"],)).fetchone()
+            if action == "reject":
+                with self.db:
+                    self.db.execute("UPDATE salary_certificates SET request_status='rejected',approved_by=?,approved_at=?,decision_note=? WHERE id=?", (user["id"], stamp, note, certificate_id))
+                    if requester: create_internal_notification(self.db, user["id"], [requester["id"]], "تم رفض طلب شهادة الراتب", note or "تم رفض الطلب من الموارد البشرية.")
+                    audit(self.db, user["id"], "salary_certificate.reject", "salary_certificate", certificate_id, {"note": note})
+            else:
+                employee = self.db.execute(employee_query(True) + " WHERE e.id=? AND e.active=1", (row["employee_id"],)).fetchone()
+                if employee is None: raise APIError(404, "ملف الموظف غير موجود أو غير نشط.", "not_found")
+                org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+                sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
+                certificate_no = f"SAL-{local_now().year}-{sequence:06d}"
+                verification_code = new_certificate_verification_code(self.db, local_now().year)
+                values = {"certificate_no": certificate_no, "verification_code": verification_code, "employee_id": row["employee_id"], "issued_by": user["id"], "purpose": row["purpose"], "salary_snapshot": employee["salary"], "organization_snapshot": json_text(serialize_org(org)), "employee_snapshot": json_text(normalize_employee(employee)), "issued_at": stamp}
+                digest = certificate_integrity_hash(db_path, values)
+                with self.db:
+                    self.db.execute("""UPDATE salary_certificates SET certificate_no=?,verification_code=?,integrity_hash=?,verification_status='valid',issued_by=?,salary_snapshot=?,organization_snapshot=?,employee_snapshot=?,issued_at=?,request_status='approved',approved_by=?,approved_at=?,decision_note=? WHERE id=?""", (certificate_no, verification_code, digest, user["id"], employee["salary"], values["organization_snapshot"], values["employee_snapshot"], stamp, user["id"], stamp, note, certificate_id))
+                    row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
+                    certificate = self.certificate_payload(row)
+                    pdf_data = build_salary_certificate_pdf(certificate)
+                    if requester and requester["email"]:
+                        email_outbox_id, email_status = self.queue_email("salary_certificate", requester["email"], f"Salary Certificate | {certificate_no}", "تم اعتماد طلب شهادة الراتب. تجد الشهادة الإلكترونية الموقعة مرفقة بهذه الرسالة.", user_id=user["id"], attachment={"name": f"salary-certificate-{certificate_no}.pdf", "content_type": "application/pdf", "data": pdf_data})
+                        self.db.execute("UPDATE salary_certificates SET email_outbox_id=? WHERE id=?", (email_outbox_id, certificate_id))
+                    if requester: create_internal_notification(self.db, user["id"], [requester["id"]], "تم اعتماد شهادة الراتب", "تم اعتماد الطلب وإرسال الشهادة إلى بريدك المؤسسي." if email_status in {"sent", "queued"} else "تم اعتماد الطلب. راجع بريدك المؤسسي عند تفعيل SMTP.")
+                    audit(self.db, user["id"], "salary_certificate.approve", "salary_certificate", certificate_id, {"certificate_no": certificate_no, "email_status": email_status or "no_email"})
+            saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
+            response = self._certificate_safe_request(saved, True)
+            response["email_status"] = email_status
+            self.send_json(200, {"request": response})
+
+        def api_certificate_post(self) -> None:
+            user = self.require_permission("salary_certificate.issue")
+            data = self.read_json()
+            employee_id = as_int(data.get("employee_id"), "employee_id", 1)
+            if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "لا يمكنك إصدار شهادة راتب لموظف آخر.", "forbidden")
+            employee = self.db.execute(employee_query(True) + " WHERE e.id=? AND e.active=1", (employee_id,)).fetchone()
+            if employee is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
+            stamp = now_iso()
+            with self.db:
+                sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
+                certificate_no = f"SAL-{local_now().year}-{sequence:06d}"
+                verification_code = new_certificate_verification_code(self.db, local_now().year)
+                org_snapshot = serialize_org(org)
+                employee_snapshot = normalize_employee(employee)
+                values = {
+                    "certificate_no": certificate_no,
+                    "verification_code": verification_code,
+                    "employee_id": employee_id,
+                    "issued_by": user["id"],
+                    "purpose": optional_text(data, "purpose", 500),
+                    "salary_snapshot": employee["salary"],
+                    "organization_snapshot": json_text(org_snapshot),
+                    "employee_snapshot": json_text(employee_snapshot),
+                    "issued_at": stamp,
+                }
+                integrity_hash = certificate_integrity_hash(db_path, values)
+                cur = self.db.execute(
+                    "INSERT INTO salary_certificates(certificate_no,verification_code,integrity_hash,employee_id,issued_by,purpose,salary_snapshot,organization_snapshot,employee_snapshot,issued_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (certificate_no, verification_code, integrity_hash, employee_id, user["id"], values["purpose"], employee["salary"], values["organization_snapshot"], values["employee_snapshot"], stamp),
+                )
+                cert_id = int(cur.lastrowid)
+                audit(self.db, user["id"], "salary_certificate.issue", "salary_certificate", cert_id, {"employee_id": employee_id, "certificate_no": certificate_no, "verification_code_suffix": verification_code[-4:]})
+            row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (cert_id,)).fetchone()
+            self.send_json(201, {"certificate": self.certificate_payload(row)})
+
+        def api_certificate_get(self, certificate_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "شهادة الراتب غير موجودة.", "not_found")
+            if row["employee_id"] != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "لا يمكنك عرض هذه الشهادة.", "forbidden")
+            if row["employee_id"] == user.get("employee_id") and row["request_status"] in {"requested", "rejected"}:
+                self.send_json(200, {"request": self._certificate_safe_request(row)})
+                return
+            self.send_json(200, {"certificate": self.certificate_payload(row)})
+
+        def api_certificate_verify(self) -> None:
+            user = self.require_permission("salary_certificate.verify")
+            if str(user.get("role")) not in {"admin", "hr"}:
+                raise APIError(403, "التحقق من شهادات الراتب متاح للموارد البشرية ومدير النظام فقط.", "forbidden")
+            data = self.read_json()
+            submitted = str(data.get("code") or data.get("verification_code") or data.get("certificate_no") or "").strip().upper()
+            submitted = re.sub(r"\s+", "", submitted)
+            if not re.fullmatch(r"[A-Z0-9-]{8,48}", submitted):
+                raise APIError(422, "أدخل رقم تحقق أو رقم إصدار صحيحاً.", "validation_error")
+            row = self.db.execute(
+                "SELECT * FROM salary_certificates WHERE request_status IN ('approved','issued') AND (UPPER(verification_code)=? OR UPPER(certificate_no)=?)",
+                (submitted, submitted),
+            ).fetchone()
+            stamp = now_iso()
+            if row is None:
+                with self.db:
+                    audit(self.db, user["id"], "salary_certificate.verify", "salary_certificate", None, {"result": "not_found", "code_suffix": submitted[-4:]})
+                self.send_json(200, {"valid": False, "status": "not_found", "message": "لم يتم العثور على شهادة صادرة بهذا الرقم."})
+                return
+            expected = certificate_integrity_hash(db_path, row)
+            integrity_valid = bool(row["integrity_hash"]) and hmac.compare_digest(str(row["integrity_hash"]), expected)
+            result = "valid" if integrity_valid and row["verification_status"] == "valid" else ("revoked" if row["verification_status"] == "revoked" else "integrity_error")
+            with self.db:
+                self.db.execute("UPDATE salary_certificates SET verification_count=verification_count+1,last_verified_at=? WHERE id=?", (stamp, row["id"]))
+                audit(self.db, user["id"], "salary_certificate.verify", "salary_certificate", row["id"], {"result": result, "code_suffix": submitted[-4:]})
+            saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (row["id"],)).fetchone()
+            issuer = self.db.execute("SELECT display_name,email FROM users WHERE id=?", (row["issued_by"],)).fetchone()
+            self.send_json(200, {
+                "valid": result == "valid",
+                "status": result,
+                "message": "الشهادة صحيحة ومطابقة لسجل الإصدار." if result == "valid" else ("الشهادة ملغاة ولا يجوز اعتمادها." if result == "revoked" else "فشلت مطابقة بصمة الشهادة؛ لا تعتمد المستند."),
+                "certificate": self.certificate_payload(saved),
+                "issuer": {"name": issuer["display_name"], "email": issuer["email"]} if issuer else None,
+                "verified_at": stamp,
+            })
+
+        def api_certificate_print(self, certificate_id: int) -> None:
+            user = self.require_permission("salary_certificate.print")
+            row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "شهادة الراتب غير موجودة.", "not_found")
+            if row["employee_id"] != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "لا يمكنك طباعة شهادة راتب لموظف آخر.", "forbidden")
+            certificate = self.certificate_payload(row)
+            if row["request_status"] not in {"approved", "issued"} or row["verification_status"] != "valid" or not certificate["integrity_valid"]:
+                raise APIError(409, "تعذر طباعة الشهادة لأن حالتها أو بصمتها غير صالحة.", "certificate_invalid")
+            stamp = now_iso()
+            with self.db:
+                self.db.execute("UPDATE salary_certificates SET print_count=print_count+1,last_printed_at=? WHERE id=?", (stamp, certificate_id))
+                audit(self.db, user["id"], "salary_certificate.print", "salary_certificate", certificate_id)
+            saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
+            self.send_json(200, {"certificate": self.certificate_payload(saved), "print_authorized": True})
+
+        # Payroll runs, employee payslips and advances
+        def payroll_payload(self, run_id: int) -> dict[str, Any]:
+            run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
+            if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
+            rows=self.db.execute("SELECT * FROM payroll_items WHERE run_id=? ORDER BY employee_name",(run_id,)).fetchall()
+            items=[]
+            totals={"basic_cents":0,"allowances_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
+            for row in rows:
+                item=dict(row)
+                for key in totals: totals[key]+=int(item[key]); item[key.removesuffix("_cents")]=cents_value(item[key])
+                items.append(item)
+            result=dict(run)|{"items":items,"employee_count":len(items)}
+            for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
+            return result
+
+        def api_payroll_runs_get(self) -> None:
+            user = self.require_permission("salary.view")
+            if not self.has_privileged_people_access(user, "salary.view"):
+                raise APIError(403, "مسيرات الرواتب متاحة للإدارة المخولة فقط.", "forbidden")
+            rows=self.db.execute("SELECT r.*,(SELECT COUNT(*) FROM payroll_items i WHERE i.run_id=r.id) AS employee_count,(SELECT COALESCE(SUM(net_cents),0) FROM payroll_items i WHERE i.run_id=r.id) AS net_cents FROM payroll_runs r ORDER BY payroll_month DESC").fetchall()
+            self.send_json(200,{"items":[dict(r)|{"net":cents_value(r["net_cents"])} for r in rows]})
+
+        def api_payroll_runs_post(self) -> None:
+            user=self.require_permission("payroll.manage"); data=self.read_json(); month=str(data.get("payroll_month",data.get("month","")))
+            if not self.has_privileged_people_access(user,"employee.view"): raise APIError(403,"إدارة المسيرات متاحة للإدارة المخولة فقط.","forbidden")
+            if not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])",month): raise APIError(422,"الشهر يجب أن يكون YYYY-MM.","validation_error")
+            allowances=money_cents(data.get("allowances",0),"allowances"); deductions=money_cents(data.get("deductions",0),"deductions"); stamp=now_iso()
+            if self.db.execute("SELECT 1 FROM payroll_runs WHERE payroll_month=?",(month,)).fetchone(): raise APIError(409,"يوجد مسير لهذا الشهر.","duplicate_payroll_run")
+            employees=self.db.execute(employee_query(True)+" WHERE e.active=1 ORDER BY e.full_name").fetchall()
+            with self.db:
+                cur=self.db.execute("INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES(?,?,?,?)",(month,user["id"],stamp,stamp)); run_id=int(cur.lastrowid)
+                for employee in employees:
+                    basic=money_cents(employee["salary"] or 0,"salary")
+                    installment=self.db.execute("SELECT COALESCE(SUM(ai.amount_cents),0) FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id WHERE a.employee_id=? AND a.status='approved' AND ai.due_month=? AND ai.status='scheduled'",(employee["id"],month)).fetchone()[0]
+                    net=max(0,basic+allowances-deductions-int(installment))
+                    self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,allowances,deductions,int(installment),net))
+                audit(self.db,user["id"],"payroll.create","payroll_run",run_id,{"month":month,"employees":len(employees)})
+            self.send_json(201,{"run":self.payroll_payload(run_id)})
+
+        def api_payroll_run_get(self, run_id: int) -> None:
+            user=self.require_permission("salary.view")
+            if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"مسيرات الرواتب متاحة للإدارة المخولة فقط.","forbidden")
+            self.send_json(200,{"run":self.payroll_payload(run_id)})
+
+        def api_payroll_transition(self, run_id: int) -> None:
+            data=self.read_json(); target=str(data.get("status",data.get("action",""))); row=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
+            if not row: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
+            allowed={"draft":"review","review":"approved","approved":"paid"}
+            if allowed.get(row["status"])!=target: raise APIError(409,"انتقال حالة المسير غير صالح.","invalid_status")
+            permission={"review":"payroll.manage","approved":"payroll.approve","paid":"payroll.pay"}[target]; user=self.require_permission(permission)
+            if not self.has_privileged_people_access(user,"employee.view"): raise APIError(403,"اعتماد المسيرات متاح للإدارة المخولة فقط.","forbidden")
+            stamp=now_iso(); extra={}
+            if target=="approved": extra={"approved_by":user["id"],"approved_at":stamp}
+            if target=="paid": extra={"paid_by":user["id"],"paid_at":stamp}
+            values={"status":target,"updated_at":stamp}|extra
+            with self.db:
+                self.db.execute("UPDATE payroll_runs SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),run_id))
+                if target=="paid":
+                    self.db.execute("UPDATE advance_installments SET status='paid',payroll_item_id=(SELECT pi.id FROM payroll_items pi WHERE pi.run_id=? AND pi.employee_id=(SELECT a.employee_id FROM advances a WHERE a.id=advance_installments.advance_id)) WHERE due_month=? AND status='scheduled' AND advance_id IN (SELECT id FROM advances WHERE status='approved')",(run_id,row["payroll_month"]))
+                    self.db.execute("UPDATE advances SET status='completed',updated_at=? WHERE status='approved' AND NOT EXISTS (SELECT 1 FROM advance_installments ai WHERE ai.advance_id=advances.id AND ai.status='scheduled')",(stamp,))
+                audit(self.db,user["id"],f"payroll.{target}","payroll_run",run_id)
+            self.send_json(200,{"run":self.payroll_payload(run_id)})
+
+        def api_payroll_csv(self, run_id: int) -> None:
+            user=self.require_permission("salary.view")
+            if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"تصدير المسيرات متاح للإدارة المخولة فقط.","forbidden")
+            run=self.payroll_payload(run_id)
+            rows=[["الشهر",run["payroll_month"],"الحالة",run["status"]],["الرقم الوظيفي","الموظف","المسمى","الدرجة","الأساسي","البدلات","الاستقطاعات","قسط السلفة","الصافي"]]
+            rows += [[i["employee_no"],i["employee_name"],i["job_title"],i["job_grade"],f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["deductions"]:.2f}',f'{i["advance"]:.2f}',f'{i["net"]:.2f}'] for i in run["items"]]
+            self.send_csv(f'payroll-{run["payroll_month"]}.csv',rows)
+
+        def api_my_payslips(self) -> None:
+            employee_id=self.own_employee_id(); rows=self.db.execute("SELECT i.*,r.payroll_month,r.status FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE i.employee_id=? AND r.status IN ('approved','paid') ORDER BY r.payroll_month DESC",(employee_id,)).fetchall()
+            self.send_json(200,{"items":[dict(r)|{"basic":cents_value(r["basic_cents"]),"allowances":cents_value(r["allowances_cents"]),"deductions":cents_value(r["deductions_cents"]),"advance":cents_value(r["advance_cents"]),"net":cents_value(r["net_cents"])} for r in rows]})
+
+        def api_payslip_get(self, item_id: int) -> None:
+            row=self.db.execute("SELECT i.*,r.payroll_month,r.status FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE i.id=?",(item_id,)).fetchone()
+            if not row: raise APIError(404,"قسيمة الراتب غير موجودة.","not_found")
+            user=self.current_user(True); assert user is not None
+            if row["employee_id"]!=user.get("employee_id") and not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"لا يمكنك عرض هذه القسيمة.","forbidden")
+            self.send_json(200,{"payslip":dict(row)|{"basic":cents_value(row["basic_cents"]),"allowances":cents_value(row["allowances_cents"]),"deductions":cents_value(row["deductions_cents"]),"advance":cents_value(row["advance_cents"]),"net":cents_value(row["net_cents"])}})
+
+        def advance_payload(self, advance_id: int) -> dict[str, Any]:
+            row=self.db.execute("SELECT a.*,e.full_name,e.employee_no FROM advances a JOIN employees e ON e.id=a.employee_id WHERE a.id=?",(advance_id,)).fetchone()
+            if not row: raise APIError(404,"طلب السلفة غير موجود.","not_found")
+            installments=self.db.execute("SELECT * FROM advance_installments WHERE advance_id=? ORDER BY installment_no",(advance_id,)).fetchall()
+            return dict(row)|{"amount":cents_value(row["amount_cents"]),"installments":[dict(i)|{"amount":cents_value(i["amount_cents"])} for i in installments]}
+
+        def api_advances_get(self) -> None:
+            user=self.current_user(True); assert user is not None
+            if self.has_privileged_people_access(user,"advance.view"): rows=self.db.execute("SELECT id FROM advances ORDER BY created_at DESC").fetchall()
+            else: rows=self.db.execute("SELECT id FROM advances WHERE employee_id=? ORDER BY created_at DESC",(self.own_employee_id(),)).fetchall()
+            self.send_json(200,{"items":[self.advance_payload(r["id"]) for r in rows]})
+
+        def api_advances_post(self) -> None:
+            user=self.current_user(True); assert user is not None; employee_id=self.own_employee_id(); data=self.read_json(); amount=money_cents(data.get("amount"),"amount",Decimal("0.01")); months=as_int(data.get("months"),"months",1,6)
+            salary=self.db.execute("SELECT salary FROM employees WHERE id=?",(employee_id,)).fetchone()[0]
+            if amount>money_cents(Decimal(str(salary))*3,"policy_limit"): raise APIError(422,"المبلغ يتجاوز حد السياسة (ثلاثة رواتب).","advance_policy_limit")
+            if self.db.execute("SELECT 1 FROM advances WHERE employee_id=? AND status IN ('submitted','approved')",(employee_id,)).fetchone(): raise APIError(409,"لديك سلفة نشطة بالفعل.","active_advance_exists")
+            base, remainder=divmod(amount,months); schedule=[base]*(months-1)+[base+remainder]; today=local_now().date(); stamp=now_iso()
+            with self.db:
+                cur=self.db.execute("INSERT INTO advances(employee_id,amount_cents,months,reason,created_at,updated_at) VALUES(?,?,?,?,?,?)",(employee_id,amount,months,require_text(data,"reason",1000),stamp,stamp)); advance_id=int(cur.lastrowid)
+                for index,cents in enumerate(schedule,1):
+                    serial=today.year*12+(today.month-1)+index; due=f"{serial//12:04d}-{serial%12+1:02d}"
+                    self.db.execute("INSERT INTO advance_installments(advance_id,installment_no,due_month,amount_cents) VALUES(?,?,?,?)",(advance_id,index,due,cents))
+                audit(self.db,user["id"],"advance.submit","advance",advance_id,{"amount_cents":amount,"months":months})
+            self.send_json(201,{"advance":self.advance_payload(advance_id)})
+
+        def api_advance_decision(self, advance_id: int) -> None:
+            user=self.require_permission("advance.approve"); data=self.read_json(); action=str(data.get("action","")); row=self.db.execute("SELECT * FROM advances WHERE id=?",(advance_id,)).fetchone()
+            if not row: raise APIError(404,"طلب السلفة غير موجود.","not_found")
+            if row["status"]!="submitted": raise APIError(409,"تم اتخاذ قرار سابقاً.","invalid_status")
+            if user.get("employee_id")==row["employee_id"]: raise APIError(403,"لا يمكنك اعتماد سلفتك.","self_approval_forbidden")
+            if action not in {"approve","reject"}: raise APIError(422,"القرار غير صالح.","validation_error")
+            reason=optional_text(data,"reason",1000)
+            if action=="reject" and not reason: raise APIError(422,"سبب الرفض مطلوب.","validation_error")
+            status="approved" if action=="approve" else "rejected"; stamp=now_iso()
+            with self.db:
+                self.db.execute("UPDATE advances SET status=?,decided_by=?,decided_at=?,rejection_reason=?,updated_at=? WHERE id=?",(status,user["id"],stamp,reason if status=="rejected" else None,stamp,advance_id))
+                if status=="rejected": self.db.execute("UPDATE advance_installments SET status='cancelled' WHERE advance_id=?",(advance_id,))
+                audit(self.db,user["id"],f"advance.{status}","advance",advance_id,{"reason":reason})
+            self.send_json(200,{"advance":self.advance_payload(advance_id)})
+
+        # Operational employee lifecycle and live reports
+        def lifecycle_row(self, case_id: int) -> dict[str, Any]:
+            row=self.db.execute("SELECT c.*,e.full_name AS employee_name,u.display_name AS owner_name FROM lifecycle_cases c LEFT JOIN employees e ON e.id=c.employee_id LEFT JOIN users u ON u.id=c.owner_user_id WHERE c.id=?",(case_id,)).fetchone()
+            if not row: raise APIError(404,"عنصر دورة الموارد البشرية غير موجود.","not_found")
+            return dict(row)
+
+        def api_lifecycle_get(self) -> None:
+            self.require_permission("lifecycle.view"); conditions=[]; params=[]
+            for key in ("module","status"):
+                if self.query.get(key): conditions.append(f"c.{key}=?"); params.append(self.query[key])
+            where=" WHERE "+" AND ".join(conditions) if conditions else ""
+            rows=self.db.execute("SELECT c.*,e.full_name AS employee_name,u.display_name AS owner_name FROM lifecycle_cases c LEFT JOIN employees e ON e.id=c.employee_id LEFT JOIN users u ON u.id=c.owner_user_id"+where+" ORDER BY c.updated_at DESC",params).fetchall(); self.send_json(200,{"items":[dict(r) for r in rows]})
+
+        def api_lifecycle_post(self) -> None:
+            user=self.require_permission("lifecycle.manage"); data=self.read_json(); module=str(data.get("module","")); modules={"recruitment","onboarding","learning","benefits","offboarding"}
+            if module not in modules: raise APIError(422,"الوحدة التشغيلية غير صالحة.","validation_error")
+            employee_id=as_int(data["employee_id"],"employee_id",1) if data.get("employee_id") else None; owner=as_int(data["owner_user_id"],"owner_user_id",1) if data.get("owner_user_id") else user["id"]; due=parse_date(data["due_date"],"due_date").isoformat() if data.get("due_date") else None; stamp=now_iso()
+            with self.db:
+                cur=self.db.execute("INSERT INTO lifecycle_cases(module,title,employee_id,candidate_name,owner_user_id,due_date,notes,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(module,require_text(data,"title",220),employee_id,optional_text(data,"candidate_name",180),owner,due,optional_text(data,"notes",3000),user["id"],stamp,stamp)); audit(self.db,user["id"],"lifecycle.create","lifecycle_case",cur.lastrowid,{"module":module})
+            self.send_json(201,{"case":self.lifecycle_row(cur.lastrowid)})
+
+        def api_lifecycle_patch(self, case_id: int) -> None:
+            user=self.require_permission("lifecycle.manage"); original=self.lifecycle_row(case_id); data=self.read_json(); values={}
+            for key in ("title","candidate_name","notes"):
+                if key in data: values[key]=optional_text(data,key,3000)
+            if "status" in data:
+                if data["status"] not in {"open","in_progress","closed","cancelled"}: raise APIError(422,"الحالة غير صالحة.","validation_error")
+                values["status"]=data["status"]; values["closed_at"]=now_iso() if data["status"]=="closed" else None
+            if "employee_id" in data: values["employee_id"]=as_int(data["employee_id"],"employee_id",1) if data["employee_id"] else None
+            if "due_date" in data: values["due_date"]=parse_date(data["due_date"],"due_date").isoformat() if data["due_date"] else None
+            if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            values["updated_at"]=now_iso()
+            with self.db:
+                self.db.execute("UPDATE lifecycle_cases SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),case_id))
+                if values.get("status")=="closed" and original["module"]=="offboarding" and original.get("employee_id"):
+                    self.db.execute("UPDATE employees SET active=0,updated_at=? WHERE id=?",(now_iso(),original["employee_id"]))
+                    audit(self.db,user["id"],"employee.offboard","employee",original["employee_id"],{"lifecycle_case_id":case_id})
+                audit(self.db,user["id"],"lifecycle.update","lifecycle_case",case_id,values)
+            self.send_json(200,{"case":self.lifecycle_row(case_id)})
+
+        def api_lifecycle_delete(self, case_id: int) -> None:
+            user=self.require_permission("lifecycle.manage")
+            with self.db:
+                result=self.db.execute("DELETE FROM lifecycle_cases WHERE id=?",(case_id,))
+                if not result.rowcount: raise APIError(404,"العنصر غير موجود.","not_found")
+                audit(self.db,user["id"],"lifecycle.delete","lifecycle_case",case_id)
+            self.send_json(200,{"ok":True})
+
+        def report_summary(self) -> dict[str, Any]:
+            today=local_now().date().isoformat()
+            values={
+                "employees":self.db.execute("SELECT COUNT(*) FROM employees WHERE active=1").fetchone()[0],
+                "branches":self.db.execute("SELECT COUNT(*) FROM branches WHERE active=1").fetchone()[0],
+                "departments":self.db.execute("SELECT COUNT(*) FROM departments WHERE active=1").fetchone()[0],
+                "attendance_today":self.db.execute("SELECT COUNT(*) FROM attendance WHERE work_date=? AND check_in_at IS NOT NULL",(today,)).fetchone()[0],
+                "leave_pending":self.db.execute("SELECT COUNT(*) FROM leave_requests WHERE status='submitted'").fetchone()[0],
+                "overtime_pending":self.db.execute("SELECT COUNT(*) FROM overtime_requests WHERE status='submitted'").fetchone()[0],
+                "payroll_runs":self.db.execute("SELECT COUNT(*) FROM payroll_runs").fetchone()[0],
+                "payroll_net_cents":self.db.execute("SELECT COALESCE(SUM(i.net_cents),0) FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE r.status IN ('approved','paid')").fetchone()[0],
+            }
+            values["payroll_net"]=cents_value(values["payroll_net_cents"]); values["as_of"]=now_iso(); return values
+
+        def api_report_summary(self) -> None:
+            self.require_permission("report.view"); self.send_json(200,{"summary":self.report_summary()})
+
+        def api_report_summary_csv(self) -> None:
+            self.require_permission("report.view"); s=self.report_summary(); labels={"employees":"الموظفون النشطون","branches":"الفروع النشطة","departments":"الأقسام","attendance_today":"حضور اليوم","leave_pending":"طلبات الإجازة المعلقة","overtime_pending":"طلبات الإضافي المعلقة","payroll_runs":"مسيرات الرواتب","payroll_net":"صافي الرواتب المعتمدة"}; self.send_csv("hr-summary.csv",[["المؤشر","القيمة"]]+[[label,s[key]] for key,label in labels.items()])
+
+    return HRHandler
+
+
+class HRThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def make_server(db_path: str | Path = DEFAULT_DB, host: str = "127.0.0.1", port: int = 8765, static_root: str | Path = APP_DIR) -> HRThreadingHTTPServer:
+    resolved_db = Path(db_path).expanduser().resolve()
+    # Fail closed before opening a listening socket in production. In local
+    # development the legacy deterministic key remains available for existing
+    # single-user databases and test fixtures.
+    if os.environ.get("HR_ENV", "development").strip().lower() in {"prod", "production"}:
+        secret_key(resolved_db)
+    initialize_database(resolved_db)
+    handler = make_handler(resolved_db, Path(static_root).expanduser().resolve())
+    return HRThreadingHTTPServer((host, int(port)), handler)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="خادم منصة موارد البشرية")
+    parser.add_argument("--host", default=os.environ.get("HR_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("HR_PORT", "8765")))
+    parser.add_argument("--db", default=os.environ.get("HR_DB_PATH", str(DEFAULT_DB)))
+    args = parser.parse_args(argv)
+    server = make_server(args.db, args.host, args.port)
+    browser_host = "localhost" if args.host in {"127.0.0.1", "::1"} else args.host
+    print(f"منصة موارد تعمل على http://{browser_host}:{args.port}/")
+    print(f"قاعدة البيانات: {Path(args.db).expanduser().resolve()}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nتم إيقاف الخادم.")
+    finally:
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

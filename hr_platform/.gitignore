@@ -1,0 +1,30 @@
+# Runtime database and local uploads stay on the deployment machine.
+data/*
+!data/.gitkeep
+
+# Python/test artefacts
+__pycache__/
+tests/__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets and databases
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+*.pem
+*.key
+
+# Logs/editor files
+*.log
+.DS_Store
+.vscode/
+.idea/
+*.swp

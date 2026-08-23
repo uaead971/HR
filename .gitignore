@@ -1,0 +1,31 @@
+# Local runtime data and generated files
+hr_platform/data/*
+!hr_platform/data/.gitkeep
+hr_platform/__pycache__/
+hr_platform/tests/__pycache__/
+
+# Python caches and test artefacts
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite3
+*.db
+*.db-*
+*.pem
+*.key
+
+# Logs and operating-system/editor files
+*.log
+.DS_Store
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,26 @@
+name: Khaisha HR checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile Python sources
+        working-directory: hr_platform
+        run: python -m py_compile server.py tests/test_api.py
+      - name: Run integration tests
+        working-directory: hr_platform
+        run: python -m unittest -v tests.test_api
