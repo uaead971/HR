@@ -556,6 +556,19 @@ CREATE TABLE IF NOT EXISTS notification_recipients (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS document_expiry_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL,
+  expires_on TEXT NOT NULL,
+  notification_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(document_id, expires_on),
+  FOREIGN KEY (document_id) REFERENCES employee_documents(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_expiry_alerts_document ON document_expiry_alerts(document_id);
+
 CREATE TABLE IF NOT EXISTS salary_certificates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   certificate_no TEXT NOT NULL UNIQUE,

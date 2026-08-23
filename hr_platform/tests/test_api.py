@@ -1111,7 +1111,36 @@ class HRAPIEndToEndTests(unittest.TestCase):
             max(0, employee_inbox["unread_count"] - 1),
         )
 
-    def test_06_department_hierarchy_assignment_and_delete_guard(self):
+    def test_06_hr_document_expiry_notifications_are_deduplicated(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = hr.request(
+            "POST", "/api/employees",
+            {"employee_no": "EMP-EXP-90", "full_name": "موظف تنبيهات الوثائق", "email": "expiry-alerts@demo.ae", "job_title": "أخصائي عمليات", "job_grade": "G-07", "salary": 12000},
+            expected=201,
+        )["employee"]
+        tiny_png = "data:image/png;base64,iVBORw0KGgo="
+        today = date.today()
+        hr.request(
+            "POST", f"/api/employees/{employee['id']}/documents",
+            {"document_type": "contract", "title": "عقد قريب الانتهاء", "file_name": "contract.png", "data_url": tiny_png, "issued_on": (today - timedelta(days=300)).isoformat(), "expires_on": (today + timedelta(days=89)).isoformat()},
+            expected=201,
+        )
+        hr.request(
+            "POST", f"/api/employees/{employee['id']}/documents",
+            {"document_type": "passport", "title": "جواز قريب الانتهاء", "file_name": "passport.png", "data_url": tiny_png, "expires_on": (today + timedelta(days=30)).isoformat()},
+            expected=201,
+        )
+        first = hr.request("GET", "/api/notifications/inbox")["items"]
+        expiry_alerts = [row for row in first if row["title"].startswith("تنبيه:") and "موظف تنبيهات الوثائق" in row["body"]]
+        self.assertEqual(len(expiry_alerts), 2)
+        self.assertTrue(any("عقد العمل" in row["title"] and "89" in row["body"] for row in expiry_alerts))
+        self.assertTrue(any("جواز السفر" in row["body"] and "30" in row["body"] for row in expiry_alerts))
+        second = hr.request("GET", "/api/notifications/inbox")["items"]
+        self.assertEqual(len([row for row in second if row["title"].startswith("تنبيه:") and "موظف تنبيهات الوثائق" in row["body"]]), 2)
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM document_expiry_alerts").fetchone()[0], 2)
+
+    def test_07_department_hierarchy_assignment_and_delete_guard(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         employee = next(x for x in hr.request("GET", "/api/employees")["items"] if x["employee_no"] == "EMP-1024")
         branch = hr.request("GET", "/api/branches")["items"][0]

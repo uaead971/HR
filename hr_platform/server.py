@@ -135,6 +135,16 @@ DOCUMENT_TYPES = {
     "employee_file", "undertaking", "violation", "bank_document", "other", "general",
 }
 
+DOCUMENT_TYPE_LABELS_AR = {
+    "passport": "جواز السفر", "identity": "الهوية الإماراتية", "residency": "الإقامة",
+    "visa": "التأشيرة", "work_permit": "تصريح العمل", "contract": "عقد العمل",
+    "job_offer": "عرض العمل", "qualification": "المؤهل العلمي", "professional_certificate": "الشهادة المهنية",
+    "marriage_certificate": "عقد الزواج", "birth_certificate": "شهادة الميلاد", "good_conduct": "حسن السيرة",
+    "medical_exam": "الفحص الطبي", "health_insurance": "التأمين الصحي", "driving_license": "رخصة القيادة",
+    "employee_file": "ملف الموظف", "undertaking": "التعهد", "violation": "المخالفة", "bank_document": "وثيقة بنكية",
+    "personal_photo": "الصورة الشخصية", "other": "وثيقة أخرى", "general": "وثيقة عامة",
+}
+
 CUSTODY_CONDITIONS = {"new", "used_clean", "used_average", "used_damaged"}
 
 CARD_TEMPLATES = {"portrait_orbit", "executive_horizontal", "minimal_vertical"}
@@ -1223,6 +1233,55 @@ def create_internal_notification(
     return notification_id
 
 
+def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
+    """Create one HR inbox alert per document expiry date within the next 90 days."""
+    hr_users = db.execute(
+        "SELECT id,display_name FROM users WHERE role='hr' AND active=1 ORDER BY id"
+    ).fetchall()
+    if not hr_users:
+        return 0
+    sender_id = int(hr_users[0]["id"])
+    recipients = [int(row["id"]) for row in hr_users]
+    today = local_now().date()
+    expiry_limit = today + timedelta(days=90)
+    documents = db.execute(
+        """SELECT d.id,d.document_type,d.title,d.expires_on,e.full_name,e.employee_no
+             FROM employee_documents d
+             JOIN employees e ON e.id=d.employee_id
+            WHERE e.active=1 AND d.archived=0 AND d.no_expiry=0
+              AND d.expires_on BETWEEN ? AND ?
+            ORDER BY d.expires_on ASC,d.id ASC""",
+        (today.isoformat(), expiry_limit.isoformat()),
+    ).fetchall()
+    created = 0
+    for document in documents:
+        with db:
+            marker = db.execute(
+                "INSERT OR IGNORE INTO document_expiry_alerts(document_id,expires_on,created_at) VALUES(?,?,?)",
+                (document["id"], document["expires_on"], now_iso()),
+            )
+            if marker.rowcount != 1:
+                continue
+            days_remaining = (date.fromisoformat(document["expires_on"]) - today).days
+            document_label = DOCUMENT_TYPE_LABELS_AR.get(document["document_type"], document["title"] or "وثيقة")
+            title = "تنبيه: وثيقة تقترب من الانتهاء"
+            if document["document_type"] == "contract":
+                title = "تنبيه: عقد العمل يقترب من الانتهاء"
+            body = (
+                f"الموظف: {document['full_name']} ({document['employee_no']}). "
+                f"الوثيقة: {document_label}. تاريخ الانتهاء: {document['expires_on']} "
+                f"(متبقٍ {days_remaining} يوماً). يرجى اتخاذ الإجراء قبل انتهاء الصلاحية."
+            )
+            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            db.execute(
+                "UPDATE document_expiry_alerts SET notification_id=? WHERE document_id=? AND expires_on=?",
+                (notification_id, document["id"], document["expires_on"]),
+            )
+            audit(db, sender_id, "notification.document_expiry", "employee_document", document["id"], {"expires_on": document["expires_on"], "days_remaining": days_remaining, "notification_id": notification_id})
+            created += 1
+    return created
+
+
 def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     data = {
         "id": row["id"], "email": row["email"], "name": row["display_name"],
@@ -2202,6 +2261,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_executive_dashboard(self) -> None:
             user = self.require_permission("dashboard.view")
+            ensure_document_expiry_notifications(self.db)
             today = local_now().date(); date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to"); date_from = parse_date(self.query.get("date_from", (date_to-timedelta(days=29)).isoformat()), "date_from")
             if date_from > date_to or (date_to-date_from).days > 366: raise APIError(422,"نطاق التاريخ غير صالح أو يتجاوز سنة.","validation_error")
             conditions, params = self.executive_scope(user); where = " WHERE "+" AND ".join(conditions) if conditions else ""
@@ -2221,7 +2281,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             scope_join = (" AND "+" AND ".join(c.replace("e.","e.") for c in conditions)) if conditions else ""
             leave_pending = int(self.db.execute("SELECT COUNT(*) FROM leave_requests r JOIN employees e ON e.id=r.employee_id WHERE r.status='submitted'"+scope_join, params).fetchone()[0])
             overtime_pending = int(self.db.execute("SELECT COUNT(*) FROM overtime_requests r JOIN employees e ON e.id=r.employee_id WHERE r.status='submitted'"+scope_join, params).fetchone()[0])
-            expiry_limit = (today+timedelta(days=60)).isoformat()
+            expiry_limit = (today+timedelta(days=90)).isoformat()
             expiring_docs = int(self.db.execute("SELECT COUNT(*) FROM employee_documents d JOIN employees e ON e.id=d.employee_id WHERE d.archived=0 AND d.no_expiry=0 AND d.expires_on BETWEEN ? AND ?"+scope_join, (today.isoformat(),expiry_limit,*params)).fetchone()[0])
             new_employees = count("e.hire_date BETWEEN ? AND ?", (date_from.isoformat(),date_to.isoformat()))
             advance_active = int(self.db.execute("SELECT COUNT(*) FROM advances a JOIN employees e ON e.id=a.employee_id WHERE a.status IN ('submitted','approved')"+scope_join, params).fetchone()[0])
@@ -5605,6 +5665,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_inbox(self) -> None:
             user = self.current_user(True)
             assert user is not None
+            ensure_document_expiry_notifications(self.db)
             rows = self.db.execute(
                 """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
                           u.display_name AS sender_name,r.read_at
@@ -5620,6 +5681,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_unread_count(self) -> None:
             user = self.current_user(True)
             assert user is not None
+            ensure_document_expiry_notifications(self.db)
             count = self.db.execute(
                 """SELECT COUNT(*) FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
