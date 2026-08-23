@@ -628,6 +628,28 @@ CREATE TABLE IF NOT EXISTS employee_actions (
   FOREIGN KEY (closed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS employee_custody (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  asset_name TEXT NOT NULL,
+  asset_type TEXT NOT NULL DEFAULT '',
+  serial_number TEXT NOT NULL DEFAULT '',
+  received_on TEXT NOT NULL,
+  returned_on TEXT,
+  received_condition TEXT NOT NULL CHECK (received_condition IN ('new','used_clean','used_average','used_damaged')),
+  return_condition TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  created_by INTEGER NOT NULL,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
+  FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_employee_custody_employee ON employee_custody(employee_id, returned_on, received_on DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS payroll_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   payroll_month TEXT NOT NULL UNIQUE,

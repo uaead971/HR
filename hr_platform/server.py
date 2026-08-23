@@ -61,6 +61,8 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "employee.emergency.manage": "إدارة جهات اتصال الطوارئ للموظفين",
         "employee.team": "عرض أسماء وأرقام موظفي الفريق فقط", "department.manage": "إدارة الأقسام",
         "employee_document.manage": "إدارة وثائق الموظفين", "employee_action.manage": "إدارة المخالفات والتعهدات",
+        "employee_custody.view": "عرض سجل عُهد الموظفين", "employee_custody.manage": "إدارة عُهد الموظفين",
+        "employee_custody.print": "طباعة سجلات استلام وتسليم العُهد",
         "employee_report.view": "عرض تقرير الموظف الشامل", "employee_report.export": "طباعة وحفظ تقرير الموظف الشامل PDF",
         "org.view": "عرض المؤسسة", "org.manage": "إدارة هوية المؤسسة",
         "branch.view": "عرض الفروع", "branch.manage": "إدارة الفروع والنطاقات",
@@ -106,7 +108,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "salary.view", "attendance.view", "attendance.export", "shift.view", "shift.manage", "overtime.view",
         "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "evaluation.review", "evaluation.cycle.manage",
         "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
-        "employee_document.manage", "employee_action.manage", "payroll.manage", "payroll.approve", "payroll.pay",
+        "employee_document.manage", "employee_action.manage", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.manage", "payroll.approve", "payroll.pay",
         "advance.view", "advance.approve", "reference.manage", "lifecycle.view", "lifecycle.manage", "report.view",
         "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
         "employee_report.view", "employee_report.export",
@@ -114,7 +116,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "general_manager": {
         "org.view", "branch.view", "employee.view", "attendance.view", "shift.view",
         "overtime.view", "leave.view", "evaluation.view", "notification.send",
-        "salary.view", "salary_certificate.issue", "salary_certificate.print", "payroll.approve",
+        "salary.view", "salary_certificate.issue", "salary_certificate.print", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.approve",
         "advance.view", "advance.approve", "lifecycle.view", "report.view",
     },
     "manager": {
@@ -132,6 +134,8 @@ DOCUMENT_TYPES = {
     "good_conduct", "medical_exam", "health_insurance", "driving_license", "personal_photo",
     "employee_file", "undertaking", "violation", "bank_document", "other", "general",
 }
+
+CUSTODY_CONDITIONS = {"new", "used_clean", "used_average", "used_damaged"}
 
 CARD_TEMPLATES = {"portrait_orbit", "executive_horizontal", "minimal_vertical"}
 
@@ -1505,7 +1509,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("DELETE", r"/api/documents/(\d+)", self.api_document_delete),
                     ("GET", r"/api/employees/(\d+)/actions", self.api_employee_actions_get),
                     ("POST", r"/api/employees/(\d+)/actions", self.api_employee_actions_post),
+                    ("GET", r"/api/employees/(\d+)/custody", self.api_employee_custody_get),
+                    ("POST", r"/api/employees/(\d+)/custody", self.api_employee_custody_post),
                     ("PATCH", r"/api/employee-actions/(\d+)", self.api_employee_action_patch),
+                    ("PATCH", r"/api/employee-custody/(\d+)", self.api_employee_custody_patch),
+                    ("POST", r"/api/employee-custody/(\d+)/print", self.api_employee_custody_print),
                     ("GET", r"/api/employees/(\d+)/card", self.api_employee_card),
                     ("POST", r"/api/employees/(\d+)/card/print", self.api_employee_card_print),
                     ("GET", r"/api/cards/verify/([A-Za-z0-9-]+)", self.api_card_verify),
@@ -3492,7 +3500,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             issued_on=parse_date(data["issued_on"],"issued_on").isoformat() if data.get("issued_on") else None
             no_expiry=bool(data.get("no_expiry")); expires_on=parse_date(data["expires_on"],"expires_on").isoformat() if data.get("expires_on") and not no_expiry else None
             if issued_on and expires_on and expires_on<issued_on: raise APIError(422,"تاريخ الانتهاء يسبق تاريخ الإصدار.","validation_error")
-            if document_type=="contract" and (no_expiry or not expires_on): raise APIError(422,"تاريخ انتهاء عقد العمل مطلوب لإصدار البطاقة.","contract_expiry_required")
+            if document_type=="contract" and (not issued_on or no_expiry or not expires_on): raise APIError(422,"تاريخ بداية وانتهاء عقد العمل مطلوبان لإصدار البطاقة.","contract_dates_required")
             stamp=now_iso()
             with self.db:
                 cur=self.db.execute("""INSERT INTO employee_documents(employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at)
@@ -3522,9 +3530,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if key in data: values[key]=parse_date(data[key],key).isoformat() if data[key] else None
             for key in ("no_expiry","archived","visible_to_employee"):
                 if key in data: values[key]=1 if bool(data[key]) else 0
-            effective_type=values.get("document_type",row["document_type"]); effective_no_expiry=bool(values.get("no_expiry",row["no_expiry"])); effective_expiry=values.get("expires_on",row["expires_on"])
+            effective_type=values.get("document_type",row["document_type"]); effective_no_expiry=bool(values.get("no_expiry",row["no_expiry"])); effective_issued=values.get("issued_on",row["issued_on"]); effective_expiry=values.get("expires_on",row["expires_on"])
             if effective_no_expiry: values["expires_on"]=None; effective_expiry=None
-            if effective_type=="contract" and (effective_no_expiry or not effective_expiry): raise APIError(422,"تاريخ انتهاء عقد العمل مطلوب لإصدار البطاقة.","contract_expiry_required")
+            if effective_issued and effective_expiry and effective_expiry < effective_issued: raise APIError(422,"تاريخ انتهاء العقد يسبق تاريخ بدايته.","validation_error")
+            if effective_type=="contract" and (not effective_issued or effective_no_expiry or not effective_expiry): raise APIError(422,"تاريخ بداية وانتهاء عقد العمل مطلوبان لإصدار البطاقة.","contract_dates_required")
             if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
             values["updated_at"]=now_iso()
             with self.db:
@@ -3543,6 +3552,100 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not self.may_access_employee(employee_id): raise APIError(403,"لا يمكنك عرض سجل هذا الموظف.","forbidden")
             rows=self.db.execute("SELECT a.*,u.display_name AS created_by_name FROM employee_actions a LEFT JOIN users u ON u.id=a.created_by WHERE a.employee_id=? ORDER BY a.action_date DESC,a.id DESC",(employee_id,)).fetchall()
             self.send_json(200,{"items":[dict(r) for r in rows],"counts":{"violations":sum(r["action_type"]=="violation" for r in rows),"undertakings":sum(r["action_type"]=="undertaking" for r in rows),"open":sum(r["status"]=="open" for r in rows)}})
+
+        def custody_employee_access(self, employee_id: int) -> dict[str, Any]:
+            user = self.current_user(True)
+            assert user is not None
+            if user.get("employee_id") == employee_id:
+                return user
+            if has_permission(self.db, user, "employee_custody.view") and self.has_privileged_people_access(user, "employee.view"):
+                return user
+            raise APIError(403, "لا يمكنك عرض عُهد هذا الموظف.", "forbidden")
+
+        def serialize_custody(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            result = dict(row)
+            result["status"] = "returned" if result.get("returned_on") else "assigned"
+            result["status_label"] = "مُسلّمة" if result["status"] == "returned" else "على عهدة الموظف"
+            result["received_condition_label"] = {
+                "new": "جديد", "used_clean": "مستعمل نظيف", "used_average": "مستعمل بحالة متوسطة", "used_damaged": "مستعمل تالف",
+            }.get(result.get("received_condition"), result.get("received_condition", "—"))
+            return result
+
+        def parse_custody(self, data: dict[str, Any], current: sqlite3.Row | None = None) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            for key, limit in (("asset_name", 180), ("asset_type", 120), ("serial_number", 180), ("return_condition", 500), ("notes", 2000)):
+                if current is not None and key not in data:
+                    values[key] = current[key]
+                elif key == "asset_name":
+                    values[key] = require_text(data, key, limit)
+                else:
+                    values[key] = optional_text(data, key, limit)
+            condition = data.get("received_condition", current["received_condition"] if current is not None else "")
+            if condition not in CUSTODY_CONDITIONS:
+                raise APIError(422, "حالة العهدة عند الاستلام غير صالحة.", "validation_error", {"field": "received_condition"})
+            values["received_condition"] = condition
+            received_value = data.get("received_on", current["received_on"] if current is not None else None)
+            if not received_value:
+                raise APIError(422, "تاريخ استلام العهدة مطلوب.", "validation_error", {"field": "received_on"})
+            values["received_on"] = parse_date(received_value, "received_on").isoformat()
+            returned_value = data.get("returned_on", current["returned_on"] if current is not None else None)
+            values["returned_on"] = parse_date(returned_value, "returned_on").isoformat() if returned_value else None
+            if values["returned_on"] and values["returned_on"] < values["received_on"]:
+                raise APIError(422, "تاريخ تسليم العهدة لا يمكن أن يسبق تاريخ الاستلام.", "validation_error", {"field": "returned_on"})
+            if values["returned_on"] and not values["return_condition"]:
+                raise APIError(422, "أدخل الحالة عند تسليم العهدة.", "return_condition_required")
+            return values
+
+        def api_employee_custody_get(self, employee_id: int) -> None:
+            self.custody_employee_access(employee_id)
+            rows = self.db.execute(
+                "SELECT c.*,u.display_name AS created_by_name FROM employee_custody c LEFT JOIN users u ON u.id=c.created_by WHERE c.employee_id=? ORDER BY c.received_on DESC,c.id DESC",
+                (employee_id,),
+            ).fetchall()
+            self.send_json(200, {"items": [self.serialize_custody(row) for row in rows], "counts": {"total": len(rows), "assigned": sum(not row["returned_on"] for row in rows), "returned": sum(bool(row["returned_on"]) for row in rows)}})
+
+        def api_employee_custody_post(self, employee_id: int) -> None:
+            user = self.require_permission("employee_custody.manage")
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            values = self.parse_custody(self.read_json())
+            stamp = now_iso()
+            with self.db:
+                cur = self.db.execute(
+                    """INSERT INTO employee_custody(employee_id,asset_name,asset_type,serial_number,received_on,returned_on,received_condition,return_condition,notes,created_by,updated_by,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (employee_id, values["asset_name"], values["asset_type"], values["serial_number"], values["received_on"], values["returned_on"], values["received_condition"], values["return_condition"], values["notes"], user["id"], user["id"], stamp, stamp),
+                )
+                audit(self.db, user["id"], "employee_custody.create", "employee_custody", cur.lastrowid, {"employee_id": employee_id, "asset_type": values["asset_type"]})
+            row = self.db.execute("SELECT * FROM employee_custody WHERE id=?", (cur.lastrowid,)).fetchone()
+            self.send_json(201, {"custody": self.serialize_custody(row)})
+
+        def api_employee_custody_patch(self, custody_id: int) -> None:
+            user = self.require_permission("employee_custody.manage")
+            row = self.db.execute("SELECT * FROM employee_custody WHERE id=?", (custody_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "سجل العهدة غير موجود.", "not_found")
+            values = self.parse_custody(self.read_json(), row)
+            values.update({"updated_by": user["id"], "updated_at": now_iso()})
+            with self.db:
+                self.db.execute("UPDATE employee_custody SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), custody_id))
+                audit(self.db, user["id"], "employee_custody.update", "employee_custody", custody_id, {"employee_id": row["employee_id"], "returned": bool(values.get("returned_on"))})
+            self.send_json(200, {"custody": self.serialize_custody(self.db.execute("SELECT * FROM employee_custody WHERE id=?", (custody_id,)).fetchone())})
+
+        def api_employee_custody_print(self, custody_id: int) -> None:
+            user = self.require_permission("employee_custody.print")
+            row = self.db.execute("SELECT c.*,e.full_name AS employee_name,e.employee_no,o.display_name AS organization_name,o.legal_name AS organization_legal_name,o.logo_data FROM employee_custody c JOIN employees e ON e.id=c.employee_id JOIN organization o ON o.id=1 WHERE c.id=?", (custody_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "سجل العهدة غير موجود.", "not_found")
+            data = self.read_json() if int(self.headers.get("Content-Length", "0") or 0) > 0 else {}
+            print_type = str(data.get("print_type", "receipt"))
+            if print_type not in {"receipt", "return"}:
+                raise APIError(422, "نوع سجل الطباعة غير صالح.", "validation_error", {"field": "print_type"})
+            if print_type == "return" and not row["returned_on"]:
+                raise APIError(409, "لا يمكن طباعة تسليم عهدة قبل تسجيل تاريخ الإرجاع.", "return_not_recorded")
+            with self.db:
+                audit(self.db, user["id"], "employee_custody.print", "employee_custody", custody_id, {"print_type": print_type, "employee_id": row["employee_id"]})
+            self.send_json(200, {"custody": self.serialize_custody(row), "print_type": print_type, "organization": {"display_name": row["organization_name"], "legal_name": row["organization_legal_name"], "logo_data": row["logo_data"]}})
 
         def api_employee_actions_post(self, employee_id: int) -> None:
             user=self.require_permission("employee_action.manage"); data=self.read_json(); action_type=str(data.get("action_type",""))
@@ -3578,13 +3681,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             organization = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
             org_data = serialize_org(organization)
             org_data.pop("stamp_data", None)
-            contract=self.db.execute("SELECT * FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY CASE WHEN expires_on IS NULL THEN 1 ELSE 0 END,expires_on DESC,id DESC LIMIT 1",(employee_id,)).fetchone()
+            contracts=self.db.execute("SELECT * FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC",(employee_id,)).fetchall()
             today=local_now().date(); employee_data=normalize_employee(employee); assert employee_data is not None
+            def contract_date(row: sqlite3.Row, key: str) -> date | None:
+                try: return date.fromisoformat(row[key]) if row[key] else None
+                except (TypeError, ValueError): return None
+            contract=next((row for row in contracts if contract_date(row,"issued_on") and contract_date(row,"expires_on") and contract_date(row,"issued_on") <= today <= contract_date(row,"expires_on")), None)
+            contract=contract or next((row for row in contracts if contract_date(row,"issued_on") and contract_date(row,"issued_on") > today), None) or (contracts[0] if contracts else None)
             if not employee_data["active"]: status,status_label,reason,valid_until="closed","مغلقة","تم إنهاء خدمة الموظف، ولا يمكن إصدار بطاقة جديدة.",None
-            elif contract is None: status,status_label,reason,valid_until="not_issuable","غير قابلة للإصدار","أضف عقد عمل سارياً بتاريخ انتهاء لإصدار البطاقة.",None
+            elif contract is None: status,status_label,reason,valid_until="not_issuable","غير قابلة للإصدار","أضف عقد عمل بتاريخ بداية وانتهاء لإصدار البطاقة.",None
             else:
-                valid_until=contract["expires_on"]; expired=not valid_until or date.fromisoformat(valid_until)<today
-                status,status_label,reason=("expired","منتهية","عقد العمل المرتبط بالبطاقة منتهٍ.") if expired else ("active","سارية","")
+                start_date=contract_date(contract,"issued_on"); end_date=contract_date(contract,"expires_on"); valid_until=contract["expires_on"]
+                if not start_date or not end_date:
+                    status,status_label,reason="not_issuable","غير قابلة للإصدار","يجب إدخال تاريخ بداية ونهاية عقد العمل."
+                elif today < start_date:
+                    status,status_label,reason="not_started","لم يبدأ العقد بعد",f"تبدأ صلاحية البطاقة في {contract['issued_on']}."
+                elif today > end_date:
+                    status,status_label,reason="expired","منتهية","عقد العمل المرتبط بالبطاقة منتهٍ."
+                else:
+                    status,status_label,reason="active","سارية", ""
             reference=f"CARD-{employee_data['employee_no']}-{employee_id:06d}"
             languages=self.employee_languages(employee_id)
             employee_data["languages"]=languages
@@ -3597,7 +3712,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             design={"template":template,"orientation":orientation,"dimensions_mm":dimensions,"primary_color":org_data.get("card_primary_color") or "#123d34","accent_color":org_data.get("card_accent_color") or "#c6a15b","back_instructions":instructions,"contact_phone":contact_phone,"contact_email":contact_email}
             front={"side":"front","fields":["organization","photo","full_name","job_title","employee_no","department","job_grade","languages","valid_until","reference"]}
             back={"side":"back","fields":["organization","instructions","contact_phone","contact_email","reference","status","valid_until","verification_path"]}
-            return {"employee": employee_data, "organization": org_data,"status":status,"status_label":status_label,"reason":reason,"valid_until":valid_until,"can_print":status=="active","verification_reference":reference,"verification_path":f"/api/cards/verify/{reference}","contract_document_id":contract["id"] if contract else None,"languages":languages,"design":design,"faces":{"front":front,"back":back}}
+            return {"employee": employee_data, "organization": org_data,"status":status,"status_label":status_label,"reason":reason,"valid_from":contract["issued_on"] if contract else None,"valid_until":valid_until,"can_print":status=="active","verification_reference":reference,"verification_path":f"/api/cards/verify/{reference}","contract_document_id":contract["id"] if contract else None,"languages":languages,"design":design,"faces":{"front":front,"back":back}}
 
         def api_employee_card(self, employee_id: int) -> None:
             if not self.may_access_employee(employee_id):
@@ -3622,7 +3737,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "لا يمكنك التحقق من بطاقة موظف آخر.", "forbidden")
             card=self.employee_card_payload(employee_id)
             if not hmac.compare_digest(card["verification_reference"],reference): raise APIError(404,"مرجع البطاقة غير موجود.","not_found")
-            self.send_json(200,{"verification":{"reference":reference,"status":card["status"],"status_label":card["status_label"],"valid_until":card["valid_until"],"employee_no":card["employee"]["employee_no"],"full_name":card["employee"]["full_name"],"organization":card["organization"]["display_name"]}})
+            self.send_json(200,{"verification":{"reference":reference,"status":card["status"],"status_label":card["status_label"],"valid_from":card["valid_from"],"valid_until":card["valid_until"],"employee_no":card["employee"]["employee_no"],"full_name":card["employee"]["full_name"],"organization":card["organization"]["display_name"]}})
 
         def api_my_card(self) -> None:
             self.send_json(200, {"card": self.employee_card_payload(self.own_employee_id())})

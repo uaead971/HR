@@ -1290,7 +1290,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         contract = hr.request(
             "POST", f"/api/employees/{employee['id']}/documents",
             {"document_type": "contract", "title": "عقد العمل المعتمد", "file_name": "contract.png",
-             "data_url": "data:image/png;base64,iVBORw0KGgo=", "expires_on": (date.today() + timedelta(days=120)).isoformat()},
+             "data_url": "data:image/png;base64,iVBORw0KGgo=", "issued_on": (date.today() - timedelta(days=10)).isoformat(), "expires_on": (date.today() + timedelta(days=120)).isoformat()},
             expected=201,
         )["document"]
         card = hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]
@@ -1320,7 +1320,46 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertFalse(closed["can_print"])
         hr.request("POST", f"/api/employees/{employee['id']}/card/print", {}, expected=409)
 
-    def test_15_v44_organization_views_share_source_and_support_filters(self):
+    def test_15_v58_contract_window_and_employee_custody_records(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = hr.request(
+            "POST", "/api/employees",
+            {"employee_no": "EMP-V58", "full_name": "موظف عهدة واختبار", "email": "custody-v58@demo.ae",
+             "job_title": "أخصائي عمليات", "job_grade": "G-07", "salary": 12000}, expected=201,
+        )["employee"]
+        start = date.today() + timedelta(days=3)
+        contract = hr.request(
+            "POST", f"/api/employees/{employee['id']}/documents",
+            {"document_type": "contract", "title": "عقد مستقبلي", "file_name": "contract.png",
+             "data_url": "data:image/png;base64,iVBORw0KGgo=", "issued_on": start.isoformat(),
+             "expires_on": (start + timedelta(days=365)).isoformat()}, expected=201,
+        )["document"]
+        future_card = hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]
+        self.assertEqual(future_card["status"], "not_started")
+        self.assertEqual(future_card["valid_from"], contract["issued_on"])
+        hr.request("POST", f"/api/employees/{employee['id']}/card/print", {}, expected=409)
+        hr.request("PATCH", f"/api/documents/{contract['id']}", {"issued_on": date.today().isoformat()})
+        active_card = hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]
+        self.assertEqual(active_card["status"], "active")
+        custody = hr.request(
+            "POST", f"/api/employees/{employee['id']}/custody",
+            {"asset_name": "هاتف متحرك", "asset_type": "iPhone", "serial_number": "sdfd87f8dsfuufafds8fds8f",
+             "received_on": date.today().isoformat(), "received_condition": "new", "notes": "اختبار"}, expected=201,
+        )["custody"]
+        self.assertEqual(custody["status"], "assigned")
+        listed = hr.request("GET", f"/api/employees/{employee['id']}/custody")
+        self.assertEqual(listed["counts"]["assigned"], 1)
+        receipt = hr.request("POST", f"/api/employee-custody/{custody['id']}/print", {})
+        self.assertEqual(receipt["print_type"], "receipt")
+        hr.request("POST", f"/api/employee-custody/{custody['id']}/print", {"print_type": "return"}, expected=409)
+        returned = hr.request(
+            "PATCH", f"/api/employee-custody/{custody['id']}",
+            {"returned_on": (date.today() + timedelta(days=10)).isoformat(), "return_condition": "تم التسليم بحالة جيدة"},
+        )["custody"]
+        self.assertEqual(returned["status"], "returned")
+        self.assertEqual(hr.request("POST", f"/api/employee-custody/{custody['id']}/print", {"print_type": "return"})["print_type"], "return")
+
+    def test_16_v44_organization_views_share_source_and_support_filters(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         payloads = [hr.request("GET", f"/api/org/hierarchy?view={view}") for view in ("hierarchical", "grid", "sequential")]
         id_sets = [{row["id"] for row in payload["employees"]} for payload in payloads]
@@ -1442,7 +1481,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             {
                 "document_type": "contract", "title": "عقد عمل اختبار V5.0",
                 "file_name": "contract.png", "data_url": "data:image/png;base64,iVBORw0KGgo=",
-                "expires_on": valid_until, "visible_to_employee": True,
+                "issued_on": date.today().isoformat(), "expires_on": valid_until, "visible_to_employee": True,
             }, expected=201,
         )
         active_card = hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]
