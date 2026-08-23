@@ -4305,6 +4305,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             contract_dates = self.parse_contract_dates(data)
             languages = self.parse_languages(data["languages"]) if "languages" in data else []
             stamp = now_iso()
+            account_info: dict[str, Any] | None = None
             columns = list(values) + ["created_at", "updated_at"]
             try:
                 with self.db:
@@ -4326,10 +4327,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         if role not in ROLE_PERMISSIONS:
                             raise APIError(422, "الدور غير صالح.", "validation_error")
                         digest, salt = password_record(password)
-                        self.db.execute(
+                        account_cursor = self.db.execute(
                             "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                             (email, values["full_name"], role, digest, salt, employee_id, stamp, stamp),
                         )
+                        account_info = {"id": int(account_cursor.lastrowid), "email": email, "role": role}
                     for leave in self.db.execute("SELECT id,code,annual_entitlement FROM leave_types WHERE active=1"):
                         # Annual paid leave is earned from service, never granted
                         # as an opening balance when a profile is created.
@@ -4346,7 +4348,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee = normalize_employee(row)
             assert employee is not None
             employee["languages"] = self.employee_languages(employee_id)
-            self.send_json(201, {"employee": employee})
+            self.send_json(201, {"employee": employee, "account": account_info})
 
         def api_employee_get(self, employee_id: int) -> None:
             user = self.current_user(True)
