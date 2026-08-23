@@ -663,6 +663,22 @@ CREATE TABLE IF NOT EXISTS employee_custody (
 
 CREATE INDEX IF NOT EXISTS idx_employee_custody_employee ON employee_custody(employee_id, returned_on, received_on DESC, id DESC);
 
+CREATE TABLE IF NOT EXISTS employee_custody_photos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  custody_id INTEGER NOT NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('received','returned')),
+  file_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  data_url TEXT NOT NULL,
+  caption TEXT NOT NULL DEFAULT '',
+  uploaded_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (custody_id) REFERENCES employee_custody(id) ON DELETE CASCADE,
+  FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_employee_custody_photos_stage ON employee_custody_photos(custody_id, stage, id);
+
 CREATE TABLE IF NOT EXISTS payroll_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   payroll_month TEXT NOT NULL UNIQUE,

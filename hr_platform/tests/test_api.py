@@ -1349,7 +1349,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertFalse(closed["can_print"])
         hr.request("POST", f"/api/employees/{employee['id']}/card/print", {}, expected=409)
 
-    def test_15_profile_contract_dates_create_and_update_card_window(self):
+    def test_profile_contract_dates_create_and_update_card_window(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         suffix = uuid.uuid4().hex[:8]
         start = date.today() - timedelta(days=5)
@@ -1398,9 +1398,12 @@ class HRAPIEndToEndTests(unittest.TestCase):
         custody = hr.request(
             "POST", f"/api/employees/{employee['id']}/custody",
             {"asset_name": "هاتف متحرك", "asset_type": "iPhone", "serial_number": "sdfd87f8dsfuufafds8fds8f",
-             "received_on": date.today().isoformat(), "received_condition": "new", "notes": "اختبار"}, expected=201,
+             "received_on": date.today().isoformat(), "received_condition": "new", "notes": "اختبار",
+             "received_photos": [{"file_name": "receipt.png", "data_url": "data:image/png;base64,iVBORw0KGgo=", "caption": "الجهاز عند الاستلام"}]}, expected=201,
         )["custody"]
         self.assertEqual(custody["status"], "assigned")
+        self.assertEqual(custody["received_photo_count"], 1)
+        self.assertEqual(custody["return_photo_count"], 0)
         listed = hr.request("GET", f"/api/employees/{employee['id']}/custody")
         self.assertEqual(listed["counts"]["assigned"], 1)
         receipt = hr.request("POST", f"/api/employee-custody/{custody['id']}/print", {})
@@ -1408,9 +1411,14 @@ class HRAPIEndToEndTests(unittest.TestCase):
         hr.request("POST", f"/api/employee-custody/{custody['id']}/print", {"print_type": "return"}, expected=409)
         returned = hr.request(
             "PATCH", f"/api/employee-custody/{custody['id']}",
-            {"returned_on": (date.today() + timedelta(days=10)).isoformat(), "return_condition": "تم التسليم بحالة جيدة"},
+            {"returned_on": (date.today() + timedelta(days=10)).isoformat(), "return_condition": "تم التسليم بحالة جيدة",
+             "return_photos": [{"file_name": "return.png", "data_url": "data:image/png;base64,iVBORw0KGgo=", "caption": "خدش بسيط عند التسليم"}]},
         )["custody"]
         self.assertEqual(returned["status"], "returned")
+        self.assertEqual(returned["received_photo_count"], 1)
+        self.assertEqual(returned["return_photo_count"], 1)
+        self.assertEqual(returned["received_photos"][0]["caption"], "الجهاز عند الاستلام")
+        self.assertEqual(returned["return_photos"][0]["caption"], "خدش بسيط عند التسليم")
         self.assertEqual(hr.request("POST", f"/api/employee-custody/{custody['id']}/print", {"print_type": "return"})["print_type"], "return")
 
     def test_16_v44_organization_views_share_source_and_support_filters(self):

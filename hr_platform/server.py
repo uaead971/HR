@@ -3696,7 +3696,43 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             result["received_condition_label"] = {
                 "new": "جديد", "used_clean": "مستعمل نظيف", "used_average": "مستعمل بحالة متوسطة", "used_damaged": "مستعمل تالف",
             }.get(result.get("received_condition"), result.get("received_condition", "—"))
+            photos = self.db.execute(
+                "SELECT id,stage,file_name,mime_type,data_url,caption,uploaded_by,created_at FROM employee_custody_photos WHERE custody_id=? ORDER BY id",
+                (result["id"],),
+            ).fetchall()
+            result["received_photos"] = [dict(photo) for photo in photos if photo["stage"] == "received"]
+            result["return_photos"] = [dict(photo) for photo in photos if photo["stage"] == "returned"]
+            result["received_photo_count"] = len(result["received_photos"])
+            result["return_photo_count"] = len(result["return_photos"])
             return result
+
+        def parse_custody_photos(self, data: dict[str, Any], key: str) -> list[dict[str, str]] | None:
+            if key not in data:
+                return None
+            raw = data.get(key)
+            if raw in (None, ""):
+                return []
+            if not isinstance(raw, list) or len(raw) > 6:
+                raise APIError(422, "يمكن إرفاق ست صور كحد أقصى لكل مرحلة.", "validation_error", {"field": key})
+            photos: list[dict[str, str]] = []
+            for index, item in enumerate(raw):
+                if not isinstance(item, dict):
+                    raise APIError(422, "بيانات صورة العهدة غير صالحة.", "validation_error", {"field": key, "index": index})
+                data_url = validate_data_url(item.get("data_url"), "صورة العهدة", ("image/png", "image/jpeg", "image/webp"), 2_000_000)
+                assert data_url is not None
+                mime_type = data_url[5:data_url.index(";")]
+                suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[mime_type]
+                file_name = optional_text(item, "file_name", 240) or f"custody-{key}-{index + 1}{suffix}"
+                if Path(file_name).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+                    file_name = f"custody-{key}-{index + 1}{suffix}"
+                photos.append({"file_name": file_name, "mime_type": mime_type, "data_url": data_url, "caption": optional_text(item, "caption", 500)})
+            return photos
+
+        def insert_custody_photos(self, custody_id: int, stage: str, photos: list[dict[str, str]], user_id: int, stamp: str) -> None:
+            self.db.executemany(
+                "INSERT INTO employee_custody_photos(custody_id,stage,file_name,mime_type,data_url,caption,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                [(custody_id, stage, photo["file_name"], photo["mime_type"], photo["data_url"], photo["caption"], user_id, stamp) for photo in photos],
+            )
 
         def parse_custody(self, data: dict[str, Any], current: sqlite3.Row | None = None) -> dict[str, Any]:
             values: dict[str, Any] = {}
@@ -3735,7 +3771,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.require_permission("employee_custody.manage")
             if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
                 raise APIError(404, "الموظف غير موجود.", "not_found")
-            values = self.parse_custody(self.read_json())
+            data = self.read_json()
+            values = self.parse_custody(data)
+            received_photos = self.parse_custody_photos(data, "received_photos") or []
+            return_photos = self.parse_custody_photos(data, "return_photos") or []
+            if return_photos and not values["returned_on"]:
+                raise APIError(422, "أدخل تاريخ التسليم قبل إرفاق صور التسليم.", "return_date_required")
             stamp = now_iso()
             with self.db:
                 cur = self.db.execute(
@@ -3743,6 +3784,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (employee_id, values["asset_name"], values["asset_type"], values["serial_number"], values["received_on"], values["returned_on"], values["received_condition"], values["return_condition"], values["notes"], user["id"], user["id"], stamp, stamp),
                 )
+                self.insert_custody_photos(cur.lastrowid, "received", received_photos, user["id"], stamp)
+                self.insert_custody_photos(cur.lastrowid, "returned", return_photos, user["id"], stamp)
                 audit(self.db, user["id"], "employee_custody.create", "employee_custody", cur.lastrowid, {"employee_id": employee_id, "asset_type": values["asset_type"]})
             row = self.db.execute("SELECT * FROM employee_custody WHERE id=?", (cur.lastrowid,)).fetchone()
             self.send_json(201, {"custody": self.serialize_custody(row)})
@@ -3752,10 +3795,21 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             row = self.db.execute("SELECT * FROM employee_custody WHERE id=?", (custody_id,)).fetchone()
             if row is None:
                 raise APIError(404, "سجل العهدة غير موجود.", "not_found")
-            values = self.parse_custody(self.read_json(), row)
+            data = self.read_json()
+            values = self.parse_custody(data, row)
+            received_photos = self.parse_custody_photos(data, "received_photos")
+            return_photos = self.parse_custody_photos(data, "return_photos")
+            if return_photos and not values["returned_on"]:
+                raise APIError(422, "أدخل تاريخ التسليم قبل إرفاق صور التسليم.", "return_date_required")
             values.update({"updated_by": user["id"], "updated_at": now_iso()})
             with self.db:
                 self.db.execute("UPDATE employee_custody SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), custody_id))
+                if received_photos is not None:
+                    self.db.execute("DELETE FROM employee_custody_photos WHERE custody_id=? AND stage='received'", (custody_id,))
+                    self.insert_custody_photos(custody_id, "received", received_photos, user["id"], values["updated_at"])
+                if return_photos is not None:
+                    self.db.execute("DELETE FROM employee_custody_photos WHERE custody_id=? AND stage='returned'", (custody_id,))
+                    self.insert_custody_photos(custody_id, "returned", return_photos, user["id"], values["updated_at"])
                 audit(self.db, user["id"], "employee_custody.update", "employee_custody", custody_id, {"employee_id": row["employee_id"], "returned": bool(values.get("returned_on"))})
             self.send_json(200, {"custody": self.serialize_custody(self.db.execute("SELECT * FROM employee_custody WHERE id=?", (custody_id,)).fetchone())})
 
