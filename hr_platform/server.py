@@ -3294,7 +3294,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         employee_id, "contract", "عقد العمل", "", "", start, end, 0,
-                        "contract-record.txt", "text/plain", "data:text/plain;base64,Q29udHJhY3QgZGF0YSByZWNvcmQ=",
+                        "contract-record.png", "image/png", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                         "سجل عقد العمل أُنشئ من حقول بيانات الموظف.", 0, 1, user_id, stamp, stamp,
                     ),
                 )
