@@ -1619,6 +1619,12 @@ def initialize_database(db_path: Path) -> None:
                     "manager_comment": "TEXT NOT NULL DEFAULT ''",
                     "manager_decided_by": "INTEGER",
                     "manager_decided_at": "TEXT",
+                    "start_time": "TEXT",
+                    "end_time": "TEXT",
+                    "hours": "REAL NOT NULL DEFAULT 0",
+                },
+                "leave_types": {
+                    "max_hours": "REAL NOT NULL DEFAULT 0",
                 },
                 "evaluation_cycles": {
                     "period_start": "TEXT",
@@ -1861,15 +1867,17 @@ def initialize_database(db_path: Path) -> None:
                             (emp_id, shift_id, "2023-01-01", admin_user, stamp),
                         )
             leave_seed = [
-                ("annual", "إجازة سنوية", 30, 0, 0, 1),
-                ("sick", "إجازة مرضية", 90, 0, 1, 1),
-                ("parental", "إجازة والدية", 5, 0, 1, 1),
-                ("bereavement", "إجازة حداد", 5, 0, 1, 1),
-                ("study", "إجازة دراسية", 10, 7, 1, 1),
-                ("unpaid", "إجازة بدون راتب", 0, 7, 0, 0),
+                ("annual", "إجازة سنوية", 30, 0, 0, 1, 0),
+                ("sick", "إجازة مرضية", 90, 0, 1, 1, 0),
+                ("maternity", "إجازة أمومة", 60, 0, 1, 1, 0),
+                ("parental", "إجازة والدية", 5, 0, 1, 1, 0),
+                ("bereavement", "إجازة حداد", 5, 0, 1, 1, 0),
+                ("study", "إجازة دراسية", 10, 7, 1, 1, 0),
+                ("unpaid", "إجازة بدون راتب", 0, 7, 0, 0, 0),
+                ("work_permission", "ترخيص خلال ساعات العمل (حتى ساعتين)", 0, 0, 0, 1, 2),
             ]
             for values in leave_seed:
-                db.execute("INSERT OR IGNORE INTO leave_types(code,name,annual_entitlement,min_notice_days,requires_attachment,paid) VALUES(?,?,?,?,?,?)", values)
+                db.execute("INSERT OR IGNORE INTO leave_types(code,name,annual_entitlement,min_notice_days,requires_attachment,paid,max_hours) VALUES(?,?,?,?,?,?,?)", values)
             current_year = local_now().year
             for emp_id in employee_ids.values():
                 for leave in db.execute("SELECT id,annual_entitlement FROM leave_types WHERE active=1").fetchall():
@@ -3344,15 +3352,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             departments = [dict(r) for r in self.db.execute("SELECT d.*,b.name AS branch_name,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id ORDER BY d.name")]
             employees = [normalize_employee(r) for r in self.db.execute(employee_query(False) + " ORDER BY e.full_name")]
             by_id = {e["id"]: e for e in employees if e}
+            department_managers = {int(d["id"]): int(d["manager_employee_id"]) for d in departments if d.get("manager_employee_id")}
             flat = []
             for employee in employees:
                 if not employee:
                     continue
-                chain, seen, manager_id = [], set(), employee.get("manager_id")
+                # A department head is the effective direct manager when an
+                # employee has no explicit manager_id. This keeps the
+                # hierarchy useful even when only the department assignment
+                # was maintained by HR.
+                effective_manager_id = employee.get("manager_id") or department_managers.get(int(employee.get("department_id") or 0))
+                if effective_manager_id and int(effective_manager_id) == int(employee["id"]):
+                    effective_manager_id = None
+                employee = employee | {"manager_id": effective_manager_id}
+                chain, seen, manager_id = [], set(), effective_manager_id
                 while manager_id and manager_id not in seen and manager_id in by_id:
                     seen.add(manager_id); manager = by_id[manager_id]
                     chain.append({"id": manager["id"], "full_name": manager["full_name"], "job_title": manager["job_title"]})
-                    manager_id = manager.get("manager_id")
+                    next_manager = manager.get("manager_id") or department_managers.get(int(manager.get("department_id") or 0))
+                    manager_id = None if next_manager and int(next_manager) == int(manager["id"]) else next_manager
                 flat.append(employee | {"manager_chain": chain})
             branch_filter=self.query.get("branch_id"); department_filter=self.query.get("department_id"); search=self.query.get("q","").strip().casefold()
             if branch_filter: flat=[e for e in flat if str(e.get("branch_id") or "")==branch_filter]
@@ -3378,16 +3396,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(201,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(cur.lastrowid,)).fetchone())})
 
         def api_job_grade_patch(self, grade_id: int) -> None:
-            user=self.require_permission("reference.manage"); data=self.read_json(); allowed={k:data[k] for k in ("code","name","active") if k in data}
+            user=self.require_permission("reference.manage"); data=self.read_json(); existing=self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone()
+            if existing is None: raise APIError(404,"الدرجة غير موجودة.","not_found")
+            allowed={}
+            if "code" in data: allowed["code"]=require_text(data,"code",40)
+            if "name" in data: allowed["name"]=require_text(data,"name",120)
             if "min_salary" in data: allowed["min_salary_cents"]=money_cents(data["min_salary"],"min_salary")
             if "max_salary" in data: allowed["max_salary_cents"]=money_cents(data["max_salary"],"max_salary")
-            if "active" in allowed: allowed["active"]=1 if bool(allowed["active"]) else 0
+            if "active" in data: allowed["active"]=1 if bool(data["active"]) else 0
             if not allowed: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            minimum=allowed.get("min_salary_cents",existing["min_salary_cents"]); maximum=allowed.get("max_salary_cents",existing["max_salary_cents"])
+            if maximum and maximum < minimum: raise APIError(422,"الحد الأعلى أقل من الحد الأدنى.","validation_error")
             allowed["updated_at"]=now_iso()
-            with self.db:
-                result=self.db.execute("UPDATE job_grades SET "+",".join(f"{k}=?" for k in allowed)+" WHERE id=?",(*allowed.values(),grade_id))
-                if not result.rowcount: raise APIError(404,"الدرجة غير موجودة.","not_found")
-                audit(self.db,user["id"],"job_grade.update","job_grade",grade_id,allowed)
+            try:
+                with self.db:
+                    self.db.execute("UPDATE job_grades SET "+",".join(f"{k}=?" for k in allowed)+" WHERE id=?",(*allowed.values(),grade_id))
+                    audit(self.db,user["id"],"job_grade.update","job_grade",grade_id,allowed)
+            except sqlite3.IntegrityError as exc: raise APIError(409,"رمز الدرجة مستخدم.","duplicate_reference") from exc
             self.send_json(200,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone())})
 
         def api_job_grade_delete(self, grade_id: int) -> None:
@@ -3412,15 +3437,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(201,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(cur.lastrowid,)).fetchone())})
 
         def api_job_title_patch(self, title_id: int) -> None:
-            user=self.require_permission("reference.manage"); data=self.read_json(); values={k:data[k] for k in ("name","active") if k in data}
+            user=self.require_permission("reference.manage"); data=self.read_json(); existing=self.db.execute("SELECT id FROM job_titles WHERE id=?",(title_id,)).fetchone()
+            if existing is None: raise APIError(404,"المسمى غير موجود.","not_found")
+            values={}
+            if "name" in data: values["name"]=require_text(data,"name",180)
+            if "active" in data: values["active"]=1 if bool(data["active"]) else 0
             if "department_id" in data: values["department_id"]=as_int(data["department_id"],"department_id",1) if data["department_id"] else None
-            if "active" in values: values["active"]=1 if bool(values["active"]) else 0
             if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
             values["updated_at"]=now_iso()
-            with self.db:
-                result=self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
-                if not result.rowcount: raise APIError(404,"المسمى غير موجود.","not_found")
-                audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
+            try:
+                with self.db:
+                    self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
+                    audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
+            except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(200,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(title_id,)).fetchone())})
 
         def api_job_title_delete(self, title_id: int) -> None:
@@ -4305,6 +4334,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             contract_dates = self.parse_contract_dates(data)
             languages = self.parse_languages(data["languages"]) if "languages" in data else []
             stamp = now_iso()
+            account_info: dict[str, Any] | None = None
             columns = list(values) + ["created_at", "updated_at"]
             try:
                 with self.db:
@@ -4326,10 +4356,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         if role not in ROLE_PERMISSIONS:
                             raise APIError(422, "الدور غير صالح.", "validation_error")
                         digest, salt = password_record(password)
-                        self.db.execute(
+                        account_cursor = self.db.execute(
                             "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                             (email, values["full_name"], role, digest, salt, employee_id, stamp, stamp),
                         )
+                        account_info = {"id": int(account_cursor.lastrowid), "email": email, "role": role}
                     for leave in self.db.execute("SELECT id,code,annual_entitlement FROM leave_types WHERE active=1"):
                         # Annual paid leave is earned from service, never granted
                         # as an opening balance when a profile is created.
@@ -4346,7 +4377,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee = normalize_employee(row)
             assert employee is not None
             employee["languages"] = self.employee_languages(employee_id)
-            self.send_json(201, {"employee": employee})
+            self.send_json(201, {"employee": employee, "account": account_info})
 
         def api_employee_get(self, employee_id: int) -> None:
             user = self.current_user(True)
@@ -5707,6 +5738,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 allowed = {
                     "id", "employee_id", "employee_no", "full_name", "leave_type_id",
                     "leave_type_code", "leave_type_name", "start_date", "end_date", "days",
+                    "start_time", "end_time", "hours",
                     "reason", "status", "manager_decision", "workflow_stage", "can_decide", "decision_role",
                 }
                 data = {key: value for key, value in data.items() if key in allowed}
@@ -5754,7 +5786,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_leave_types(self) -> None:
             self.current_user(True)
             rows = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
-            self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"]), "paid": bool(r["paid"]), "requires_attachment": bool(r["requires_attachment"])} for r in rows]})
+            self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"]), "paid": bool(r["paid"]), "requires_attachment": bool(r["requires_attachment"]), "max_hours": float(r["max_hours"] or 0)} for r in rows]})
 
         def api_leave_balances(self) -> None:
             user = self.current_user(True)
@@ -5799,7 +5831,26 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "تاريخ نهاية الإجازة يسبق بدايتها.", "validation_error")
             if start.year != end.year:
                 raise APIError(422, "قسّم الطلب الذي يمتد بين سنتين إلى طلبين.", "cross_year_leave")
-            days = leave_days_excluding_public_holidays(self.db, start, end) if leave_type["code"] == "annual" else float((end - start).days + 1)
+            start_time_value = None
+            end_time_value = None
+            hours = 0.0
+            if leave_type["code"] == "work_permission":
+                if start != end:
+                    raise APIError(422, "ترخيص ساعات العمل يجب أن يكون في يوم واحد.", "permission_one_day")
+                start_clock = parse_clock(data.get("start_time"), "start_time")
+                end_clock = parse_clock(data.get("end_time"), "end_time")
+                duration_minutes = int((datetime.combine(start, end_clock) - datetime.combine(start, start_clock)).total_seconds() / 60)
+                if duration_minutes <= 0:
+                    raise APIError(422, "وقت نهاية الترخيص يجب أن يكون بعد وقت البداية.", "permission_time_order")
+                max_hours = float(leave_type["max_hours"] or 2)
+                hours = round(duration_minutes / 60, 2)
+                if hours > max_hours:
+                    raise APIError(422, f"لا يجوز أن يتجاوز الترخيص {max_hours:g} ساعتين في الطلب الواحد.", "permission_max_hours", {"max_hours": max_hours})
+                start_time_value = start_clock.strftime("%H:%M")
+                end_time_value = end_clock.strftime("%H:%M")
+                days = round(duration_minutes / 480, 4)
+            else:
+                days = leave_days_excluding_public_holidays(self.db, start, end) if leave_type["code"] == "annual" else float((end - start).days + 1)
             if days <= 0:
                 raise APIError(422, "الفترة المحددة تقع بالكامل ضمن عطل رسمية ولا تُحتسب كإجازة سنوية.", "no_leave_days")
             notice = (start - local_now().date()).days
@@ -5834,7 +5885,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
             stamp = now_iso()
             with self.db:
-                cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,reason,attachment_data,status,manager_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'submitted',?,'pending',?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, optional_text(data, "reason", 1000), attachment, manager_employee_id, stamp, stamp))
+                cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,start_time,end_time,hours,reason,attachment_data,status,manager_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'submitted',?,'pending',?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, start_time_value, end_time_value, hours, optional_text(data, "reason", 1000), attachment, manager_employee_id, stamp, stamp))
                 request_id = int(cur.lastrowid)
                 create_internal_notification(
                     self.db, int(user["id"]), [int(manager_user["id"])],

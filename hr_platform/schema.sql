@@ -343,6 +343,7 @@ CREATE TABLE IF NOT EXISTS leave_types (
   min_notice_days INTEGER NOT NULL DEFAULT 0 CHECK (min_notice_days >= 0),
   requires_attachment INTEGER NOT NULL DEFAULT 0 CHECK (requires_attachment IN (0,1)),
   paid INTEGER NOT NULL DEFAULT 1 CHECK (paid IN (0,1)),
+  max_hours REAL NOT NULL DEFAULT 0 CHECK (max_hours >= 0),
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1))
 );
 
@@ -365,6 +366,9 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   start_date TEXT NOT NULL,
   end_date TEXT NOT NULL,
   days REAL NOT NULL CHECK (days > 0),
+  start_time TEXT,
+  end_time TEXT,
+  hours REAL NOT NULL DEFAULT 0 CHECK (hours >= 0),
   reason TEXT NOT NULL DEFAULT '',
   attachment_data TEXT,
   status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('draft','submitted','approved','rejected','cancelled')),
