@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS employees (
   full_name TEXT NOT NULL,
   email TEXT UNIQUE,
   phone TEXT NOT NULL DEFAULT '',
+  gender TEXT NOT NULL DEFAULT 'unspecified',
   job_title TEXT NOT NULL DEFAULT '',
   job_grade TEXT NOT NULL DEFAULT '',
   job_title_id INTEGER,
