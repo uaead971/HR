@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS organization (
   phone TEXT NOT NULL DEFAULT '',
   email TEXT NOT NULL DEFAULT '',
   website TEXT NOT NULL DEFAULT '',
+  general_manager_employee_id INTEGER,
   timezone TEXT NOT NULL DEFAULT 'Asia/Dubai',
   currency TEXT NOT NULL DEFAULT 'AED',
   primary_color TEXT NOT NULL DEFAULT '#123f35',
