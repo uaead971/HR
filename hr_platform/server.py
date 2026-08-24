@@ -1932,6 +1932,17 @@ def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str
     if override is not None:
         return bool(override["granted"])
     base = ROLE_PERMISSIONS.get(str(user["role"]), set())
+    # Backward compatibility: before v60 the chart was exposed through
+    # employee.view. Existing accounts that were granted that permission
+    # explicitly must not lose access when the dedicated organization.view
+    # permission is introduced. An explicit deny of organization.view still
+    # wins because it was handled above.
+    if permission == "organization.view":
+        legacy_override = db.execute("SELECT granted FROM user_permissions WHERE user_id=? AND permission='employee.view'", (user["id"],)).fetchone()
+        if legacy_override is not None:
+            return bool(legacy_override["granted"])
+        if "employee.view" in base or "*" in base:
+            return True
     return "*" in base or permission in base
 
 
@@ -1950,6 +1961,10 @@ def effective_permissions(db: sqlite3.Connection, user: dict[str, Any]) -> tuple
             granted.add(item["permission"]); reasons[item["permission"]] = "explicit_grant"
         else:
             granted.discard(item["permission"]); reasons[item["permission"]] = "explicit_deny"
+    if "organization.view" not in granted and "organization.view" not in {
+        row["permission"] for row in db.execute("SELECT permission FROM user_permissions WHERE user_id=? AND permission='organization.view'", (user["id"],))
+    } and "employee.view" in granted:
+        granted.add("organization.view"); reasons["organization.view"] = "legacy_employee_view"
     return sorted(granted), reasons
 
 
