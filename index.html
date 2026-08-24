@@ -80,9 +80,12 @@
       <div class="brand brand-light"><span class="brand-mark logo-slot">خ</span><span><b class="org-name">خيشة - Khaisha</b><small>الموارد البشرية</small></span><button class="sidebar-collapse" id="collapseSidebar" type="button" aria-label="طي القائمة"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></button></div>
       <nav id="mainNav" aria-label="التنقل الرئيسي">
         <span class="nav-label">الرئيسية</span>
-        <a href="#dashboard" data-page="dashboard" data-permission="dashboard.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg></i><span>لوحة القيادة</span></a>
-        <a href="#my-space" data-page="my-space"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg></i><span>مساحتي</span></a>
-        <span class="nav-label">الأشخاص والهيكل</span>
+      <a href="#dashboard" data-page="dashboard" data-permission="dashboard.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg></i><span>لوحة القيادة</span></a>
+      <a href="#my-space" data-page="my-space"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg></i><span>مساحتي</span></a>
+      <span class="nav-label">التواصل السريع</span>
+      <a href="#notifications" data-page="notifications"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-bell"></use></svg></i><span>الإشعارات الداخلية</span><em id="navUnread" hidden>0</em></a>
+      <a href="#communications" data-page="communications" data-permission="communications.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-mail"></use></svg></i><span>البريد المؤسسي</span></a>
+      <span class="nav-label">الأشخاص والهيكل</span>
         <a href="#employees" data-page="employees" data-permission-any="employee.view,employee.team"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-users"></use></svg></i><span>الموظفون والملفات</span></a>
         <a href="#employee-report" data-page="employee-report" data-permission="employee_report.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></i><span>تقرير الموظف الشامل</span></a>
         <a href="#organization" data-page="organization" data-permission="employee.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-org"></use></svg></i><span>المخطط الشبكي</span></a>
@@ -103,10 +106,7 @@
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="learning" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-learning"></use></svg></i><span>التعلم والتطوير</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="benefits" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-benefits"></use></svg></i><span>المزايا</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="offboarding" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-offboarding"></use></svg></i><span>إنهاء الخدمة</span></a>
-        <span class="nav-label">التواصل</span>
-        <a href="#notifications" data-page="notifications"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-bell"></use></svg></i><span>الإشعارات الداخلية</span><em id="navUnread" hidden>0</em></a>
-        <a href="#communications" data-page="communications" data-permission="communications.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-mail"></use></svg></i><span>البريد المؤسسي</span></a>
-        <span class="nav-label">الإدارة والامتثال</span>
+      <span class="nav-label">الإدارة والامتثال</span>
         <a href="#reports" data-page="reports" data-permission="report.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></i><span>التقارير الحية</span></a>
         <a href="#access-control" data-page="access-control" data-permission="security.manage_permissions"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-shield"></use></svg></i><span>المستخدمون والصلاحيات</span></a>
         <a href="#settings" data-page="settings" data-permission-any="org.manage,smtp.manage,reference.manage"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg></i><span>إعدادات المؤسسة</span></a>
@@ -213,6 +213,7 @@
       <section class="page" id="leaves">
         <div class="page-head"><div><span class="eyebrow">الاستحقاقات</span><h1>الإجازات والأرصدة</h1><p>يحسب النظام الاستحقاق من مدة الخدمة، ويمنع الإجازة السنوية المدفوعة قبل إتمام ستة أشهر.</p></div><div class="button-row"><button class="secondary" id="requestLeaveSale">+ طلب بيع رصيد</button><button class="primary" id="requestLeave">+ طلب إجازة</button></div></div>
         <div class="balance-grid" id="leaveBalances"></div>
+        <article class="card leave-type-directory" style="margin-top:16px"><div class="section-head"><div><h2>أنواع الإجازات والترخيص</h2><p>قائمة الأنواع المهيأة في النظام، بما فيها الترخيص المدفوع خلال ساعات العمل بحد أقصى ساعتين.</p></div><span class="status">سياسة المؤسسة</span></div><div id="leaveTypeDirectory" class="leave-type-list"></div></article>
         <article class="card" style="margin-top:16px"><div class="section-head"><h2 id="leaveListTitle">طلبات الإجازة</h2><span class="status" id="leaveQueueCount">—</span></div><div class="stack" id="leaveRequests"></div></article>
         <article class="card" style="margin-top:16px"><div class="section-head"><div><h2>طلبات بيع رصيد الإجازة</h2><p>يعتمدها مسؤول الموارد البشرية، وعند الاعتماد تخصم الأيام من الرصيد ويثبت المقابل المالي.</p></div><button class="secondary" id="refreshLeaveSales" type="button">تحديث</button></div><div class="stack" id="leaveSaleRequests"></div></article>
       </section>
