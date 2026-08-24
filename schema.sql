@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS employees (
   department_id INTEGER,
   branch_id INTEGER,
   manager_id INTEGER,
+  approval_employee_id INTEGER,
   hire_date TEXT,
   qualification TEXT NOT NULL DEFAULT '',
   nationality TEXT NOT NULL DEFAULT '',
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS employees (
   FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL,
   FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL,
   FOREIGN KEY (manager_id) REFERENCES employees(id) ON DELETE SET NULL,
+  FOREIGN KEY (approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE SET NULL,
   FOREIGN KEY (job_grade_id) REFERENCES job_grades(id) ON DELETE SET NULL
 );
@@ -316,12 +318,14 @@ CREATE TABLE IF NOT EXISTS overtime_requests (
   duration_minutes INTEGER NOT NULL CHECK (duration_minutes > 0),
   reason TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('draft','submitted','approved','rejected','cancelled')),
+  approval_employee_id INTEGER,
   rejection_reason TEXT,
   decided_by INTEGER,
   decided_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -375,6 +379,7 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   attachment_data TEXT,
   status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('draft','submitted','approved','rejected','cancelled')),
   manager_employee_id INTEGER,
+  approval_employee_id INTEGER,
   manager_decision TEXT NOT NULL DEFAULT 'pending' CHECK (manager_decision IN ('pending','approved','rejected')),
   manager_comment TEXT NOT NULL DEFAULT '',
   manager_decided_by INTEGER,
@@ -388,6 +393,7 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
   FOREIGN KEY (leave_type_id) REFERENCES leave_types(id) ON DELETE RESTRICT,
   FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
+  FOREIGN KEY (approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (manager_decided_by) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
 );

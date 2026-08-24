@@ -1581,6 +1581,7 @@ def initialize_database(db_path: Path) -> None:
                 "departments": {"branch_id": "INTEGER", "updated_at": "TEXT"},
                 "employees": {
                     "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
+                    "approval_employee_id": "INTEGER",
                     "gender": "TEXT NOT NULL DEFAULT 'unspecified'",
                     "qualification": "TEXT NOT NULL DEFAULT ''", "nationality": "TEXT NOT NULL DEFAULT ''",
                     "birth_date": "TEXT", "place_of_birth": "TEXT NOT NULL DEFAULT ''",
@@ -1617,6 +1618,7 @@ def initialize_database(db_path: Path) -> None:
                 },
                 "leave_requests": {
                     "manager_employee_id": "INTEGER",
+                    "approval_employee_id": "INTEGER",
                     "manager_decision": "TEXT NOT NULL DEFAULT 'pending'",
                     "manager_comment": "TEXT NOT NULL DEFAULT ''",
                     "manager_decided_by": "INTEGER",
@@ -1624,6 +1626,9 @@ def initialize_database(db_path: Path) -> None:
                     "start_time": "TEXT",
                     "end_time": "TEXT",
                     "hours": "REAL NOT NULL DEFAULT 0",
+                },
+                "overtime_requests": {
+                    "approval_employee_id": "INTEGER",
                 },
                 "leave_types": {
                     "max_hours": "REAL NOT NULL DEFAULT 0",
@@ -2185,7 +2190,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
                COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
-               e.manager_id,m.full_name AS manager_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active{sensitive}{emergency_count},
+               e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active{sensitive}{emergency_count},
                (SELECT ed.issued_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_start_on,
                (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
                e.created_at,e.updated_at,
@@ -2196,6 +2201,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
         LEFT JOIN departments d ON d.id=e.department_id
         LEFT JOIN branches b ON b.id=e.branch_id
         LEFT JOIN employees m ON m.id=e.manager_id
+        LEFT JOIN employees a ON a.id=e.approval_employee_id
         LEFT JOIN job_titles jt ON jt.id=e.job_title_id
         LEFT JOIN job_grades jg ON jg.id=e.job_grade_id
     """
@@ -2253,7 +2259,7 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
         completeness_fields = (
             "full_name", "photo_data", "employee_no", "email", "phone", "birth_date", "nationality",
             "passport_no", "emirates_id_no", "qualification", "job_title", "job_grade",
-            "department_id", "branch_id", "manager_id", "hire_date", "address_country", "address_city",
+            "department_id", "branch_id", "manager_id", "approval_employee_id", "hire_date", "address_country", "address_city",
             "emergency_contact_count",
         )
         filled = sum(bool(data.get(field)) for field in completeness_fields)
@@ -2724,6 +2730,63 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 (employee_id,),
             ).fetchone())
 
+        def approval_manager_row(self, employee_id: int | None, permission: str) -> dict[str, Any] | None:
+            """Return the active HR approval account assigned to an employee.
+
+            The assignment is stored on the employee profile, while the
+            permission remains the source of truth.  This intentionally does
+            not rely on a department name alone: an HR officer may be granted
+            the approval permission explicitly, and permissions are managed
+            independently from the organisational structure.
+            """
+            if not employee_id:
+                return None
+            row = self.db.execute(
+                """SELECT e.id,e.full_name,d.name AS department_name,
+                          u.id AS user_id,u.role AS user_role,u.active AS user_active,
+                          u.is_super_admin AS user_is_super_admin
+                     FROM employees e
+                     LEFT JOIN departments d ON d.id=e.department_id
+                     JOIN users u ON u.employee_id=e.id AND u.active=1
+                    WHERE e.id=? AND e.active=1
+                    LIMIT 1""",
+                (int(employee_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            candidate = {
+                "id": int(row["user_id"]),
+                "employee_id": int(row["id"]),
+                "role": row["user_role"],
+                "active": bool(row["user_active"]),
+                "is_super_admin": bool(row["user_is_super_admin"]),
+            }
+            department = str(row["department_name"] or "").strip().casefold()
+            is_hr_department = department in {"hr", "human resources", "الموارد البشرية", "الموارد البشريه"}
+            if not has_permission(self.db, candidate, permission):
+                return None
+            if not (is_hr_department or str(row["user_role"] or "").lower() == "hr" or has_permission(self.db, candidate, permission)):
+                return None
+            return {
+                "user_id": int(row["user_id"]),
+                "employee_id": int(row["id"]),
+                "full_name": row["full_name"],
+                "department_name": row["department_name"],
+                "user": candidate,
+            }
+
+        def resolve_approval_manager(self, employee_id: int, permission: str) -> dict[str, Any] | None:
+            """Resolve the profile assignment, with a safe HR fallback for legacy rows."""
+            profile = self.db.execute("SELECT approval_employee_id FROM employees WHERE id=?", (employee_id,)).fetchone()
+            assigned_id = int(profile["approval_employee_id"]) if profile and profile["approval_employee_id"] else None
+            if assigned_id:
+                return self.approval_manager_row(assigned_id, permission)
+            for row in self.db.execute("SELECT e.id FROM employees e JOIN users u ON u.employee_id=e.id AND u.active=1 WHERE e.active=1 ORDER BY e.id"):
+                candidate = self.approval_manager_row(int(row["id"]), permission)
+                if candidate:
+                    return candidate
+            return None
+
         def sync_manager_assignment_workflows(
             self,
             employee_id: int,
@@ -2817,6 +2880,55 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "to_manager_employee_id": next_id,
                     "pending_evaluations": len(pending_evaluations),
                     "pending_leaves": len(pending_leaves),
+                },
+            )
+
+        def sync_approval_assignment_workflows(
+            self,
+            employee_id: int,
+            previous_approval_id: int | None,
+            new_approval_id: int | None,
+            actor_user_id: int,
+        ) -> None:
+            """Move actionable requests when the employee's final approver changes."""
+            old_id = int(previous_approval_id) if previous_approval_id else None
+            next_id = int(new_approval_id) if new_approval_id else None
+            if old_id == next_id:
+                return
+            stamp = now_iso()
+            leave_result = self.db.execute(
+                """UPDATE leave_requests SET approval_employee_id=?,updated_at=?
+                     WHERE employee_id=? AND status='submitted'""",
+                (next_id, stamp, employee_id),
+            )
+            overtime_result = self.db.execute(
+                """UPDATE overtime_requests SET approval_employee_id=?,updated_at=?
+                     WHERE employee_id=? AND status='submitted'""",
+                (next_id, stamp, employee_id),
+            )
+            next_user = self.db.execute(
+                "SELECT id FROM users WHERE employee_id=? AND active=1",
+                (next_id,),
+            ).fetchone() if next_id else None
+            if next_user and (leave_result.rowcount or overtime_result.rowcount):
+                create_internal_notification(
+                    self.db,
+                    actor_user_id,
+                    [int(next_user["id"])],
+                    "تم تحديث مسؤول الاعتماد",
+                    f"تم إسناد {leave_result.rowcount} طلب إجازة و{overtime_result.rowcount} طلب عمل إضافي معلّق إلى مسؤول الاعتماد الجديد.",
+                )
+            audit(
+                self.db,
+                actor_user_id,
+                "employee.approval_assignment_sync",
+                "employee",
+                employee_id,
+                {
+                    "from_approval_employee_id": old_id,
+                    "to_approval_employee_id": next_id,
+                    "pending_leaves": leave_result.rowcount,
+                    "pending_overtime": overtime_result.rowcount,
                 },
             )
 
@@ -3304,7 +3416,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             payroll = self.db.execute("SELECT COUNT(DISTINCT r.id) runs,COALESCE(SUM(i.net_cents),0) net FROM payroll_runs r JOIN payroll_items i ON i.run_id=r.id JOIN employees e ON e.id=i.employee_id WHERE r.payroll_month BETWEEN ? AND ?"+scope_join, (date_from.strftime('%Y-%m'),date_to.strftime('%Y-%m'),*params)).fetchone()
             departments = [dict(r) for r in self.db.execute("SELECT COALESCE(d.name,'دون قسم') label,COUNT(*) value FROM employees e LEFT JOIN departments d ON d.id=e.department_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.department_id,d.name ORDER BY value DESC", params)]
             branches = [dict(r) for r in self.db.execute("SELECT COALESCE(b.name,'دون فرع') label,COUNT(*) value FROM employees e LEFT JOIN branches b ON b.id=e.branch_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.branch_id,b.name ORDER BY value DESC", params)]
-            activity = [dict(r) for r in self.db.execute("SELECT a.action,a.entity_type,a.entity_id,a.created_at,COALESCE(u.display_name,'النظام') actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.id DESC LIMIT 12")]
+            activity = []
+            for row in self.db.execute("SELECT a.action,a.entity_type,a.entity_id,a.details,a.created_at,COALESCE(u.display_name,'النظام') actor_name FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.id DESC LIMIT 12"):
+                item = dict(row)
+                try:
+                    details = json.loads(item.pop("details") or "{}")
+                except (TypeError, ValueError):
+                    details = {}
+                if isinstance(details, dict):
+                    item["detail"] = str(details.get("reason") or details.get("decision_note") or details.get("comment") or "")
+                    item["override"] = bool(details.get("override"))
+                else:
+                    item["detail"] = ""
+                    item["override"] = False
+                activity.append(item)
             eligible_to_attend = attendance_context["eligible_to_attend"]
             absence_penalty = round((absent/eligible_to_attend)*35) if eligible_to_attend else 0
             health_score = max(0, min(100, 100-absence_penalty-min(expiring_docs*3,25)-min((leave_pending+overtime_pending)*2,20)))
@@ -4293,7 +4418,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "رقم جواز السفر غير صالح.", "validation_error", {"field": "passport_no"})
             if result.get("emirates_id_no") and not re.fullmatch(r"[0-9][0-9 -]{6,39}", result["emirates_id_no"]):
                 raise APIError(422, "رقم الهوية الإماراتية غير صالح.", "validation_error", {"field": "emirates_id_no"})
-            for key in ("department_id", "branch_id", "manager_id"):
+            for key in ("department_id", "branch_id", "manager_id", "approval_employee_id"):
                 if key in data:
                     result[key] = as_int(data[key], key, 1) if data[key] not in (None, "") else None
             if "job_title_id" in data:
@@ -4451,6 +4576,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.require_permission("employee.manage")
             data = self.read_json()
             values = self.parse_employee(data)
+            approval_id = values.get("approval_employee_id")
+            if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
+                raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
             contract_dates = self.parse_contract_dates(data)
             languages = self.parse_languages(data["languages"]) if "languages" in data else []
             stamp = now_iso()
@@ -4628,10 +4756,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "لا تملك صلاحية تعديل الراتب.", "forbidden", {"permission": "salary.view"})
             if values.get("manager_id") == employee_id:
                 raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
+            if values.get("approval_employee_id") == employee_id:
+                raise APIError(422, "لا يمكن أن يكون الموظف مسؤول اعتماد لنفسه.", "validation_error", {"field": "approval_employee_id"})
+            approval_id = values.get("approval_employee_id")
+            if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
+                raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
             if not values and languages is None and contract_dates is None and institution_role is None:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
             reporting_line_changed = "manager_id" in data or "department_id" in data
             previous_manager_id = self.direct_manager_employee_id(employee_id) if reporting_line_changed else None
+            approval_assignment_changed = "approval_employee_id" in values
+            previous_approval_id = int(existing_employee["approval_employee_id"]) if existing_employee["approval_employee_id"] else None
             previous_general_manager = self.db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()["general_manager_employee_id"]
             leadership_changed = institution_role is not None and (int(previous_general_manager) if previous_general_manager else None) != (employee_id if institution_role == "general_manager" else None)
             stamp = now_iso()
@@ -4668,6 +4803,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             self.direct_manager_employee_id(employee_id),
                             int(user["id"]),
                         )
+                    if approval_assignment_changed:
+                        self.sync_approval_assignment_workflows(
+                            employee_id,
+                            previous_approval_id,
+                            values.get("approval_employee_id"),
+                            int(user["id"]),
+                        )
                     if grade_changed:
                         employee_account = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
                         if employee_account:
@@ -4677,7 +4819,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                                 f"نبارك لك ترقيتك من الدرجة {previous_grade} إلى الدرجة {next_grade}. نتمنى لك المزيد من التقدم والنجاح في مهام عملك، وأن تكون هذه الترقية حافزاً لك لمزيد من العطاء والتميز.",
                             )
                         audit(self.db, user["id"], "employee.promotion", "employee", employee_id, {"from_grade": previous_grade, "to_grade": next_grade})
-                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
+                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []), "language_codes": [row["code"] for row in languages] if languages is not None else None, "approval_employee_id": values.get("approval_employee_id") if approval_assignment_changed else None})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
             if leadership_changed:
@@ -5722,7 +5864,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 conditions.append("o.employee_id=?")
                 params.append(self.own_employee_id())
             where = " WHERE " + " AND ".join(conditions) if conditions else ""
-            rows = self.db.execute("SELECT o.*,e.employee_no,e.full_name,d.name AS department_name,u.display_name AS decided_by_name FROM overtime_requests o JOIN employees e ON e.id=o.employee_id LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN users u ON u.id=o.decided_by" + where + " ORDER BY o.created_at DESC", params).fetchall()
+            rows = self.db.execute("SELECT o.*,e.employee_no,e.full_name,d.name AS department_name,a.full_name AS approval_employee_name,u.display_name AS decided_by_name FROM overtime_requests o JOIN employees e ON e.id=o.employee_id LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees a ON a.id=o.approval_employee_id LEFT JOIN users u ON u.id=o.decided_by" + where + " ORDER BY o.created_at DESC", params).fetchall()
             self.send_json(200, {"items": [dict(r) for r in rows]})
 
         def api_overtime_post(self) -> None:
@@ -5741,24 +5883,33 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if duration <= 0 or duration > 720:
                 raise APIError(422, "مدة العمل الإضافي يجب أن تكون بين دقيقة و12 ساعة.", "validation_error")
             reason = require_text(data, "reason", 1000)
+            assigned_approval_id = self.db.execute("SELECT approval_employee_id FROM employees WHERE id=?", (employee_id,)).fetchone()["approval_employee_id"]
+            approval_manager = self.approval_manager_row(int(assigned_approval_id), "overtime.approve") if assigned_approval_id else None
+            if assigned_approval_id and approval_manager is None:
+                raise APIError(409, "مسؤول الاعتماد المحدد غير نشط أو لا يملك صلاحية اعتماد العمل الإضافي.", "approval_manager_required")
+            approval_employee_id = int(approval_manager["employee_id"]) if approval_manager else None
             stamp = now_iso()
             with self.db:
-                cur = self.db.execute("INSERT INTO overtime_requests(employee_id,work_date,start_time,end_time,duration_minutes,reason,status,created_at,updated_at) VALUES(?,?,?,?,?,?,'submitted',?,?)", (employee_id, work_date, start.strftime("%H:%M"), end.strftime("%H:%M"), duration, reason, stamp, stamp))
+                cur = self.db.execute("INSERT INTO overtime_requests(employee_id,work_date,start_time,end_time,duration_minutes,reason,status,approval_employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,'submitted',?,?,?)", (employee_id, work_date, start.strftime("%H:%M"), end.strftime("%H:%M"), duration, reason, approval_employee_id, stamp, stamp))
                 request_id = int(cur.lastrowid)
                 self.db.execute("INSERT INTO overtime_audit(request_id,actor_user_id,from_status,to_status,comment,created_at) VALUES(?,?,NULL,'submitted','',?)", (request_id, user["id"], stamp))
                 employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
-                approvers = self.approval_recipient_ids("overtime.approve", int(user["id"]))
+                approvers = [int(approval_manager["user_id"])] if approval_manager and int(approval_manager["user_id"]) != int(user["id"]) else self.approval_recipient_ids("overtime.approve", int(user["id"]))
                 create_internal_notification(
                     self.db, int(user["id"]), approvers,
                     "طلب عمل إضافي بانتظار الاعتماد",
                     f"قدم {employee['full_name']} ({employee['employee_no']}) طلب عمل إضافي بتاريخ {work_date} لمدة {duration/60:g} ساعة.",
                 )
-                audit(self.db, user["id"], "overtime.submit", "overtime_request", request_id)
+                audit(self.db, user["id"], "overtime.submit", "overtime_request", request_id, {"approval_employee_id": approval_employee_id})
             row = self.db.execute("SELECT * FROM overtime_requests WHERE id=?", (request_id,)).fetchone()
             self.send_json(201, {"request": dict(row)})
 
         def api_overtime_decision(self, request_id: int) -> None:
-            user = self.require_permission("overtime.approve")
+            user = self.current_user(True)
+            assert user is not None
+            is_system_admin = str(user.get("role") or "") == "admin" or bool(user.get("is_super_admin"))
+            if not is_system_admin and not has_permission(self.db, user, "overtime.approve"):
+                raise APIError(403, "لا تملك صلاحية اعتماد العمل الإضافي.", "forbidden", {"permission": "overtime.approve"})
             data = self.read_json()
             action = str(data.get("action", ""))
             if action not in {"approve", "reject"}:
@@ -5770,15 +5921,27 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(409, "تم اتخاذ قرار على هذا الطلب سابقاً.", "invalid_status")
             if user.get("employee_id") == request_row["employee_id"]:
                 raise APIError(403, "لا يمكن اعتماد طلبك الشخصي.", "self_approval_forbidden")
+            if not is_system_admin and request_row["approval_employee_id"] and int(user.get("employee_id") or 0) != int(request_row["approval_employee_id"]):
+                raise APIError(403, "هذا الطلب محال لمسؤول اعتماد آخر.", "approval_manager_required")
             reason = optional_text(data, "reason", 1000)
             if action == "reject" and not reason:
                 raise APIError(422, "سبب الرفض مطلوب.", "validation_error")
             status = "approved" if action == "approve" else "rejected"
             stamp = now_iso()
+            employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["employee_id"],)).fetchone()
             with self.db:
                 self.db.execute("UPDATE overtime_requests SET status=?,rejection_reason=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, reason if status == "rejected" else None, user["id"], stamp, stamp, request_id))
                 self.db.execute("INSERT INTO overtime_audit(request_id,actor_user_id,from_status,to_status,comment,created_at) VALUES(?,?,'submitted',?,?,?)", (request_id, user["id"], status, reason, stamp))
-                audit(self.db, user["id"], f"overtime.{status}", "overtime_request", request_id, {"reason": reason})
+                if employee_user:
+                    create_internal_notification(
+                        self.db,
+                        int(user["id"]),
+                        [int(employee_user["id"])],
+                        "قرار طلب العمل الإضافي",
+                        f"{('اعتمد' if action == 'approve' else 'رفض')} {'مدير النظام' if is_system_admin else 'مسؤول الاعتماد'} طلبك للعمل الإضافي."
+                        + (f" السبب: {reason}" if action == "reject" else ""),
+                    )
+                audit(self.db, user["id"], f"overtime.{'admin_override_' if is_system_admin else ''}{status}", "overtime_request", request_id, {"reason": reason, "override": is_system_admin})
             saved = self.db.execute("SELECT * FROM overtime_requests WHERE id=?", (request_id,)).fetchone()
             self.send_json(200, {"request": dict(saved)})
 
@@ -5881,6 +6044,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             )
             is_hr_final_approver = bool(
                 has_permission(self.db, user, "leave.approve")
+                and (
+                    not data.get("approval_employee_id")
+                    or int(user.get("employee_id") or 0) == int(data.get("approval_employee_id") or 0)
+                    or str(user.get("role") or "") == "admin"
+                )
             )
             can_decide = bool(
                 status == "submitted"
@@ -5988,7 +6156,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if self.query.get("status"):
                 where += (" AND " if where else " WHERE ") + "lr.status=?"
                 params.append(self.query["status"])
-            rows = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name,u.display_name AS decided_by_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id LEFT JOIN users u ON u.id=lr.decided_by" + where + " ORDER BY lr.created_at DESC", params).fetchall()
+            rows = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name,a.full_name AS approval_employee_name,u.display_name AS decided_by_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id LEFT JOIN employees a ON a.id=lr.approval_employee_id LEFT JOIN users u ON u.id=lr.decided_by" + where + " ORDER BY lr.created_at DESC", params).fetchall()
             self.send_json(200, {"items": [self.leave_request_payload(row, user) for row in rows]})
 
         def api_leave_requests_post(self) -> None:
@@ -6000,7 +6168,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             leave_type = self.db.execute("SELECT * FROM leave_types WHERE id=? AND active=1", (leave_type_id,)).fetchone()
             if leave_type is None:
                 raise APIError(404, "نوع الإجازة غير موجود.", "not_found")
-            employee_profile = self.db.execute("SELECT gender FROM employees WHERE id=?", (employee_id,)).fetchone()
+            employee_profile = self.db.execute("SELECT gender,approval_employee_id FROM employees WHERE id=?", (employee_id,)).fetchone()
             employee_gender = str(employee_profile["gender"] if employee_profile and "gender" in employee_profile.keys() else "unspecified").lower()
             if leave_type["code"] == "maternity" and employee_gender != "female":
                 raise APIError(422, "إجازة الأمومة متاحة للموظفات فقط.", "gender_restricted_leave")
@@ -6064,27 +6232,33 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 manager_user = self.db.execute("SELECT * FROM users WHERE employee_id=? AND active=1", (manager_employee_id,)).fetchone()
                 if manager_user is None or not has_permission(self.db, dict(manager_user), "leave.team"):
                     raise APIError(409, "المسؤول المباشر لا يملك حساباً نشطاً وصلاحية مراجعة إجازات الفريق.", "manager_account_required")
-            hr_recipients = self.leave_hr_recipient_ids()
-            if department_head and not hr_recipients:
+            assigned_approval_id = int(employee_profile["approval_employee_id"]) if employee_profile and employee_profile["approval_employee_id"] else None
+            approval_manager = self.approval_manager_row(assigned_approval_id, "leave.approve") if assigned_approval_id else None
+            if assigned_approval_id and approval_manager is None:
+                raise APIError(409, "مسؤول الاعتماد المحدد غير نشط أو لا يملك صلاحية اعتماد الإجازات.", "approval_manager_required")
+            approval_employee_id = int(approval_manager["employee_id"]) if approval_manager else None
+            hr_recipients = [int(approval_manager["user_id"])] if approval_manager else self.leave_hr_recipient_ids()
+            if not hr_recipients:
                 raise APIError(409, "لا يوجد مسؤول موارد بشرية أو مستخدم مخول لاعتماد الإجازات.", "leave_approver_required")
             employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
             stamp = now_iso()
             with self.db:
                 manager_decision = "approved" if department_head else "pending"
-                cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,start_time,end_time,hours,reason,attachment_data,status,manager_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'submitted',?,?,?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, start_time_value, end_time_value, hours, optional_text(data, "reason", 1000), attachment, manager_employee_id, manager_decision, stamp, stamp))
+                cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,start_time,end_time,hours,reason,attachment_data,status,manager_employee_id,approval_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'submitted',?,?,?, ?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, start_time_value, end_time_value, hours, optional_text(data, "reason", 1000), attachment, manager_employee_id, approval_employee_id, manager_decision, stamp, stamp))
                 request_id = int(cur.lastrowid)
                 create_internal_notification(
                     self.db, int(user["id"]), hr_recipients if department_head else [int(manager_user["id"])],
                     "طلب إجازة رئيس قسم بانتظار الموارد البشرية" if department_head else "طلب إجازة بانتظار قرارك",
                     f"قدم {employee['full_name']} ({employee['employee_no']}) طلب {leave_type['name']} من {start.isoformat()} إلى {end.isoformat()}.",
                 )
-                audit(self.db, user["id"], "leave.submit", "leave_request", request_id, {"manager_employee_id": manager_employee_id, "department_head_direct_to_hr": department_head})
-            row = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id WHERE lr.id=?", (request_id,)).fetchone()
+                audit(self.db, user["id"], "leave.submit", "leave_request", request_id, {"manager_employee_id": manager_employee_id, "approval_employee_id": approval_employee_id, "department_head_direct_to_hr": department_head})
+            row = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name,a.full_name AS approval_employee_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id LEFT JOIN employees a ON a.id=lr.approval_employee_id WHERE lr.id=?", (request_id,)).fetchone()
             self.send_json(201, {"request": self.leave_request_payload(row, user)})
 
         def api_leave_request_decision(self, request_id: int) -> None:
             user = self.current_user(True)
             assert user is not None
+            is_system_admin = str(user.get("role") or "") == "admin" or bool(user.get("is_super_admin"))
             request_row = self.db.execute("SELECT lr.*,e.employee_no,e.full_name,lt.name AS leave_type_name,lt.code AS leave_type_code,lt.annual_entitlement FROM leave_requests lr JOIN employees e ON e.id=lr.employee_id JOIN leave_types lt ON lt.id=lr.leave_type_id WHERE lr.id=?", (request_id,)).fetchone()
             if request_row is None:
                 raise APIError(404, "طلب الإجازة غير موجود.", "not_found")
@@ -6104,16 +6278,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             )
             is_hr_final_approver = bool(
                 has_permission(self.db, user, "leave.approve")
+                and (
+                    not request_row["approval_employee_id"]
+                    or int(user.get("employee_id") or 0) == int(request_row["approval_employee_id"])
+                    or is_system_admin
+                )
             )
-            if not is_direct_manager and not is_hr_final_approver:
+            if not is_direct_manager and not is_hr_final_approver and not is_system_admin:
                 raise APIError(403, "لا تملك صلاحية اتخاذ قرار على هذا الطلب.", "forbidden")
             if request_row["status"] != "submitted":
                 raise APIError(409, "تم اتخاذ قرار نهائي على هذا الطلب سابقاً.", "invalid_status")
             stamp = now_iso()
             employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["employee_id"],)).fetchone()
             manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["manager_employee_id"],)).fetchone()
+            approval_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["approval_employee_id"],)).fetchone()
             with self.db:
-                if request_row["manager_decision"] == "pending":
+                if request_row["manager_decision"] == "pending" and not is_system_admin:
                     if not is_direct_manager:
                         raise APIError(409, "يجب أن يعتمد المسؤول المباشر الطلب أولاً.", "manager_approval_required")
                     manager_decision = "approved" if action == "approve" else "rejected"
@@ -6122,7 +6302,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "UPDATE leave_requests SET manager_decision=?,manager_comment=?,manager_decided_by=?,manager_decided_at=?,status=?,rejection_reason=?,updated_at=? WHERE id=?",
                         (manager_decision, reason, user["id"], stamp, status, reason if action == "reject" else None, stamp, request_id),
                     )
-                    hr_recipients = self.leave_hr_recipient_ids()
+                    hr_recipients = [int(approval_user["id"])] if approval_user else self.leave_hr_recipient_ids()
                     create_internal_notification(
                         self.db, int(user["id"]), hr_recipients,
                         "قرار المسؤول المباشر على طلب إجازة",
@@ -6138,11 +6318,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         )
                     audit(self.db, user["id"], f"leave.manager_{manager_decision}", "leave_request", request_id, {"reason": reason, "hr_recipient_count": len(hr_recipients)})
                 else:
-                    if request_row["manager_decision"] != "approved":
+                    if request_row["manager_decision"] != "approved" and not is_system_admin:
                         raise APIError(409, "رفض المسؤول المباشر هذا الطلب ولا يمكن اعتماده نهائياً.", "manager_rejected")
-                    if not is_hr_final_approver:
+                    if not is_hr_final_approver and not is_system_admin:
                         raise APIError(403, "الاعتماد النهائي متاح لموظف الموارد البشرية المخول فقط.", "hr_final_approval_required")
                     status = "approved" if action == "approve" else "rejected"
+                    if is_system_admin and request_row["manager_decision"] == "pending":
+                        self.db.execute(
+                            "UPDATE leave_requests SET manager_decision='approved',manager_comment=?,manager_decided_by=?,manager_decided_at=? WHERE id=?",
+                            ("اعتماد مدير النظام تجاوز التسلسل الوظيفي" if action == "approve" else "تجاوز مدير النظام التسلسل الوظيفي ورفض الطلب", user["id"], stamp, request_id),
+                        )
                     if status == "approved" and float(request_row["annual_entitlement"]) > 0:
                         year = date.fromisoformat(request_row["start_date"]).year
                         balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["employee_id"], request_row["leave_type_id"], year)).fetchone()
@@ -6157,15 +6342,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             raise APIError(409, "لم يعد الرصيد كافياً لاعتماد الطلب.", "insufficient_balance", {"available": available})
                         self.db.execute("UPDATE leave_balances SET used=used+? WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["days"], request_row["employee_id"], request_row["leave_type_id"], year))
                     self.db.execute("UPDATE leave_requests SET status=?,rejection_reason=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, reason if status == "rejected" else None, user["id"], stamp, stamp, request_id))
-                    recipients = [int(row["id"]) for row in (employee_user, manager_user) if row]
+                    recipients = [int(row["id"]) for row in (employee_user, manager_user, approval_user) if row]
                     create_internal_notification(
                         self.db, int(user["id"]), recipients,
                         "القرار النهائي لطلب الإجازة",
-                        f"{('اعتمدت' if action == 'approve' else 'رفضت')} الموارد البشرية نهائياً طلب {request_row['leave_type_name']} للموظف {request_row['full_name']}."
+                        f"{('اعتمد' if is_system_admin else 'اعتمدت') if action == 'approve' else ('رفض' if is_system_admin else 'رفضت')} {'مدير النظام' if is_system_admin else 'مسؤول الاعتماد'} نهائياً طلب {request_row['leave_type_name']} للموظف {request_row['full_name']}."
                         + (f" السبب: {reason}" if action == "reject" else ""),
                     )
-                    audit(self.db, user["id"], f"leave.hr_{status}", "leave_request", request_id, {"reason": reason})
-            saved = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id WHERE lr.id=?", (request_id,)).fetchone()
+                    audit(self.db, user["id"], f"leave.{'admin_override' if is_system_admin else 'hr'}_{status}", "leave_request", request_id, {"reason": reason, "override": is_system_admin})
+            saved = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,a.full_name AS approval_employee_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees a ON a.id=lr.approval_employee_id WHERE lr.id=?", (request_id,)).fetchone()
             self.send_json(200, {"request": self.leave_request_payload(saved, user)})
 
         def leave_sale_payload(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any]) -> dict[str, Any]:
