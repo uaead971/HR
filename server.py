@@ -92,7 +92,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "lifecycle.manage": "إدارة دورة الموظف",
     },
     "communications": {
-        "notification.send": "إرسال إشعارات داخلية", "communications.view": "عرض حملات البريد",
+        "notification.send": "إرسال إشعارات داخلية", "notification.manage": "تعديل وإخفاء الإشعارات المرسلة لمسؤول النظام فقط", "communications.view": "عرض حملات البريد",
         "communications.send": "إنشاء وإرسال حملات البريد", "communications.retry": "إعادة محاولة البريد المتعثر",
     },
     "security": {
@@ -1665,7 +1665,7 @@ def initialize_database(db_path: Path) -> None:
                     "progress_status": "TEXT NOT NULL DEFAULT 'not_completed'",
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
                 },
-                "notifications": {"available_at": "TEXT"},
+                "notifications": {"available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT"},
             }
             for table, columns in migrations.items():
                 existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -1913,8 +1913,20 @@ def initialize_database(db_path: Path) -> None:
         db.close()
 
 
+def is_configured_general_manager(db: sqlite3.Connection, user: dict[str, Any]) -> bool:
+    keys = user.keys() if hasattr(user, "keys") else user
+    active = user["active"] if "active" in keys else True
+    employee_id = user["employee_id"] if "employee_id" in keys else None
+    if not bool(active) or employee_id is None:
+        return False
+    row = db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()
+    return bool(row and row["general_manager_employee_id"] and int(row["general_manager_employee_id"]) == int(employee_id))
+
+
 def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str) -> bool:
     if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
+        return True
+    if is_configured_general_manager(db, user):
         return True
     override = db.execute("SELECT granted FROM user_permissions WHERE user_id=? AND permission=?", (user["id"], permission)).fetchone()
     if override is not None:
@@ -1927,6 +1939,9 @@ def effective_permissions(db: sqlite3.Connection, user: dict[str, Any]) -> tuple
     if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
         values = sorted(ALL_PERMISSIONS | {"*"})
         return values, {permission: "protected_super_admin" for permission in values}
+    if is_configured_general_manager(db, user):
+        values = sorted(ALL_PERMISSIONS | {"*"})
+        return values, {permission: "configured_general_manager" for permission in values}
     base = ROLE_PERMISSIONS.get(str(user.get("role")), set())
     granted = set(ALL_PERMISSIONS if "*" in base else base)
     reasons = {permission: f"role:{user.get('role')}" for permission in granted}
@@ -2460,10 +2475,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/evaluations/(\d+)/hr-review", self.api_evaluation_hr_review),
                     ("POST", r"/api/evaluations/(\d+)/grievance", self.api_evaluation_grievance_post),
                     ("POST", r"/api/evaluation-grievances/(\d+)/resolve", self.api_evaluation_grievance_resolve),
+                    ("GET", r"/api/notifications/manage", self.api_notification_manage_get),
                     ("GET", r"/api/notifications/inbox", self.api_notification_inbox),
                     ("GET", r"/api/notifications/unread-count", self.api_notification_unread_count),
                     ("POST", r"/api/notifications", self.api_notification_send),
                     ("GET", r"/api/notifications/(\d+)", self.api_notification_get),
+                    ("PATCH", r"/api/notifications/(\d+)", self.api_notification_patch),
                     ("POST", r"/api/notifications/(\d+)/read", self.api_notification_read),
                     ("POST", r"/api/notifications/read-all", self.api_notification_read_all),
                     ("POST", r"/api/salary-certificates", self.api_certificate_post),
@@ -2987,6 +3004,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_user_permissions_patch(self, user_id: int) -> None:
             actor = self.require_permission("security.manage_permissions"); target = self.admin_target(user_id); data = self.read_json()
             if bool(target["is_super_admin"]): raise APIError(409, "صلاحيات المدير الأعلى المحمي ثابتة وكاملة.", "protected_super_admin")
+            if is_configured_general_manager(self.db, target): raise APIError(409, "صلاحيات المدير العام المعين ثابتة وكاملة.", "protected_general_manager")
             raw = data.get("overrides")
             if not isinstance(raw, list) or len(raw) > len(ALL_PERMISSIONS): raise APIError(422, "قائمة الصلاحيات غير صالحة.", "validation_error")
             normalized: dict[str, bool] = {}
@@ -4438,6 +4456,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             (email, values["full_name"], role, digest, salt, employee_id, stamp, stamp),
                         )
                         account_info = {"id": int(account_cursor.lastrowid), "email": email, "role": role}
+                        if role == "general_manager":
+                            self.db.execute("UPDATE organization SET general_manager_employee_id=?,updated_at=? WHERE id=1", (employee_id, stamp))
+                            audit(self.db, user["id"], "organization.general_manager_assign", "employee", employee_id, {"source": "employee_create"})
                     for leave in self.db.execute("SELECT id,code,annual_entitlement FROM leave_types WHERE active=1"):
                         # Annual paid leave is earned from service, never granted
                         # as an opening balance when a profile is created.
@@ -4544,6 +4565,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not existing_employee:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             data = self.read_json()
+            institution_role = data.get("institution_role")
+            if institution_role is not None:
+                institution_role = str(institution_role or "employee").strip().lower()
+                if institution_role not in {"employee", "general_manager"}:
+                    raise APIError(422, "منصب المؤسسة غير صالح.", "validation_error", {"field": "institution_role"})
+                if not has_permission(self.db, user, "org.manage"):
+                    raise APIError(403, "لا تملك صلاحية تعيين المدير العام.", "forbidden", {"permission": "org.manage"})
             values = self.parse_employee(data, partial=True)
             salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
             if salary_touched:
@@ -4575,10 +4603,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "لا تملك صلاحية تعديل الراتب.", "forbidden", {"permission": "salary.view"})
             if values.get("manager_id") == employee_id:
                 raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
-            if not values and languages is None and contract_dates is None:
+            if not values and languages is None and contract_dates is None and institution_role is None:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
             reporting_line_changed = "manager_id" in data or "department_id" in data
             previous_manager_id = self.direct_manager_employee_id(employee_id) if reporting_line_changed else None
+            previous_general_manager = self.db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()["general_manager_employee_id"]
+            leadership_changed = institution_role is not None and (int(previous_general_manager) if previous_general_manager else None) != (employee_id if institution_role == "general_manager" else None)
             stamp = now_iso()
             if values:
                 values["updated_at"] = stamp
@@ -4593,6 +4623,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         self.replace_employee_languages(employee_id, languages, stamp)
                     if contract_dates:
                         self.sync_employee_contract(employee_id, contract_dates, user["id"], stamp)
+                    if institution_role is not None:
+                        next_general_manager = employee_id if institution_role == "general_manager" else None
+                        self.db.execute("UPDATE organization SET general_manager_employee_id=?,updated_at=? WHERE id=1", (next_general_manager, stamp))
+                        if institution_role == "general_manager":
+                            # A designated general manager receives the wildcard
+                            # role and any old explicit overrides are cleared so
+                            # the authority is genuinely complete.
+                            self.db.execute("UPDATE users SET role='employee',updated_at=? WHERE employee_id=? AND role='general_manager'", (stamp, employee_id))
+                            self.db.execute("UPDATE users SET role='general_manager',updated_at=? WHERE employee_id=? AND active=1", (stamp, employee_id))
+                            self.db.execute("DELETE FROM user_permissions WHERE user_id IN (SELECT id FROM users WHERE employee_id=? AND role='general_manager')", (employee_id,))
+                        else:
+                            self.db.execute("UPDATE users SET role='employee',updated_at=? WHERE employee_id=? AND role='general_manager'", (stamp, employee_id))
+                        audit(self.db, user["id"], "organization.general_manager_assign" if institution_role == "general_manager" else "organization.general_manager_clear", "employee", employee_id, {"previous_employee_id": previous_general_manager, "next_employee_id": next_general_manager})
                     if reporting_line_changed:
                         self.sync_manager_assignment_workflows(
                             employee_id,
@@ -4609,9 +4652,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                                 f"نبارك لك ترقيتك من الدرجة {previous_grade} إلى الدرجة {next_grade}. نتمنى لك المزيد من التقدم والنجاح في مهام عملك، وأن تكون هذه الترقية حافزاً لك لمزيد من العطاء والتميز.",
                             )
                         audit(self.db, user["id"], "employee.promotion", "employee", employee_id, {"from_grade": previous_grade, "to_grade": next_grade})
-                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
+                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []), "language_codes": [row["code"] for row in languages] if languages is not None else None})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
+            if leadership_changed:
+                next_general_manager = employee_id if institution_role == "general_manager" else None
+                fallback_rows = self.db.execute("SELECT e.id FROM employees e LEFT JOIN departments d ON d.id=e.department_id WHERE e.active=1 AND e.manager_id IS NULL AND (d.manager_employee_id IS NULL OR d.manager_employee_id=e.id)").fetchall()
+                for fallback in fallback_rows:
+                    self.sync_manager_assignment_workflows(int(fallback["id"]), int(previous_general_manager) if previous_general_manager else None, self.direct_manager_employee_id(int(fallback["id"])), int(user["id"]))
             include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")
             row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=?", (employee_id,)).fetchone()
             employee = normalize_employee(row)
@@ -7240,6 +7288,53 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, self.evaluation_payload(int(evaluation["id"])))
 
         # Notifications
+        def require_notification_admin(self) -> dict[str, Any]:
+            user = self.current_user(True)
+            assert user is not None
+            if str(user.get("role")) != "admin":
+                raise APIError(403, "إدارة الرسائل الداخلية متاحة لمسؤول النظام فقط.", "forbidden", {"permission": "notification.manage"})
+            return user
+
+        def api_notification_manage_get(self) -> None:
+            self.require_notification_admin()
+            rows = self.db.execute(
+                """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.audience_ref,n.available_at,
+                          n.created_at,n.edited_at,n.hidden_at,u.display_name AS sender_name,
+                          (SELECT COUNT(*) FROM notification_recipients r WHERE r.notification_id=n.id) AS recipient_count,
+                          (SELECT COUNT(*) FROM notification_recipients r WHERE r.notification_id=n.id AND r.read_at IS NOT NULL) AS read_count
+                   FROM notifications n JOIN users u ON u.id=n.sender_user_id
+                   ORDER BY n.created_at DESC LIMIT 200"""
+            ).fetchall()
+            self.send_json(200, {"items": [dict(row) | {"hidden": bool(row["hidden_at"])} for row in rows]})
+
+        def api_notification_patch(self, notification_id: int) -> None:
+            user = self.require_notification_admin()
+            row = self.db.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "الإشعار غير موجود.", "not_found")
+            data = self.read_json(); updates: dict[str, Any] = {}; stamp = now_iso()
+            if "title" in data: updates["title"] = require_text(data, "title", 240)
+            if "body" in data: updates["body"] = require_text(data, "body", 5000)
+            if "message_type" in data:
+                message_type = {"قانون": "law", "إشعار": "notice", "تهنئة": "congratulation"}.get(str(data["message_type"]), str(data["message_type"]))
+                if message_type not in {"law", "notice", "congratulation"}:
+                    raise APIError(422, "نوع الرسالة غير صالح.", "validation_error", {"field": "message_type"})
+                updates["message_type"] = message_type
+            if "hidden" in data:
+                if not isinstance(data["hidden"], bool):
+                    raise APIError(422, "قيمة إخفاء الرسالة غير صالحة.", "validation_error", {"field": "hidden"})
+                updates["hidden_at"] = stamp if data["hidden"] else None
+                updates["hidden_by"] = user["id"] if data["hidden"] else None
+            if not updates:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            if any(key in updates for key in ("title", "body", "message_type")):
+                updates["edited_at"] = stamp
+            with self.db:
+                self.db.execute("UPDATE notifications SET " + ",".join(f"{key}=?" for key in updates) + " WHERE id=?", (*updates.values(), notification_id))
+                audit(self.db, user["id"], "notification.update" if not ("hidden_at" in updates) else ("notification.hide" if updates.get("hidden_at") else "notification.unhide"), "notification", notification_id, {"fields": list(updates)})
+            updated = self.db.execute("SELECT n.*,u.display_name AS sender_name,(SELECT COUNT(*) FROM notification_recipients r WHERE r.notification_id=n.id) AS recipient_count FROM notifications n JOIN users u ON u.id=n.sender_user_id WHERE n.id=?", (notification_id,)).fetchone()
+            self.send_json(200, {"notification": dict(updated) | {"hidden": bool(updated["hidden_at"])}})
+
         def api_notification_send(self) -> None:
             user = self.require_permission("notification.send")
             data = self.read_json()
@@ -7290,10 +7385,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ensure_document_expiry_notifications(self.db)
             rows = self.db.execute(
                 """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
-                          u.display_name AS sender_name,r.read_at
+                          u.display_name AS sender_name,r.read_at,n.edited_at
                    FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
                    JOIN users u ON u.id=n.sender_user_id
-                   WHERE r.user_id=? AND (n.available_at IS NULL OR n.available_at<=?)
+                   WHERE r.user_id=? AND n.hidden_at IS NULL AND (n.available_at IS NULL OR n.available_at<=?)
                    ORDER BY n.created_at DESC""",
                 (user["id"], now_iso()),
             ).fetchall()
@@ -7307,7 +7402,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             count = self.db.execute(
                 """SELECT COUNT(*) FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
-                   WHERE r.user_id=? AND r.read_at IS NULL
+                   WHERE r.user_id=? AND r.read_at IS NULL AND n.hidden_at IS NULL
                      AND (n.available_at IS NULL OR n.available_at<=?)""",
                 (user["id"], now_iso()),
             ).fetchone()[0]
@@ -7325,7 +7420,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchone()
             if row is None:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
-            privileged = row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
+            privileged = str(user.get("role")) == "admin" or row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
+            if row["hidden_at"] and str(user.get("role")) != "admin":
+                raise APIError(404, "الإشعار غير موجود.", "not_found")
             if row["available_at"] and row["available_at"] > now_iso() and not privileged:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
             if not privileged:
@@ -7343,7 +7440,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     """UPDATE notification_recipients SET read_at=COALESCE(read_at,?)
                        WHERE notification_id=? AND user_id=?
                          AND notification_id IN (
-                           SELECT id FROM notifications WHERE available_at IS NULL OR available_at<=?
+                           SELECT id FROM notifications WHERE hidden_at IS NULL AND (available_at IS NULL OR available_at<=?)
                          )""",
                     (stamp, notification_id, user["id"], stamp),
                 )
@@ -7360,7 +7457,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     """UPDATE notification_recipients SET read_at=?
                        WHERE user_id=? AND read_at IS NULL
                          AND notification_id IN (
-                           SELECT id FROM notifications WHERE available_at IS NULL OR available_at<=?
+                           SELECT id FROM notifications WHERE hidden_at IS NULL AND (available_at IS NULL OR available_at<=?)
                          )""",
                     (stamp, user["id"], stamp),
                 )
