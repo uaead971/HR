@@ -1611,6 +1611,7 @@ def initialize_database(db_path: Path) -> None:
                     "smtp_from_email": "TEXT NOT NULL DEFAULT ''",
                 },
                 "departments": {"branch_id": "INTEGER", "updated_at": "TEXT"},
+                "branches": {"license_expires_on": "TEXT"},
                 "employees": {
                     "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
                     "approval_employee_id": "INTEGER",
@@ -1703,6 +1704,7 @@ def initialize_database(db_path: Path) -> None:
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
                 },
                 "notifications": {"available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT"},
+                "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
             }
             for table, columns in migrations.items():
                 existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -1778,6 +1780,19 @@ def initialize_database(db_path: Path) -> None:
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_salary_certificates_verification_code ON salary_certificates(verification_code)"
             )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS branch_expiry_alerts (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       branch_id INTEGER NOT NULL,
+                       expires_on TEXT NOT NULL,
+                       alert_window_days INTEGER NOT NULL CHECK (alert_window_days IN (60,30)),
+                       notification_id INTEGER,
+                       created_at TEXT NOT NULL,
+                       UNIQUE(branch_id, expires_on, alert_window_days),
+                       FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+                       FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL)"""
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_branch_expiry_alerts_branch ON branch_expiry_alerts(branch_id, expires_on)")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_salary_certificates_request_status ON salary_certificates(request_status, requested_at)"
             )
@@ -2052,15 +2067,46 @@ def create_internal_notification(
     return notification_id
 
 
+def compliance_notification_recipients(
+    db: sqlite3.Connection,
+    *,
+    include_hr: bool = True,
+    include_system_admins: bool = True,
+    include_final_approvers: bool = False,
+) -> list[int]:
+    """Resolve the people who must see a compliance/expiry alert.
+
+    Roles and permissions are deliberately used instead of department names so
+    that an organisation can rename its HR department without breaking alerts.
+    ``include_final_approvers`` covers HR approval accounts explicitly granted
+    the leave-approval permission, while system administrators always remain
+    recipients of statutory expiry warnings.
+    """
+    recipients: set[int] = set()
+    for row in db.execute("SELECT * FROM users WHERE active=1").fetchall():
+        candidate = dict(row)
+        role = str(candidate.get("role") or "").lower()
+        if include_system_admins and is_system_admin(candidate):
+            recipients.add(int(candidate["id"]))
+        if include_hr and role == "hr":
+            recipients.add(int(candidate["id"]))
+        if include_final_approvers and has_permission(db, candidate, "leave.approve"):
+            recipients.add(int(candidate["id"]))
+    return sorted(recipients)
+
+
 def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
-    """Create one HR inbox alert per document expiry date within the next 90 days."""
-    hr_users = db.execute(
-        "SELECT id,display_name FROM users WHERE role='hr' AND active=1 ORDER BY id"
-    ).fetchall()
-    if not hr_users:
+    """Create a document alert in the 90-day or 30-day warning window.
+
+    The earlier 90-day reminder is retained for operational planning.  Once a
+    document reaches 30 days, a new, more urgent reminder is issued.  The
+    window is stored so each transition is sent once and later inbox reads do
+    not create duplicates.
+    """
+    recipients = compliance_notification_recipients(db, include_hr=True, include_system_admins=True)
+    if not recipients:
         return 0
-    sender_id = int(hr_users[0]["id"])
-    recipients = [int(row["id"]) for row in hr_users]
+    sender_id = recipients[0]
     today = local_now().date()
     expiry_limit = today + timedelta(days=90)
     documents = db.execute(
@@ -2075,17 +2121,29 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
     created = 0
     for document in documents:
         with db:
-            marker = db.execute(
-                "INSERT OR IGNORE INTO document_expiry_alerts(document_id,expires_on,created_at) VALUES(?,?,?)",
-                (document["id"], document["expires_on"], now_iso()),
-            )
-            if marker.rowcount != 1:
-                continue
             days_remaining = (date.fromisoformat(document["expires_on"]) - today).days
+            alert_window_days = 30 if days_remaining <= 30 else 90
+            existing = db.execute(
+                "SELECT alert_window_days FROM document_expiry_alerts WHERE document_id=? AND expires_on=?",
+                (document["id"], document["expires_on"]),
+            ).fetchone()
+            if existing and int(existing["alert_window_days"] or 90) == alert_window_days:
+                continue
+            stamp = now_iso()
+            if existing:
+                db.execute(
+                    "UPDATE document_expiry_alerts SET alert_window_days=?,notification_id=NULL,created_at=? WHERE document_id=? AND expires_on=?",
+                    (alert_window_days, stamp, document["id"], document["expires_on"]),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO document_expiry_alerts(document_id,expires_on,alert_window_days,created_at) VALUES(?,?,?,?)",
+                    (document["id"], document["expires_on"], alert_window_days, stamp),
+                )
             document_label = DOCUMENT_TYPE_LABELS_AR.get(document["document_type"], document["title"] or "وثيقة")
-            title = "تنبيه: وثيقة تقترب من الانتهاء"
+            title = "تنبيه: وثيقة تقترب من الانتهاء" if alert_window_days == 90 else "تنبيه: عاجل — وثيقة تنتهي خلال شهر"
             if document["document_type"] == "contract":
-                title = "تنبيه: عقد العمل يقترب من الانتهاء"
+                title = "تنبيه: عقد العمل يقترب من الانتهاء" if alert_window_days == 90 else "تنبيه: عاجل — عقد العمل ينتهي خلال شهر"
             body = (
                 f"الموظف: {document['full_name']} ({document['employee_no']}). "
                 f"الوثيقة: {document_label}. تاريخ الانتهاء: {document['expires_on']} "
@@ -2096,9 +2154,62 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
                 "UPDATE document_expiry_alerts SET notification_id=? WHERE document_id=? AND expires_on=?",
                 (notification_id, document["id"], document["expires_on"]),
             )
-            audit(db, sender_id, "notification.document_expiry", "employee_document", document["id"], {"expires_on": document["expires_on"], "days_remaining": days_remaining, "notification_id": notification_id})
+            audit(db, sender_id, "notification.document_expiry", "employee_document", document["id"], {"expires_on": document["expires_on"], "days_remaining": days_remaining, "alert_window_days": alert_window_days, "notification_id": notification_id})
             created += 1
     return created
+
+
+def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
+    """Notify final HR approvers and system administrators about branch licences."""
+    recipients = compliance_notification_recipients(
+        db,
+        include_hr=True,
+        include_system_admins=True,
+        include_final_approvers=True,
+    )
+    if not recipients:
+        return 0
+    sender_id = recipients[0]
+    today = local_now().date()
+    expiry_limit = today + timedelta(days=60)
+    branches = db.execute(
+        """SELECT id,name,license_expires_on FROM branches
+           WHERE active=1 AND license_expires_on IS NOT NULL
+             AND license_expires_on BETWEEN ? AND ?
+           ORDER BY license_expires_on ASC,id ASC""",
+        (today.isoformat(), expiry_limit.isoformat()),
+    ).fetchall()
+    created = 0
+    for branch in branches:
+        days_remaining = (date.fromisoformat(branch["license_expires_on"]) - today).days
+        alert_window_days = 30 if days_remaining <= 30 else 60
+        with db:
+            marker = db.execute(
+                "INSERT OR IGNORE INTO branch_expiry_alerts(branch_id,expires_on,alert_window_days,created_at) VALUES(?,?,?,?)",
+                (branch["id"], branch["license_expires_on"], alert_window_days, now_iso()),
+            )
+            if marker.rowcount != 1:
+                continue
+            title = "تنبيه: رخصة الفرع تقترب من الانتهاء"
+            if alert_window_days == 30:
+                title = "تنبيه: عاجل — رخصة الفرع تنتهي خلال شهر"
+            body = (
+                f"الفرع: {branch['name']}. تاريخ انتهاء الرخصة: {branch['license_expires_on']} "
+                f"(متبقٍ {days_remaining} يوماً). يرجى تجديد الرخصة وتحديث تاريخها في ملف الفرع."
+            )
+            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            db.execute(
+                "UPDATE branch_expiry_alerts SET notification_id=? WHERE branch_id=? AND expires_on=? AND alert_window_days=?",
+                (notification_id, branch["id"], branch["license_expires_on"], alert_window_days),
+            )
+            audit(db, sender_id, "notification.branch_license_expiry", "branch", branch["id"], {"expires_on": branch["license_expires_on"], "days_remaining": days_remaining, "alert_window_days": alert_window_days, "notification_id": notification_id})
+            created += 1
+    return created
+
+
+def ensure_expiry_notifications(db: sqlite3.Connection) -> int:
+    """Run all compliance expiry checks before an inbox/dashboard is read."""
+    return ensure_document_expiry_notifications(db) + ensure_branch_license_notifications(db)
 
 
 def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -3441,7 +3552,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_executive_dashboard(self) -> None:
             user = self.require_permission("dashboard.view")
-            ensure_document_expiry_notifications(self.db)
+            ensure_expiry_notifications(self.db)
             today = local_now().date(); date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to"); date_from = parse_date(self.query.get("date_from", (date_to-timedelta(days=29)).isoformat()), "date_from")
             if date_from > date_to or (date_to-date_from).days > 366: raise APIError(422,"نطاق التاريخ غير صالح أو يتجاوز سنة.","validation_error")
             conditions, params = self.executive_scope(user); where = " WHERE "+" AND ".join(conditions) if conditions else ""
@@ -3972,6 +4083,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def serialize_branch(self, row: sqlite3.Row) -> dict[str, Any]:
             data = dict(row)
             data["active"] = bool(data["active"])
+            expiry = data.get("license_expires_on")
+            if expiry:
+                try:
+                    days_remaining = (date.fromisoformat(str(expiry)[:10]) - local_now().date()).days
+                except ValueError:
+                    days_remaining = None
+            else:
+                days_remaining = None
+            data["license_days_remaining"] = days_remaining
+            data["license_status"] = (
+                "expired" if days_remaining is not None and days_remaining < 0
+                else "expiring_soon" if days_remaining is not None and days_remaining <= 60
+                else "valid" if days_remaining is not None else "not_set"
+            )
             return data
 
         def parse_branch(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
@@ -3986,6 +4111,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 result["longitude"] = as_float(data.get("longitude"), "longitude", -180, 180)
             if not partial or "radius_m" in data:
                 result["radius_m"] = as_int(data.get("radius_m"), "radius_m", 50, 5000)
+            if "license_expires_on" in data or not partial:
+                raw_license_expiry = data.get("license_expires_on")
+                result["license_expires_on"] = parse_date(raw_license_expiry, "license_expires_on").isoformat() if raw_license_expiry not in (None, "") else None
             if "manager_employee_id" in data:
                 result["manager_employee_id"] = as_int(data["manager_employee_id"], "manager_employee_id", 1) if data["manager_employee_id"] not in (None, "") else None
                 if result["manager_employee_id"] and not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (result["manager_employee_id"],)).fetchone():
@@ -4008,7 +4136,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for row in rows:
                 data = self.serialize_branch(row)
                 if not privileged:
-                    data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "active")}
+                    data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "license_expires_on", "license_days_remaining", "license_status", "active")}
                 items.append(data)
             self.send_json(200, {"items": items})
 
@@ -4016,7 +4144,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True); assert user is not None
             data = self.serialize_branch(self.branch_row(branch_id))
             if not self.has_privileged_people_access(user, "employee.view"):
-                data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "active")}
+                data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "license_expires_on", "license_days_remaining", "license_status", "active")}
             self.send_json(200, {"branch": data})
 
         def api_branches_post(self) -> None:
@@ -4026,8 +4154,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     cursor = self.db.execute(
-                        "INSERT INTO branches(name,address,manager_employee_id,latitude,longitude,radius_m,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                        (values["name"], values["address"], values.get("manager_employee_id"), values["latitude"], values["longitude"], values["radius_m"], values["active"], stamp, stamp),
+                        "INSERT INTO branches(name,address,manager_employee_id,latitude,longitude,radius_m,license_expires_on,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (values["name"], values["address"], values.get("manager_employee_id"), values["latitude"], values["longitude"], values["radius_m"], values.get("license_expires_on"), values["active"], stamp, stamp),
                     )
                     branch_id = int(cursor.lastrowid)
                     audit(self.db, user["id"], "branch.create", "branch", branch_id, values)
@@ -7812,7 +7940,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_inbox(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_document_expiry_notifications(self.db)
+            ensure_expiry_notifications(self.db)
             rows = self.db.execute(
                 """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
                           u.display_name AS sender_name,r.read_at,n.edited_at
@@ -7828,7 +7956,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_unread_count(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_document_expiry_notifications(self.db)
+            ensure_expiry_notifications(self.db)
             count = self.db.execute(
                 """SELECT COUNT(*) FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id

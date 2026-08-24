@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS branches (
   latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
   longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
   radius_m INTEGER NOT NULL CHECK (radius_m BETWEEN 50 AND 5000),
+  license_expires_on TEXT,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -622,6 +623,20 @@ CREATE TABLE IF NOT EXISTS document_expiry_alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_expiry_alerts_document ON document_expiry_alerts(document_id);
+
+CREATE TABLE IF NOT EXISTS branch_expiry_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  branch_id INTEGER NOT NULL,
+  expires_on TEXT NOT NULL,
+  alert_window_days INTEGER NOT NULL CHECK (alert_window_days IN (60,30)),
+  notification_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(branch_id, expires_on, alert_window_days),
+  FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_branch_expiry_alerts_branch ON branch_expiry_alerts(branch_id, expires_on);
 
 CREATE TABLE IF NOT EXISTS salary_certificates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -140,6 +140,9 @@ td{padding:11px 10px;border-top:1px solid #efeee9;font-size:11px;vertical-align:
 .branch-card.selected{border-color:var(--gold);box-shadow:0 0 0 2px #c48a3a22}
 .branch-card h3{color:var(--green);font-size:14px;margin:0}
 .branch-card p{font-size:10px;color:var(--muted);margin:4px 0 11px}
+.branch-card .branch-license{font-size:11px;font-weight:700;margin:0 0 11px;color:var(--muted)}
+.branch-card .branch-license.warning{color:#98651f}
+.branch-card .branch-license.expired{color:#a63f37}
 .branch-card footer{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .map{height:440px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#e8ece7;position:relative}
 .map-fallback{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted)}
