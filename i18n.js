@@ -93,6 +93,7 @@
   };
 
   Object.assign(english, {
+    'الجنس':'Gender', 'اختياري / غير محدد':'Optional / not specified', 'ذكر':'Male', 'أنثى':'Female',
     'عقد العمل':'Employment contract', 'تاريخ بداية العقد':'Contract start date', 'تاريخ نهاية العقد':'Contract end date',
     'ترتبط صلاحية بطاقة العمل بتاريخ بداية ونهاية عقد العمل.':'The employee-card validity follows the contract start and end dates.',
     'تاريخ انتهاء العقد لا يمكن أن يسبق تاريخ بدايته.':'The contract end date cannot precede its start date.',
