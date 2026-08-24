@@ -361,6 +361,7 @@ CREATE TABLE IF NOT EXISTS leave_balances (
   entitlement REAL NOT NULL DEFAULT 0,
   carried REAL NOT NULL DEFAULT 0,
   used REAL NOT NULL DEFAULT 0,
+  manual_override INTEGER NOT NULL DEFAULT 0 CHECK (manual_override IN (0,1)),
   PRIMARY KEY (employee_id, leave_type_id, year),
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
   FOREIGN KEY (leave_type_id) REFERENCES leave_types(id) ON DELETE CASCADE

@@ -213,6 +213,16 @@
       <section class="page" id="leaves">
         <div class="page-head"><div><span class="eyebrow">الاستحقاقات</span><h1>الإجازات والأرصدة</h1><p>يحسب النظام الاستحقاق من مدة الخدمة، ويمنع الإجازة السنوية المدفوعة قبل إتمام ستة أشهر.</p></div><div class="button-row"><button class="secondary" id="requestLeaveSale">+ طلب بيع رصيد</button><button class="primary" id="requestLeave">+ طلب إجازة</button></div></div>
         <div class="balance-grid" id="leaveBalances"></div>
+        <article class="card leave-balance-admin" id="leaveBalanceAdmin" data-system-admin-only style="margin-top:16px" hidden>
+          <div class="section-head"><div><h2>إدارة أرصدة الموظفين</h2><p>مدير النظام فقط يمكنه الاستعلام عن رصيد موظف وإضافة أو تعديل الاستحقاق والمرحل والمستخدم. يحفظ النظام كل تعديل في سجل التدقيق.</p></div><span class="status">مدير النظام</span></div>
+          <form id="leaveBalanceAdminForm" class="inline-form leave-balance-admin-form">
+            <label>الموظف<select name="employee_id" id="leaveBalanceEmployee" required><option value="">اختر الموظف</option></select></label>
+            <label>السنة<input name="year" type="number" min="2000" max="2200" required></label>
+            <button class="primary" type="submit">استعلام عن الرصيد</button>
+          </form>
+          <p class="field-error" id="leaveBalanceAdminError" role="alert" hidden></p>
+          <div id="leaveBalanceAdminList" class="leave-balance-admin-list"><div class="empty">اختر موظفاً وسنة لعرض الأرصدة.</div></div>
+        </article>
         <article class="card leave-type-directory" style="margin-top:16px"><div class="section-head"><div><h2>أنواع الإجازات والترخيص</h2><p>قائمة الأنواع المهيأة في النظام، بما فيها الترخيص المدفوع خلال ساعات العمل بحد أقصى ساعتين.</p></div><span class="status">سياسة المؤسسة</span></div><div id="leaveTypeDirectory" class="leave-type-list"></div></article>
         <article class="card" style="margin-top:16px"><div class="section-head"><h2 id="leaveListTitle">طلبات الإجازة</h2><span class="status" id="leaveQueueCount">—</span></div><div class="stack" id="leaveRequests"></div></article>
         <article class="card" style="margin-top:16px"><div class="section-head"><div><h2>طلبات بيع رصيد الإجازة</h2><p>يعتمدها مسؤول الموارد البشرية، وعند الاعتماد تخصم الأيام من الرصيد ويثبت المقابل المالي.</p></div><button class="secondary" id="refreshLeaveSales" type="button">تحديث</button></div><div class="stack" id="leaveSaleRequests"></div></article>

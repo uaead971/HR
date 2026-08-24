@@ -77,6 +77,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "shift.view": "عرض المناوبات", "shift.manage": "إدارة المناوبات",
         "leave.view": "عرض طلبات الإجازة", "leave.team": "قرار المسؤول المباشر على طلبات الفريق", "leave.approve": "الاعتماد النهائي للإجازات لدى الموارد البشرية",
         "leave.types.manage": "إدارة أنواع الإجازات وسياسة الرصيد (مدير النظام فقط)",
+        "leave.balance.manage": "إضافة وتعديل أرصدة الموظفين (مدير النظام فقط)",
         "overtime.view": "عرض العمل الإضافي", "overtime.approve": "اعتماد العمل الإضافي",
     },
     "payroll": {
@@ -1666,6 +1667,9 @@ def initialize_database(db_path: Path) -> None:
                 "leave_types": {
                     "max_hours": "REAL NOT NULL DEFAULT 0",
                 },
+                "leave_balances": {
+                    "manual_override": "INTEGER NOT NULL DEFAULT 0",
+                },
                 "evaluation_cycles": {
                     "period_start": "TEXT",
                     "period_end": "TEXT",
@@ -2628,6 +2632,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("PATCH", r"/api/leaves/holidays/(\d+)", self.api_leave_holiday_patch),
                     ("DELETE", r"/api/leaves/holidays/(\d+)", self.api_leave_holiday_delete),
                     ("GET", r"/api/leaves/balances", self.api_leave_balances),
+                    ("PATCH", r"/api/leaves/balances", self.api_leave_balance_patch),
                     ("GET", r"/api/leaves/requests", self.api_leave_requests_get),
                     ("POST", r"/api/leaves/requests", self.api_leave_requests_post),
                     ("POST", r"/api/leaves/requests/(\d+)/decision", self.api_leave_request_decision),
@@ -6378,8 +6383,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "SELECT COALESCE(SUM(days),0) FROM leave_requests WHERE employee_id=? AND leave_type_id=? AND status='submitted'",
                         (employee_id, leave["id"]),
                     ).fetchone()[0])
-                    entitlement = annual_leave_entitlement_for_year(hire_date, year, today)
-                    carried = max(0.0, accrued_total - entitlement)
+                    automatic_entitlement = annual_leave_entitlement_for_year(hire_date, year, today)
+                    # A system administrator may explicitly override the
+                    # current year's balance.  Keep the statutory accrual as
+                    # the default, but honour a stored manual adjustment
+                    # (including an intentional zero) when present.
+                    manually_adjusted = bool(balance and "manual_override" in balance.keys() and balance["manual_override"])
+                    entitlement = float(balance["entitlement"]) if manually_adjusted else automatic_entitlement
+                    carried = max(0.0, float(balance["carried"])) if manually_adjusted else max(0.0, accrued_total - automatic_entitlement)
                     used = approved_legacy_used
                     pending = pending_annual
                 else:
@@ -6428,6 +6439,61 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "leave.view"):
                 raise APIError(403, "لا يمكنك عرض رصيد هذا الموظف.", "forbidden")
             self.send_json(200, {"employee_id": employee_id, "year": year, "items": self.leave_balance_rows(employee_id, year)})
+
+        def api_leave_balance_patch(self) -> None:
+            """Create or replace a per-year leave balance adjustment.
+
+            Viewing balances remains available through the normal leave-view
+            rules, while mutation is deliberately stricter: only a system
+            administrator can edit the entitlement, carried and used values.
+            Every change is marked as a manual override and written to audit.
+            """
+            user = self.require_leave_policy_admin()
+            data = self.read_json()
+            employee_id = as_int(data.get("employee_id"), "employee_id", 1)
+            leave_type_id = as_int(data.get("leave_type_id"), "leave_type_id", 1)
+            year = as_int(data.get("year", local_now().year), "year", 2000, 2200)
+            employee = self.db.execute("SELECT id,full_name,employee_no FROM employees WHERE id=?", (employee_id,)).fetchone()
+            if employee is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found", {"field": "employee_id"})
+            leave_type = self.db.execute("SELECT id,code,name FROM leave_types WHERE id=?", (leave_type_id,)).fetchone()
+            if leave_type is None:
+                raise APIError(404, "نوع الإجازة غير موجود.", "not_found", {"field": "leave_type_id"})
+            entitlement = as_float(data.get("entitlement", 0), "entitlement", 0, 3660)
+            carried = as_float(data.get("carried", 0), "carried", 0, 3660)
+            used = as_float(data.get("used", 0), "used", 0, 3660)
+            previous = self.db.execute(
+                "SELECT entitlement,carried,used,manual_override FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?",
+                (employee_id, leave_type_id, year),
+            ).fetchone()
+            stamp = now_iso()
+            with self.db:
+                self.db.execute(
+                    """INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement,carried,used,manual_override)
+                       VALUES(?,?,?,?,?,?,1)
+                       ON CONFLICT(employee_id,leave_type_id,year) DO UPDATE SET
+                         entitlement=excluded.entitlement,carried=excluded.carried,used=excluded.used,manual_override=1""",
+                    (employee_id, leave_type_id, year, entitlement, carried, used),
+                )
+                audit(
+                    self.db,
+                    user["id"],
+                    "leave_balance.manual_update",
+                    "leave_balance",
+                    f"{employee_id}:{leave_type_id}:{year}",
+                    {
+                        "employee_id": employee_id,
+                        "employee_no": employee["employee_no"],
+                        "leave_type_id": leave_type_id,
+                        "leave_type_code": leave_type["code"],
+                        "year": year,
+                        "before": dict(previous) if previous else None,
+                        "after": {"entitlement": entitlement, "carried": carried, "used": used, "manual_override": True},
+                    },
+                )
+            rows = self.leave_balance_rows(employee_id, year)
+            updated = next((row for row in rows if int(row["leave_type_id"]) == leave_type_id), None)
+            self.send_json(200, {"employee_id": employee_id, "year": year, "balance": updated, "items": rows})
 
         def api_end_of_service_calculator(self) -> None:
             user = self.current_user(True)

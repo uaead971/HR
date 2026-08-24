@@ -123,6 +123,12 @@
     ,'رقم الهاتف غير صالح. استخدم الأرقام الإنجليزية فقط مع + أو المسافات أو الشرطات.':'Invalid phone number. Use English digits with +, spaces, or hyphens only.'
     ,'عقد عمل منشأ آلياً من بيانات الموظف وفق نموذج الإقرار الموجز؛ يمكن استبداله بنسخة موقعة من المؤسسة.':'Concise contract acknowledgement PDF generated from the employee record; HR may replace it with a signed copy.'
     ,'عقد العمل - ':'Employment contract - ','مرجع العقد':'Contract reference','قالب نظامي داخلي — لا يغني عن نموذج وزارة الموارد البشرية والتوطين أو مراجعة المستشار القانوني.':'Internal template — it does not replace the MOHRE form or legal review.'
+    ,'إدارة أرصدة الموظفين':'Employee leave balance management'
+    ,'مدير النظام فقط يمكنه الاستعلام عن رصيد موظف وإضافة أو تعديل الاستحقاق والمرحل والمستخدم. يحفظ النظام كل تعديل في سجل التدقيق.':'Only the system administrator can query and add or edit an employee entitlement, carried and used balance. Every change is recorded in the audit log.'
+    ,'استعلام عن الرصيد':'Query balance','اختر الموظف':'Choose employee','لا توجد أنواع إجازات ظاهرة لهذا الموظف.':'No visible leave types for this employee.','اختر موظفاً وسنة لعرض الأرصدة.':'Choose an employee and year to view balances.'
+    ,'الاستحقاق':'Entitlement','المرحل':'Carried forward','المستخدم':'Used','حفظ تعديل الرصيد':'Save balance adjustment'
+    ,'تم حفظ رصيد الإجازة وتسجيل التعديل في سجل التدقيق':'Leave balance saved and the adjustment was recorded in the audit log.','اختر الموظف أولاً للاستعلام عن الرصيد.':'Choose an employee first to query the balance.'
+    ,'إضافة وتعديل أرصدة الموظفين (مدير النظام فقط)':'Add and edit employee balances (system administrator only)'
   });
 
   const originals = new WeakMap();
