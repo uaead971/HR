@@ -3110,6 +3110,41 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("/api/leaves/sales", server_source)
         self.assertIn("requestLeaveSale", app_source)
 
+    def test_63_v59_manual_general_manager_and_department_head_leave_routing(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employees = hr.request("GET", "/api/employees")["items"]
+        branch_id = hr.request("GET", "/api/branches")["items"][0]["id"]
+        suffix = uuid.uuid4().hex[:8]
+        email = f"head-{suffix}@demo.ae"
+        head = hr.request(
+            "POST", "/api/employees",
+            {"employee_no": f"HEAD-{suffix}", "full_name": "رئيس قسم اختبار", "email": email,
+             "job_title": "رئيس قسم", "job_grade": "G-07", "branch_id": branch_id,
+             "hire_date": "2020-01-01", "salary": 10000, "create_user": True,
+             "password": "Head@12345", "role": "employee"}, expected=201,
+        )["employee"]
+        department = hr.request(
+            "POST", "/api/departments",
+            {"name": f"قسم اعتماد {suffix}", "branch_id": branch_id, "manager_employee_id": head["id"]}, expected=201,
+        )["department"]
+        hr.request("PATCH", "/api/org", {"general_manager_employee_id": employees[0]["id"]})
+        org = hr.request("GET", "/api/org")["organization"]
+        self.assertEqual(org["general_manager_employee_id"], employees[0]["id"])
+        head_client = self.client(email, "Head@12345")
+        annual = next(item for item in head_client.request("GET", "/api/leaves/types")["items"] if item["code"] == "annual")
+        start = date.today() + timedelta(days=220)
+        leave = head_client.request(
+            "POST", "/api/leaves/requests",
+            {"leave_type_id": annual["id"], "start_date": start.isoformat(), "end_date": start.isoformat(), "reason": "اختبار طلب رئيس قسم"}, expected=201,
+        )["request"]
+        self.assertEqual(leave["workflow_stage"], "pending_hr")
+        self.assertEqual(leave["manager_decision"], "approved")
+        self.assertIsNone(leave["manager_employee_id"])
+        approved = hr.request("POST", f"/api/leaves/requests/{leave['id']}/decision", {"action": "approve"})["request"]
+        self.assertEqual(approved["status"], "approved")
+        hierarchy = hr.request("GET", "/api/org/grid")["general_manager"]
+        self.assertEqual(hierarchy["id"], employees[0]["id"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
