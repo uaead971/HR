@@ -3871,7 +3871,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def build_employee_comprehensive_report(self, employee_id: int, data: dict[str, Any], actor: dict[str, Any]) -> dict[str, Any]:
             employee = self.db.execute(
-                """SELECT e.id,e.employee_no,e.full_name,e.hire_date,e.photo_data,e.active,e.created_at,e.updated_at,
+                """SELECT e.id,e.employee_no,e.full_name,e.hire_date,e.photo_data,e.active,e.gender,e.created_at,e.updated_at,
                           COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
                           jg.name AS job_grade_name,d.name AS department_name,b.name AS branch_name
                      FROM employees e
