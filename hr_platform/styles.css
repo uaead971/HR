@@ -479,6 +479,8 @@ body *{visibility:hidden!important}
 .card-actions{align-items:center}
 
 .org-workspace{padding:0;overflow:hidden}
+.org-data-source{display:block;margin-top:4px;color:var(--muted);font-size:10px}
+.org-load-failed{min-height:180px;display:grid;place-items:center;padding:24px}.org-load-failed .empty{max-width:520px;text-align:center}.org-load-failed .empty p{margin:8px 0 14px;color:var(--muted)}
 .org-viewbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:#fafaf7}
 .view-switch{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:9px;background:#fff}
 .view-switch button{border:0;background:transparent;color:var(--muted);padding:8px 13px;border-radius:6px}

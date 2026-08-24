@@ -1773,6 +1773,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(grid["label"], "المخطط الشبكي")
         self.assertTrue(grid["general_manager"])
         self.assertTrue(all("employees" in department for department in grid["departments"]))
+        target_department = next(department for department in grid["departments"] if department["employees"])["id"]
+        department_grid = hr.request("GET", f"/api/org/grid?department_id={target_department}")
+        self.assertTrue(any(department["employees"] for department in department_grid["departments"]))
+        self.assertTrue(all(department["id"] == target_department for department in department_grid["departments"]))
 
     def test_23_v46_password_change_admin_temporary_reset_and_session_invalidation(self):
         admin = self.client("admin@demo.ae", "Admin@123")

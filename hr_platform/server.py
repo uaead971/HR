@@ -3236,9 +3236,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True); assert user is not None
             if not self.has_privileged_people_access(user, "employee.view"):
                 raise APIError(403, "المخطط الكامل متاح للإدارة المخولة فقط.", "forbidden")
-            branch = self.query.get("branch_id"); search = self.query.get("q","").strip()
+            branch = self.query.get("branch_id"); department = self.query.get("department_id"); search = self.query.get("q","").strip()
             conditions = ["e.active=1"]; params: list[Any] = []
             if branch: conditions.append("e.branch_id=?"); params.append(as_int(branch,"branch_id",1))
+            if department: conditions.append("e.department_id=?"); params.append(as_int(department,"department_id",1))
             if search: conditions.append("(e.full_name LIKE ? OR e.employee_no LIKE ? OR e.job_title LIKE ?)"); term=f"%{search}%"; params.extend((term,term,term))
             employees = [normalize_employee(row) for row in self.db.execute(employee_query(False)+" WHERE "+" AND ".join(conditions)+" ORDER BY e.full_name", params)]
             gm_row = self.db.execute(employee_query(False)+" JOIN users gu ON gu.employee_id=e.id WHERE gu.role='general_manager' AND gu.active=1 ORDER BY gu.is_super_admin DESC,e.id LIMIT 1").fetchone()
@@ -3247,8 +3248,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             dept_rows = self.db.execute("SELECT d.id,d.name,d.branch_id,b.name AS branch_name,d.manager_employee_id,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id WHERE d.active=1 ORDER BY d.name").fetchall()
             for row in dept_rows:
                 members=[e for e in employees if e and e.get("department_id")==row["id"]]
-                if members or (not branch and not search): departments.append(dict(row)|{"employees":members})
-            self.send_json(200,{"view":"grid","label":"المخطط الشبكي","general_manager":gm,"departments":departments,"employee_count":len([e for e in employees if e]),"filters":{"branch_id":branch,"q":search},"source":"employees+departments+users"})
+                if members or (not branch and not department and not search): departments.append(dict(row)|{"employees":members})
+            self.send_json(200,{"view":"grid","label":"المخطط الشبكي","general_manager":gm,"departments":departments,"employee_count":len([e for e in employees if e]),"filters":{"branch_id":branch,"department_id":department,"q":search},"source":"employees+departments+users"})
 
         def api_departments(self) -> None:
             user = self.current_user(True); assert user is not None
