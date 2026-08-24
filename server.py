@@ -2170,6 +2170,33 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
     """
 
 
+def organization_employee_query() -> str:
+    """Return the small, non-sensitive employee projection used by org views.
+
+    The organization chart can contain every employee in the tenant. Reusing
+    ``employee_query`` here used to include salary fields and the full
+    ``photo_data`` data URL for every person, which made a large chart consume
+    excessive browser memory while parsing JSON. The chart only needs
+    identity, placement and reporting fields, so keep this projection narrow.
+    """
+    return """
+        SELECT e.id,e.employee_no,e.full_name,e.gender,
+               COALESCE(jt.name,e.job_title) AS job_title,
+               COALESCE(jg.code,e.job_grade) AS job_grade,
+               e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
+               e.department_id,d.name AS department_name,
+               e.branch_id,b.name AS branch_name,
+               e.manager_id,m.full_name AS manager_name,
+               e.hire_date,e.active,e.updated_at
+        FROM employees e
+        LEFT JOIN departments d ON d.id=e.department_id
+        LEFT JOIN branches b ON b.id=e.branch_id
+        LEFT JOIN employees m ON m.id=e.manager_id
+        LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+        LEFT JOIN job_grades jg ON jg.id=e.job_grade_id
+    """
+
+
 def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -3236,19 +3263,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True); assert user is not None
             if not self.has_privileged_people_access(user, "employee.view"):
                 raise APIError(403, "المخطط الكامل متاح للإدارة المخولة فقط.", "forbidden")
-            branch = self.query.get("branch_id"); search = self.query.get("q","").strip()
+            branch = self.query.get("branch_id"); department = self.query.get("department_id"); search = self.query.get("q","").strip()
             conditions = ["e.active=1"]; params: list[Any] = []
             if branch: conditions.append("e.branch_id=?"); params.append(as_int(branch,"branch_id",1))
+            if department: conditions.append("e.department_id=?"); params.append(as_int(department,"department_id",1))
             if search: conditions.append("(e.full_name LIKE ? OR e.employee_no LIKE ? OR e.job_title LIKE ?)"); term=f"%{search}%"; params.extend((term,term,term))
-            employees = [normalize_employee(row) for row in self.db.execute(employee_query(False)+" WHERE "+" AND ".join(conditions)+" ORDER BY e.full_name", params)]
-            gm_row = self.db.execute(employee_query(False)+" JOIN users gu ON gu.employee_id=e.id WHERE gu.role='general_manager' AND gu.active=1 ORDER BY gu.is_super_admin DESC,e.id LIMIT 1").fetchone()
-            gm = normalize_employee(gm_row) if gm_row else next((e for e in employees if e and not e.get("manager_id")), None)
+            employees = [dict(row) for row in self.db.execute(organization_employee_query()+" WHERE "+" AND ".join(conditions)+" ORDER BY e.full_name", params)]
+            gm_row = self.db.execute(organization_employee_query()+" JOIN users gu ON gu.employee_id=e.id WHERE gu.role='general_manager' AND gu.active=1 ORDER BY gu.is_super_admin DESC,e.id LIMIT 1").fetchone()
+            gm = dict(gm_row) if gm_row else next((e for e in employees if e and not e.get("manager_id")), None)
             departments = []
             dept_rows = self.db.execute("SELECT d.id,d.name,d.branch_id,b.name AS branch_name,d.manager_employee_id,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id WHERE d.active=1 ORDER BY d.name").fetchall()
             for row in dept_rows:
                 members=[e for e in employees if e and e.get("department_id")==row["id"]]
-                if members or (not branch and not search): departments.append(dict(row)|{"employees":members})
-            self.send_json(200,{"view":"grid","label":"المخطط الشبكي","general_manager":gm,"departments":departments,"employee_count":len([e for e in employees if e]),"filters":{"branch_id":branch,"q":search},"source":"employees+departments+users"})
+                if members or (not branch and not department and not search): departments.append(dict(row)|{"employees":members})
+            self.send_json(200,{"view":"grid","label":"المخطط الشبكي","general_manager":gm,"departments":departments,"employee_count":len([e for e in employees if e]),"filters":{"branch_id":branch,"department_id":department,"q":search},"source":"employees+departments+users"})
 
         def api_departments(self) -> None:
             user = self.current_user(True); assert user is not None
@@ -3351,7 +3379,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             view=self.query.get("view","hierarchical")
             if view not in {"hierarchical","grid","sequential"}: raise APIError(422,"عرض الهيكل غير صالح.","validation_error")
             departments = [dict(r) for r in self.db.execute("SELECT d.*,b.name AS branch_name,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id ORDER BY d.name")]
-            employees = [normalize_employee(r) for r in self.db.execute(employee_query(False) + " ORDER BY e.full_name")]
+            employees = [dict(r) for r in self.db.execute(organization_employee_query() + " ORDER BY e.full_name")]
             by_id = {e["id"]: e for e in employees if e}
             department_managers = {int(d["id"]): int(d["manager_employee_id"]) for d in departments if d.get("manager_employee_id")}
             flat = []
