@@ -1580,6 +1580,7 @@ def initialize_database(db_path: Path) -> None:
                 "departments": {"branch_id": "INTEGER", "updated_at": "TEXT"},
                 "employees": {
                     "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
+                    "gender": "TEXT NOT NULL DEFAULT 'unspecified'",
                     "qualification": "TEXT NOT NULL DEFAULT ''", "nationality": "TEXT NOT NULL DEFAULT ''",
                     "birth_date": "TEXT", "place_of_birth": "TEXT NOT NULL DEFAULT ''",
                     "passport_no": "TEXT NOT NULL DEFAULT ''", "passport_expires_on": "TEXT",
@@ -2149,7 +2150,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
     sensitive = "," + ",".join(f"e.{field}" for field in EMPLOYEE_SENSITIVE_FIELDS) if include_sensitive else ""
     emergency_count = "," + "(SELECT COUNT(*) FROM employee_emergency_contacts ec WHERE ec.employee_id=e.id AND ec.archived=0) AS emergency_contact_count" if include_sensitive else ""
     return f"""
-        SELECT e.id,e.employee_no,e.full_name,e.email,e.phone,
+        SELECT e.id,e.employee_no,e.full_name,e.email,e.phone,e.gender,
                COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
@@ -4000,10 +4001,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                           COALESCE(lb.carried,0) AS carried,COALESCE(lb.used,0) AS used
                      FROM leave_types lt
                      LEFT JOIN leave_balances lb ON lb.leave_type_id=lt.id AND lb.employee_id=? AND lb.year=?
-                    WHERE lt.active=1 ORDER BY lt.id""",
+                    WHERE lt.active=1 AND lt.code <> 'sick' ORDER BY lt.id""",
                 (employee_id, balance_year),
             ).fetchall():
                 item = dict(row)
+                if item["leave_type_code"] == "maternity" and str(employee["gender"] if "gender" in employee.keys() else "unspecified").lower() != "female":
+                    continue
                 item["remaining"] = max(0, float(item["entitlement"] or 0) + float(item["carried"] or 0) - float(item["used"] or 0))
                 balances.append(item)
 
@@ -4165,6 +4168,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ):
                 if key in data or not partial:
                     result[key] = optional_text(data, key, max_len)
+            if "gender" in data or not partial:
+                gender = str(data.get("gender") or "unspecified").strip().lower()
+                if gender not in {"unspecified", "male", "female"}:
+                    raise APIError(422, "الجنس غير صالح.", "validation_error", {"field": "gender"})
+                result["gender"] = gender
             if "email" in result:
                 result["email"] = clean_email(result["email"]) or None
                 if result["email"] and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", result["email"]):
@@ -5746,11 +5754,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def leave_balance_rows(self, employee_id: int, year: int) -> list[dict[str, Any]]:
             leave_types = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
-            employee = self.db.execute("SELECT hire_date FROM employees WHERE id=?", (employee_id,)).fetchone()
+            employee = self.db.execute("SELECT hire_date,gender FROM employees WHERE id=?", (employee_id,)).fetchone()
             hire_date = employee["hire_date"] if employee else None
+            gender = str(employee["gender"] if employee and "gender" in employee.keys() else "unspecified").lower()
             today = local_now().date()
             rows: list[dict[str, Any]] = []
             for leave in leave_types:
+                # Sick-leave balances are not displayed as an accrued balance;
+                # sick leave remains available as a request type. Maternity
+                # leave is visible only for female employee profiles.
+                if leave["code"] == "sick" or (leave["code"] == "maternity" and gender != "female"):
+                    continue
                 balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (employee_id, leave["id"], year)).fetchone()
                 if leave["code"] == "annual":
                     entitlement = annual_leave_entitlement_for_year(hire_date, year, today)
@@ -5784,8 +5798,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return rows
 
         def api_leave_types(self) -> None:
-            self.current_user(True)
+            user = self.current_user(True)
+            assert user is not None
+            target_id = as_int(self.query["employee_id"], "employee_id", 1) if self.query.get("employee_id") else user.get("employee_id")
+            target_gender = None
+            if target_id:
+                employee = self.db.execute("SELECT gender FROM employees WHERE id=?", (target_id,)).fetchone()
+                target_gender = str(employee["gender"] if employee and "gender" in employee.keys() else "unspecified").lower() if employee else None
             rows = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
+            if target_gender != "female":
+                rows = [row for row in rows if row["code"] != "maternity"]
             self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"]), "paid": bool(r["paid"]), "requires_attachment": bool(r["requires_attachment"]), "max_hours": float(r["max_hours"] or 0)} for r in rows]})
 
         def api_leave_balances(self) -> None:
@@ -5825,6 +5847,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             leave_type = self.db.execute("SELECT * FROM leave_types WHERE id=? AND active=1", (leave_type_id,)).fetchone()
             if leave_type is None:
                 raise APIError(404, "نوع الإجازة غير موجود.", "not_found")
+            employee_profile = self.db.execute("SELECT gender FROM employees WHERE id=?", (employee_id,)).fetchone()
+            employee_gender = str(employee_profile["gender"] if employee_profile and "gender" in employee_profile.keys() else "unspecified").lower()
+            if leave_type["code"] == "maternity" and employee_gender != "female":
+                raise APIError(422, "إجازة الأمومة متاحة للموظفات فقط.", "gender_restricted_leave")
             start = parse_date(data.get("start_date"), "start_date")
             end = parse_date(data.get("end_date"), "end_date")
             if end < start:
