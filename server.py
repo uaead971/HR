@@ -3396,16 +3396,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(201,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(cur.lastrowid,)).fetchone())})
 
         def api_job_grade_patch(self, grade_id: int) -> None:
-            user=self.require_permission("reference.manage"); data=self.read_json(); allowed={k:data[k] for k in ("code","name","active") if k in data}
+            user=self.require_permission("reference.manage"); data=self.read_json(); existing=self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone()
+            if existing is None: raise APIError(404,"الدرجة غير موجودة.","not_found")
+            allowed={}
+            if "code" in data: allowed["code"]=require_text(data,"code",40)
+            if "name" in data: allowed["name"]=require_text(data,"name",120)
             if "min_salary" in data: allowed["min_salary_cents"]=money_cents(data["min_salary"],"min_salary")
             if "max_salary" in data: allowed["max_salary_cents"]=money_cents(data["max_salary"],"max_salary")
-            if "active" in allowed: allowed["active"]=1 if bool(allowed["active"]) else 0
+            if "active" in data: allowed["active"]=1 if bool(data["active"]) else 0
             if not allowed: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            minimum=allowed.get("min_salary_cents",existing["min_salary_cents"]); maximum=allowed.get("max_salary_cents",existing["max_salary_cents"])
+            if maximum and maximum < minimum: raise APIError(422,"الحد الأعلى أقل من الحد الأدنى.","validation_error")
             allowed["updated_at"]=now_iso()
-            with self.db:
-                result=self.db.execute("UPDATE job_grades SET "+",".join(f"{k}=?" for k in allowed)+" WHERE id=?",(*allowed.values(),grade_id))
-                if not result.rowcount: raise APIError(404,"الدرجة غير موجودة.","not_found")
-                audit(self.db,user["id"],"job_grade.update","job_grade",grade_id,allowed)
+            try:
+                with self.db:
+                    self.db.execute("UPDATE job_grades SET "+",".join(f"{k}=?" for k in allowed)+" WHERE id=?",(*allowed.values(),grade_id))
+                    audit(self.db,user["id"],"job_grade.update","job_grade",grade_id,allowed)
+            except sqlite3.IntegrityError as exc: raise APIError(409,"رمز الدرجة مستخدم.","duplicate_reference") from exc
             self.send_json(200,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone())})
 
         def api_job_grade_delete(self, grade_id: int) -> None:
@@ -3430,15 +3437,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(201,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(cur.lastrowid,)).fetchone())})
 
         def api_job_title_patch(self, title_id: int) -> None:
-            user=self.require_permission("reference.manage"); data=self.read_json(); values={k:data[k] for k in ("name","active") if k in data}
+            user=self.require_permission("reference.manage"); data=self.read_json(); existing=self.db.execute("SELECT id FROM job_titles WHERE id=?",(title_id,)).fetchone()
+            if existing is None: raise APIError(404,"المسمى غير موجود.","not_found")
+            values={}
+            if "name" in data: values["name"]=require_text(data,"name",180)
+            if "active" in data: values["active"]=1 if bool(data["active"]) else 0
             if "department_id" in data: values["department_id"]=as_int(data["department_id"],"department_id",1) if data["department_id"] else None
-            if "active" in values: values["active"]=1 if bool(values["active"]) else 0
             if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
             values["updated_at"]=now_iso()
-            with self.db:
-                result=self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
-                if not result.rowcount: raise APIError(404,"المسمى غير موجود.","not_found")
-                audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
+            try:
+                with self.db:
+                    self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
+                    audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
+            except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(200,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(title_id,)).fetchone())})
 
         def api_job_title_delete(self, title_id: int) -> None:
