@@ -3171,6 +3171,27 @@ class HRAPIEndToEndTests(unittest.TestCase):
         visible = next(item for item in gm.request("GET", "/api/notifications/inbox")["items"] if item["id"] == sent["id"])
         self.assertEqual(visible["title"], "رسالة معدلة")
 
+    def test_65_v60_organization_chart_is_explicit_permission_and_all_grant_opens_it(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        email = f"org-viewer-{suffix}@demo.ae"
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"ORG-{suffix}", "full_name": "مسؤول المخطط الهيكلي", "email": email,
+            "hire_date": "2020-01-01", "create_user": True, "password": "OrgViewer@12345", "role": "employee",
+        }, expected=201)["employee"]
+        account = next(item for item in admin.request("GET", "/api/admin/users")["items"] if item["email"] == email)
+        catalog = admin.request("GET", "/api/admin/permissions/catalog")["groups"]
+        all_permissions = [permission["key"] for group in catalog for permission in group["permissions"]]
+        updated = admin.request("PATCH", f"/api/admin/users/{account['id']}/permissions", {
+            "overrides": [{"permission": permission, "granted": True} for permission in all_permissions],
+        })["user"]
+        self.assertIn("organization.view", updated["permissions"])
+        viewer = self.client(email, "OrgViewer@12345")
+        self.assertIn("organization.view", viewer.request("GET", "/api/auth/me")["permissions"])
+        self.assertEqual(viewer.request("GET", "/api/org/grid")["view"], "grid")
+        self.assertEqual(viewer.request("GET", "/api/org/hierarchy?view=hierarchical")["view"], "hierarchical")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
