@@ -587,8 +587,12 @@ CREATE TABLE IF NOT EXISTS notifications (
   audience_type TEXT NOT NULL CHECK (audience_type IN ('all','department','branch','employees')),
   audience_ref TEXT,
   available_at TEXT,
+  hidden_at TEXT,
+  hidden_by INTEGER,
+  edited_at TEXT,
   created_at TEXT NOT NULL,
-  FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE RESTRICT
+  FOREIGN KEY (sender_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+  FOREIGN KEY (hidden_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS notification_recipients (

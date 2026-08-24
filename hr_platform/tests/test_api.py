@@ -3145,6 +3145,32 @@ class HRAPIEndToEndTests(unittest.TestCase):
         hierarchy = hr.request("GET", "/api/org/grid")["general_manager"]
         self.assertEqual(hierarchy["id"], employees[0]["id"])
 
+    def test_64_v60_permissions_general_manager_and_notification_admin_controls(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
+        suffix = uuid.uuid4().hex[:8]
+        email = f"gm-profile-{suffix}@demo.ae"
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"GM-{suffix}", "full_name": "مدير عام من ملف الموظف", "email": email,
+            "hire_date": "2020-01-01", "create_user": True, "password": "GmProfile@12345", "role": "employee",
+        }, expected=201)["employee"]
+        hr.request("PATCH", f"/api/employees/{employee['id']}", {"institution_role": "general_manager"})
+        gm = self.client(email, "GmProfile@12345")
+        permissions = gm.request("GET", "/api/auth/me")["permissions"]
+        self.assertIn("*", permissions)
+        admin.request("PATCH", f"/api/admin/users/{gm.request('GET', '/api/auth/me')['user']['id']}/permissions", {"overrides": []}, expected=409)
+        sent = hr.request("POST", "/api/notifications", {
+            "title": "رسالة قابلة للإدارة", "body": "النص الأول", "message_type": "notice",
+            "audience_type": "employees", "employee_ids": [employee["id"]],
+        }, expected=201)["notification"]
+        admin.request("GET", "/api/notifications/manage")
+        hr.request("GET", "/api/notifications/manage", expected=403)
+        admin.request("PATCH", f"/api/notifications/{sent['id']}", {"hidden": True})
+        self.assertFalse(any(item["id"] == sent["id"] for item in gm.request("GET", "/api/notifications/inbox")["items"]))
+        admin.request("PATCH", f"/api/notifications/{sent['id']}", {"hidden": False, "title": "رسالة معدلة", "body": "النص المعدل"})
+        visible = next(item for item in gm.request("GET", "/api/notifications/inbox")["items"] if item["id"] == sent["id"])
+        self.assertEqual(visible["title"], "رسالة معدلة")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
