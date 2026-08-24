@@ -76,6 +76,8 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "attendance.export": "تصدير كشف الحضور والانصراف CSV",
         "shift.view": "عرض المناوبات", "shift.manage": "إدارة المناوبات",
         "leave.view": "عرض طلبات الإجازة", "leave.team": "قرار المسؤول المباشر على طلبات الفريق", "leave.approve": "الاعتماد النهائي للإجازات لدى الموارد البشرية",
+        "leave.types.manage": "إدارة أنواع الإجازات وسياسة الرصيد (مدير النظام فقط)",
+        "leave.balance.manage": "إضافة وتعديل أرصدة الموظفين (مدير النظام فقط)",
         "overtime.view": "عرض العمل الإضافي", "overtime.approve": "اعتماد العمل الإضافي",
     },
     "payroll": {
@@ -1127,6 +1129,37 @@ def annual_leave_entitlement_for_year(hire_date: str | None, year: int, as_of: d
     return max(0.0, annual_leave_accrued_to(hire_date, end) - annual_leave_accrued_to(hire_date, previous_end))
 
 
+def is_uae_national(nationality: Any) -> bool:
+    value = re.sub(r"[\s\-_/]+", "", str(nationality or "").strip().lower())
+    return value in {"uae", "emirati", "unitedarabemirates", "الإمارات", "اماراتي", "إماراتي", "الإماراتية", "اماراتية", "إماراتية"}
+
+
+def approved_unpaid_days(db: sqlite3.Connection, employee_id: int, start: date, end: date) -> float:
+    """Return approved unpaid-leave days overlapping a service period.
+
+    The statutory gratuity period excludes unpaid absence.  The leave module
+    stores the approved request dates and days, so the overlap is calculated
+    from dates instead of trusting a possibly cross-year request total.
+    """
+    rows = db.execute(
+        """SELECT lr.start_date,lr.end_date,lr.days
+             FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+            WHERE lr.employee_id=? AND lr.status='approved' AND lt.code='unpaid'
+              AND lr.start_date<=? AND lr.end_date>=?""",
+        (employee_id, end.isoformat(), start.isoformat()),
+    ).fetchall()
+    total = 0.0
+    for row in rows:
+        request_start = max(start, date.fromisoformat(str(row["start_date"])[:10]))
+        request_end = min(end, date.fromisoformat(str(row["end_date"])[:10]))
+        if request_end < request_start:
+            continue
+        request_span = max(1, (date.fromisoformat(str(row["end_date"])[:10]) - date.fromisoformat(str(row["start_date"])[:10])).days + 1)
+        overlap_span = (request_end - request_start).days + 1
+        total += float(row["days"] or 0) * overlap_span / request_span
+    return round(total, 4)
+
+
 def leave_days_excluding_public_holidays(db: sqlite3.Connection, start: date, end: date) -> float:
     """Count requested leave days while excluding configured public holidays.
 
@@ -1579,6 +1612,7 @@ def initialize_database(db_path: Path) -> None:
                     "smtp_from_email": "TEXT NOT NULL DEFAULT ''",
                 },
                 "departments": {"branch_id": "INTEGER", "updated_at": "TEXT"},
+                "branches": {"license_expires_on": "TEXT"},
                 "employees": {
                     "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
                     "approval_employee_id": "INTEGER",
@@ -1633,6 +1667,9 @@ def initialize_database(db_path: Path) -> None:
                 "leave_types": {
                     "max_hours": "REAL NOT NULL DEFAULT 0",
                 },
+                "leave_balances": {
+                    "manual_override": "INTEGER NOT NULL DEFAULT 0",
+                },
                 "evaluation_cycles": {
                     "period_start": "TEXT",
                     "period_end": "TEXT",
@@ -1671,6 +1708,7 @@ def initialize_database(db_path: Path) -> None:
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
                 },
                 "notifications": {"available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT"},
+                "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
             }
             for table, columns in migrations.items():
                 existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -1746,6 +1784,19 @@ def initialize_database(db_path: Path) -> None:
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_salary_certificates_verification_code ON salary_certificates(verification_code)"
             )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS branch_expiry_alerts (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       branch_id INTEGER NOT NULL,
+                       expires_on TEXT NOT NULL,
+                       alert_window_days INTEGER NOT NULL CHECK (alert_window_days IN (60,30)),
+                       notification_id INTEGER,
+                       created_at TEXT NOT NULL,
+                       UNIQUE(branch_id, expires_on, alert_window_days),
+                       FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+                       FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL)"""
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_branch_expiry_alerts_branch ON branch_expiry_alerts(branch_id, expires_on)")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_salary_certificates_request_status ON salary_certificates(request_status, requested_at)"
             )
@@ -1928,6 +1979,22 @@ def is_configured_general_manager(db: sqlite3.Connection, user: dict[str, Any]) 
     return bool(row and row["general_manager_employee_id"] and int(row["general_manager_employee_id"]) == int(employee_id))
 
 
+def is_system_admin(user: dict[str, Any] | sqlite3.Row | None) -> bool:
+    """Return whether the account is the protected system administrator.
+
+    Leave policy maintenance is intentionally stricter than ordinary HR
+    approval.  A user may have ``leave.approve`` without being allowed to
+    change the organisation's leave types or statutory calendar.
+    """
+    if user is None:
+        return False
+    keys = user.keys() if hasattr(user, "keys") else user
+    return bool(
+        (str(user["role"] if "role" in keys else "") == "admin")
+        or bool(user["is_super_admin"] if "is_super_admin" in keys else False)
+    ) and bool(user["active"] if "active" in keys else True)
+
+
 def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str) -> bool:
     if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
         return True
@@ -2004,15 +2071,46 @@ def create_internal_notification(
     return notification_id
 
 
+def compliance_notification_recipients(
+    db: sqlite3.Connection,
+    *,
+    include_hr: bool = True,
+    include_system_admins: bool = True,
+    include_final_approvers: bool = False,
+) -> list[int]:
+    """Resolve the people who must see a compliance/expiry alert.
+
+    Roles and permissions are deliberately used instead of department names so
+    that an organisation can rename its HR department without breaking alerts.
+    ``include_final_approvers`` covers HR approval accounts explicitly granted
+    the leave-approval permission, while system administrators always remain
+    recipients of statutory expiry warnings.
+    """
+    recipients: set[int] = set()
+    for row in db.execute("SELECT * FROM users WHERE active=1").fetchall():
+        candidate = dict(row)
+        role = str(candidate.get("role") or "").lower()
+        if include_system_admins and is_system_admin(candidate):
+            recipients.add(int(candidate["id"]))
+        if include_hr and role == "hr":
+            recipients.add(int(candidate["id"]))
+        if include_final_approvers and has_permission(db, candidate, "leave.approve"):
+            recipients.add(int(candidate["id"]))
+    return sorted(recipients)
+
+
 def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
-    """Create one HR inbox alert per document expiry date within the next 90 days."""
-    hr_users = db.execute(
-        "SELECT id,display_name FROM users WHERE role='hr' AND active=1 ORDER BY id"
-    ).fetchall()
-    if not hr_users:
+    """Create a document alert in the 90-day or 30-day warning window.
+
+    The earlier 90-day reminder is retained for operational planning.  Once a
+    document reaches 30 days, a new, more urgent reminder is issued.  The
+    window is stored so each transition is sent once and later inbox reads do
+    not create duplicates.
+    """
+    recipients = compliance_notification_recipients(db, include_hr=True, include_system_admins=True)
+    if not recipients:
         return 0
-    sender_id = int(hr_users[0]["id"])
-    recipients = [int(row["id"]) for row in hr_users]
+    sender_id = recipients[0]
     today = local_now().date()
     expiry_limit = today + timedelta(days=90)
     documents = db.execute(
@@ -2027,17 +2125,29 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
     created = 0
     for document in documents:
         with db:
-            marker = db.execute(
-                "INSERT OR IGNORE INTO document_expiry_alerts(document_id,expires_on,created_at) VALUES(?,?,?)",
-                (document["id"], document["expires_on"], now_iso()),
-            )
-            if marker.rowcount != 1:
-                continue
             days_remaining = (date.fromisoformat(document["expires_on"]) - today).days
+            alert_window_days = 30 if days_remaining <= 30 else 90
+            existing = db.execute(
+                "SELECT alert_window_days FROM document_expiry_alerts WHERE document_id=? AND expires_on=?",
+                (document["id"], document["expires_on"]),
+            ).fetchone()
+            if existing and int(existing["alert_window_days"] or 90) == alert_window_days:
+                continue
+            stamp = now_iso()
+            if existing:
+                db.execute(
+                    "UPDATE document_expiry_alerts SET alert_window_days=?,notification_id=NULL,created_at=? WHERE document_id=? AND expires_on=?",
+                    (alert_window_days, stamp, document["id"], document["expires_on"]),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO document_expiry_alerts(document_id,expires_on,alert_window_days,created_at) VALUES(?,?,?,?)",
+                    (document["id"], document["expires_on"], alert_window_days, stamp),
+                )
             document_label = DOCUMENT_TYPE_LABELS_AR.get(document["document_type"], document["title"] or "وثيقة")
-            title = "تنبيه: وثيقة تقترب من الانتهاء"
+            title = "تنبيه: وثيقة تقترب من الانتهاء" if alert_window_days == 90 else "تنبيه: عاجل — وثيقة تنتهي خلال شهر"
             if document["document_type"] == "contract":
-                title = "تنبيه: عقد العمل يقترب من الانتهاء"
+                title = "تنبيه: عقد العمل يقترب من الانتهاء" if alert_window_days == 90 else "تنبيه: عاجل — عقد العمل ينتهي خلال شهر"
             body = (
                 f"الموظف: {document['full_name']} ({document['employee_no']}). "
                 f"الوثيقة: {document_label}. تاريخ الانتهاء: {document['expires_on']} "
@@ -2048,9 +2158,62 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
                 "UPDATE document_expiry_alerts SET notification_id=? WHERE document_id=? AND expires_on=?",
                 (notification_id, document["id"], document["expires_on"]),
             )
-            audit(db, sender_id, "notification.document_expiry", "employee_document", document["id"], {"expires_on": document["expires_on"], "days_remaining": days_remaining, "notification_id": notification_id})
+            audit(db, sender_id, "notification.document_expiry", "employee_document", document["id"], {"expires_on": document["expires_on"], "days_remaining": days_remaining, "alert_window_days": alert_window_days, "notification_id": notification_id})
             created += 1
     return created
+
+
+def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
+    """Notify final HR approvers and system administrators about branch licences."""
+    recipients = compliance_notification_recipients(
+        db,
+        include_hr=True,
+        include_system_admins=True,
+        include_final_approvers=True,
+    )
+    if not recipients:
+        return 0
+    sender_id = recipients[0]
+    today = local_now().date()
+    expiry_limit = today + timedelta(days=60)
+    branches = db.execute(
+        """SELECT id,name,license_expires_on FROM branches
+           WHERE active=1 AND license_expires_on IS NOT NULL
+             AND license_expires_on BETWEEN ? AND ?
+           ORDER BY license_expires_on ASC,id ASC""",
+        (today.isoformat(), expiry_limit.isoformat()),
+    ).fetchall()
+    created = 0
+    for branch in branches:
+        days_remaining = (date.fromisoformat(branch["license_expires_on"]) - today).days
+        alert_window_days = 30 if days_remaining <= 30 else 60
+        with db:
+            marker = db.execute(
+                "INSERT OR IGNORE INTO branch_expiry_alerts(branch_id,expires_on,alert_window_days,created_at) VALUES(?,?,?,?)",
+                (branch["id"], branch["license_expires_on"], alert_window_days, now_iso()),
+            )
+            if marker.rowcount != 1:
+                continue
+            title = "تنبيه: رخصة الفرع تقترب من الانتهاء"
+            if alert_window_days == 30:
+                title = "تنبيه: عاجل — رخصة الفرع تنتهي خلال شهر"
+            body = (
+                f"الفرع: {branch['name']}. تاريخ انتهاء الرخصة: {branch['license_expires_on']} "
+                f"(متبقٍ {days_remaining} يوماً). يرجى تجديد الرخصة وتحديث تاريخها في ملف الفرع."
+            )
+            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            db.execute(
+                "UPDATE branch_expiry_alerts SET notification_id=? WHERE branch_id=? AND expires_on=? AND alert_window_days=?",
+                (notification_id, branch["id"], branch["license_expires_on"], alert_window_days),
+            )
+            audit(db, sender_id, "notification.branch_license_expiry", "branch", branch["id"], {"expires_on": branch["license_expires_on"], "days_remaining": days_remaining, "alert_window_days": alert_window_days, "notification_id": notification_id})
+            created += 1
+    return created
+
+
+def ensure_expiry_notifications(db: sqlite3.Connection) -> int:
+    """Run all compliance expiry checks before an inbox/dashboard is read."""
+    return ensure_document_expiry_notifications(db) + ensure_branch_license_notifications(db)
 
 
 def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -2461,17 +2624,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/overtime", self.api_overtime_post),
                     ("POST", r"/api/overtime/(\d+)/decision", self.api_overtime_decision),
                     ("GET", r"/api/leaves/types", self.api_leave_types),
+                    ("POST", r"/api/leaves/types", self.api_leave_type_post),
+                    ("PATCH", r"/api/leaves/types/(\d+)", self.api_leave_type_patch),
+                    ("DELETE", r"/api/leaves/types/(\d+)", self.api_leave_type_delete),
                     ("GET", r"/api/leaves/holidays", self.api_leave_holidays_get),
                     ("POST", r"/api/leaves/holidays", self.api_leave_holiday_post),
                     ("PATCH", r"/api/leaves/holidays/(\d+)", self.api_leave_holiday_patch),
                     ("DELETE", r"/api/leaves/holidays/(\d+)", self.api_leave_holiday_delete),
                     ("GET", r"/api/leaves/balances", self.api_leave_balances),
+                    ("PATCH", r"/api/leaves/balances", self.api_leave_balance_patch),
                     ("GET", r"/api/leaves/requests", self.api_leave_requests_get),
                     ("POST", r"/api/leaves/requests", self.api_leave_requests_post),
                     ("POST", r"/api/leaves/requests/(\d+)/decision", self.api_leave_request_decision),
                     ("GET", r"/api/leaves/sales", self.api_leave_sales_get),
                     ("POST", r"/api/leaves/sales", self.api_leave_sales_post),
                     ("POST", r"/api/leaves/sales/(\d+)/decision", self.api_leave_sale_decision),
+                    ("GET", r"/api/end-of-service/calculator", self.api_end_of_service_calculator),
                     ("GET", r"/api/evaluation-cycles", self.api_evaluation_cycles_get),
                     ("POST", r"/api/evaluation-cycles", self.api_evaluation_cycle_post),
                     ("GET", r"/api/evaluation-cycles/(\d+)", self.api_evaluation_cycle_get),
@@ -3389,7 +3557,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_executive_dashboard(self) -> None:
             user = self.require_permission("dashboard.view")
-            ensure_document_expiry_notifications(self.db)
+            ensure_expiry_notifications(self.db)
             today = local_now().date(); date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to"); date_from = parse_date(self.query.get("date_from", (date_to-timedelta(days=29)).isoformat()), "date_from")
             if date_from > date_to or (date_to-date_from).days > 366: raise APIError(422,"نطاق التاريخ غير صالح أو يتجاوز سنة.","validation_error")
             conditions, params = self.executive_scope(user); where = " WHERE "+" AND ".join(conditions) if conditions else ""
@@ -3920,6 +4088,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def serialize_branch(self, row: sqlite3.Row) -> dict[str, Any]:
             data = dict(row)
             data["active"] = bool(data["active"])
+            expiry = data.get("license_expires_on")
+            if expiry:
+                try:
+                    days_remaining = (date.fromisoformat(str(expiry)[:10]) - local_now().date()).days
+                except ValueError:
+                    days_remaining = None
+            else:
+                days_remaining = None
+            data["license_days_remaining"] = days_remaining
+            data["license_status"] = (
+                "expired" if days_remaining is not None and days_remaining < 0
+                else "expiring_soon" if days_remaining is not None and days_remaining <= 60
+                else "valid" if days_remaining is not None else "not_set"
+            )
             return data
 
         def parse_branch(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
@@ -3934,6 +4116,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 result["longitude"] = as_float(data.get("longitude"), "longitude", -180, 180)
             if not partial or "radius_m" in data:
                 result["radius_m"] = as_int(data.get("radius_m"), "radius_m", 50, 5000)
+            if "license_expires_on" in data or not partial:
+                raw_license_expiry = data.get("license_expires_on")
+                result["license_expires_on"] = parse_date(raw_license_expiry, "license_expires_on").isoformat() if raw_license_expiry not in (None, "") else None
             if "manager_employee_id" in data:
                 result["manager_employee_id"] = as_int(data["manager_employee_id"], "manager_employee_id", 1) if data["manager_employee_id"] not in (None, "") else None
                 if result["manager_employee_id"] and not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (result["manager_employee_id"],)).fetchone():
@@ -3956,7 +4141,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for row in rows:
                 data = self.serialize_branch(row)
                 if not privileged:
-                    data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "active")}
+                    data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "license_expires_on", "license_days_remaining", "license_status", "active")}
                 items.append(data)
             self.send_json(200, {"items": items})
 
@@ -3964,7 +4149,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True); assert user is not None
             data = self.serialize_branch(self.branch_row(branch_id))
             if not self.has_privileged_people_access(user, "employee.view"):
-                data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "active")}
+                data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "license_expires_on", "license_days_remaining", "license_status", "active")}
             self.send_json(200, {"branch": data})
 
         def api_branches_post(self) -> None:
@@ -3974,8 +4159,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     cursor = self.db.execute(
-                        "INSERT INTO branches(name,address,manager_employee_id,latitude,longitude,radius_m,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                        (values["name"], values["address"], values.get("manager_employee_id"), values["latitude"], values["longitude"], values["radius_m"], values["active"], stamp, stamp),
+                        "INSERT INTO branches(name,address,manager_employee_id,latitude,longitude,radius_m,license_expires_on,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (values["name"], values["address"], values.get("manager_employee_id"), values["latitude"], values["longitude"], values["radius_m"], values.get("license_expires_on"), values["active"], stamp, stamp),
                     )
                     branch_id = int(cursor.lastrowid)
                     audit(self.db, user["id"], "branch.create", "branch", branch_id, values)
@@ -5959,13 +6144,107 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def leave_hr_recipient_ids(self) -> list[int]:
             return self.approval_recipient_ids("leave.approve")
 
+        def require_leave_policy_admin(self) -> dict[str, Any]:
+            user = self.current_user(True)
+            assert user is not None
+            if not is_system_admin(user):
+                raise APIError(403, "إدارة أنواع الإجازات وسياسة التقويم متاحة لمدير النظام فقط.", "system_admin_required")
+            return user
+
+        def leave_type_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            data = dict(row)
+            data["active"] = bool(data.get("active"))
+            data["paid"] = bool(data.get("paid"))
+            data["requires_attachment"] = bool(data.get("requires_attachment"))
+            data["annual_entitlement"] = float(data.get("annual_entitlement") or 0)
+            data["max_hours"] = float(data.get("max_hours") or 0)
+            return data
+
+        def parse_leave_type_values(self, data: dict[str, Any], current: sqlite3.Row | None = None) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            if current is None or "code" in data:
+                code = str(data.get("code", current["code"] if current else "")).strip().lower()
+                if not re.fullmatch(r"[a-z][a-z0-9_]{1,39}", code):
+                    raise APIError(422, "رمز نوع الإجازة يجب أن يكون إنجليزياً وأحرفه من a-z أو _.", "validation_error", {"field": "code"})
+                values["code"] = code
+            if current is None or "name" in data:
+                values["name"] = require_text(data, "name", 180) if current is None or data.get("name") is not None else current["name"]
+            for key, minimum in (("annual_entitlement", 0), ("min_notice_days", 0), ("max_hours", 0)):
+                if current is None or key in data:
+                    values[key] = as_float(data.get(key, current[key] if current else 0), key, minimum)
+            for key in ("requires_attachment", "paid", "active"):
+                if current is None or key in data:
+                    raw = data.get(key, current[key] if current else False)
+                    if not isinstance(raw, (bool, int, float)):
+                        raise APIError(422, f"قيمة «{key}» غير صحيحة.", "validation_error", {"field": key})
+                    values[key] = 1 if bool(raw) else 0
+            if values.get("code") == "work_permission" and "max_hours" not in values:
+                values["max_hours"] = 2
+            return values
+
+        def api_leave_type_post(self) -> None:
+            user = self.require_leave_policy_admin()
+            data = self.read_json()
+            values = self.parse_leave_type_values(data)
+            stamp = now_iso()
+            try:
+                with self.db:
+                    cur = self.db.execute(
+                        "INSERT INTO leave_types(code,name,annual_entitlement,min_notice_days,requires_attachment,paid,max_hours,active) VALUES(?,?,?,?,?,?,?,?)",
+                        (values["code"], values["name"], values["annual_entitlement"], values["min_notice_days"], values["requires_attachment"], values["paid"], values.get("max_hours", 0), values.get("active", 1)),
+                    )
+                    leave_type_id = int(cur.lastrowid)
+                    for employee in self.db.execute("SELECT id FROM employees WHERE active=1").fetchall():
+                        entitlement = 0 if values["code"] == "annual" else values["annual_entitlement"]
+                        self.db.execute(
+                            "INSERT OR IGNORE INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)",
+                            (employee["id"], leave_type_id, local_now().year, entitlement),
+                        )
+                    audit(self.db, user["id"], "leave_type.create", "leave_type", leave_type_id, {"code": values["code"]})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "رمز نوع الإجازة مستخدم بالفعل.", "duplicate_leave_type") from exc
+            row = self.db.execute("SELECT * FROM leave_types WHERE id=?", (leave_type_id,)).fetchone()
+            self.send_json(201, {"leave_type": self.leave_type_payload(row)})
+
+        def api_leave_type_patch(self, leave_type_id: int) -> None:
+            user = self.require_leave_policy_admin()
+            row = self.db.execute("SELECT * FROM leave_types WHERE id=?", (leave_type_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "نوع الإجازة غير موجود.", "not_found")
+            values = self.parse_leave_type_values(self.read_json(), row)
+            if not values:
+                raise APIError(422, "لم يتم إرسال أي تعديل.", "validation_error")
+            columns = [key for key in values if key in row.keys()]
+            if not columns:
+                raise APIError(422, "لم يتم إرسال أي تعديل.", "validation_error")
+            try:
+                with self.db:
+                    self.db.execute("UPDATE leave_types SET " + ",".join(f"{key}=?" for key in columns) + " WHERE id=?", tuple(values[key] for key in columns) + (leave_type_id,))
+                    audit(self.db, user["id"], "leave_type.update", "leave_type", leave_type_id, {key: values[key] for key in columns})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "رمز نوع الإجازة مستخدم بالفعل.", "duplicate_leave_type") from exc
+            saved = self.db.execute("SELECT * FROM leave_types WHERE id=?", (leave_type_id,)).fetchone()
+            self.send_json(200, {"leave_type": self.leave_type_payload(saved)})
+
+        def api_leave_type_delete(self, leave_type_id: int) -> None:
+            user = self.require_leave_policy_admin()
+            row = self.db.execute("SELECT * FROM leave_types WHERE id=?", (leave_type_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "نوع الإجازة غير موجود.", "not_found")
+            if row["code"] == "annual":
+                raise APIError(409, "لا يمكن تعطيل الإجازة السنوية الأساسية.", "protected_leave_type")
+            with self.db:
+                self.db.execute("UPDATE leave_types SET active=0 WHERE id=?", (leave_type_id,))
+                audit(self.db, user["id"], "leave_type.deactivate", "leave_type", leave_type_id, {"code": row["code"]})
+            self.send_json(200, {"deactivated": True, "id": leave_type_id})
+
         def api_leave_holidays_get(self) -> None:
             self.current_user(True)
             rows = self.db.execute("SELECT * FROM public_holidays ORDER BY holiday_date,id").fetchall()
             self.send_json(200, {"items": [dict(row) | {"active": bool(row["active"])} for row in rows]})
 
         def api_leave_holiday_post(self) -> None:
-            user = self.require_permission("leave.approve")
+            user = self.require_leave_policy_admin()
             data = self.read_json()
             holiday_date = parse_date(data.get("holiday_date"), "holiday_date").isoformat()
             name = require_text(data, "name", 160)
@@ -5983,7 +6262,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(201, {"holiday": dict(row) | {"active": bool(row["active"])}})
 
         def api_leave_holiday_patch(self, holiday_id: int) -> None:
-            user = self.require_permission("leave.approve")
+            user = self.require_leave_policy_admin()
             row = self.db.execute("SELECT * FROM public_holidays WHERE id=?", (holiday_id,)).fetchone()
             if row is None:
                 raise APIError(404, "العطلة الرسمية غير موجودة.", "not_found")
@@ -6015,7 +6294,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, {"holiday": dict(saved) | {"active": bool(saved["active"])}})
 
         def api_leave_holiday_delete(self, holiday_id: int) -> None:
-            user = self.require_permission("leave.approve")
+            user = self.require_leave_policy_admin()
             if self.db.execute("SELECT 1 FROM public_holidays WHERE id=?", (holiday_id,)).fetchone() is None:
                 raise APIError(404, "العطلة الرسمية غير موجودة.", "not_found")
             with self.db:
@@ -6088,30 +6367,50 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     continue
                 balance = self.db.execute("SELECT * FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (employee_id, leave["id"], year)).fetchone()
                 if leave["code"] == "annual":
-                    entitlement = annual_leave_entitlement_for_year(hire_date, year, today)
-                    previous_entitlement = annual_leave_entitlement_for_year(hire_date, year - 1, date(year - 1, 12, 31))
-                    previous = self.db.execute("SELECT carried,used FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?", (employee_id, leave["id"], year - 1)).fetchone()
-                    previous_carried = float(previous["carried"] if previous else 0)
-                    previous_used = float(previous["used"] if previous else 0)
-                    # Carry only unused entitlement from the immediately prior
-                    # year, capped at five days and never chained indefinitely.
-                    previous_fresh_remaining = max(0.0, previous_entitlement - max(0.0, previous_used - min(previous_used, previous_carried)))
-                    carried = min(5.0, previous_fresh_remaining)
+                    # Keep the statutory accrual calculation cumulative so an
+                    # employee can retain up to two years (60 days). Anything
+                    # above that cap is explicitly frozen for cash-out only.
+                    # Usage and pending requests are aggregated across years;
+                    # the per-year rows remain the audit source for payroll.
+                    accrued_total = annual_leave_accrued_to(hire_date, today)
+                    historical = self.db.execute(
+                        "SELECT COALESCE(SUM(used),0) AS used,COALESCE(SUM(carried),0) AS carried "
+                        "FROM leave_balances WHERE employee_id=? AND leave_type_id=?",
+                        (employee_id, leave["id"]),
+                    ).fetchone()
+                    approved_legacy_used = float(historical["used"] if historical else 0)
+                    pending_annual = float(self.db.execute(
+                        "SELECT COALESCE(SUM(days),0) FROM leave_requests WHERE employee_id=? AND leave_type_id=? AND status='submitted'",
+                        (employee_id, leave["id"]),
+                    ).fetchone()[0])
+                    automatic_entitlement = annual_leave_entitlement_for_year(hire_date, year, today)
+                    # A system administrator may explicitly override the
+                    # current year's balance.  Keep the statutory accrual as
+                    # the default, but honour a stored manual adjustment
+                    # (including an intentional zero) when present.
+                    manually_adjusted = bool(balance and "manual_override" in balance.keys() and balance["manual_override"])
+                    entitlement = float(balance["entitlement"]) if manually_adjusted else automatic_entitlement
+                    carried = max(0.0, float(balance["carried"])) if manually_adjusted else max(0.0, accrued_total - automatic_entitlement)
+                    used = approved_legacy_used
+                    pending = pending_annual
                 else:
                     entitlement = float(balance["entitlement"] if balance else leave["annual_entitlement"])
                     carried = min(5.0, float(balance["carried"] if balance else 0))
-                used = float(balance["used"] if balance else 0)
-                pending = float(self.db.execute("SELECT COALESCE(SUM(days),0) FROM leave_requests WHERE employee_id=? AND leave_type_id=? AND status='submitted' AND substr(start_date,1,4)=?", (employee_id, leave["id"], str(year))).fetchone()[0])
+                    used = float(balance["used"] if balance else 0)
+                    pending = float(self.db.execute("SELECT COALESCE(SUM(days),0) FROM leave_requests WHERE employee_id=? AND leave_type_id=? AND status='submitted' AND substr(start_date,1,4)=?", (employee_id, leave["id"], str(year))).fetchone()[0])
                 pending_sale = 0.0
                 if leave["code"] == "annual":
                     pending_sale = float(self.db.execute("SELECT COALESCE(SUM(days),0) FROM leave_sale_requests WHERE employee_id=? AND status='submitted'", (employee_id,)).fetchone()[0])
                 raw_available = entitlement + carried - used - pending - pending_sale
-                available = min(60.0, max(0.0, raw_available)) if leave["code"] == "annual" else max(0.0, raw_available)
+                raw_available = max(0.0, raw_available)
+                available = min(60.0, raw_available) if leave["code"] == "annual" else raw_available
+                frozen_surplus = max(0.0, raw_available - 60.0) if leave["code"] == "annual" else 0.0
                 rows.append({
                     "leave_type_id": leave["id"], "code": leave["code"], "name": leave["name"],
                     "year": year, "entitlement": entitlement, "carried": carried, "used": used,
-                    "pending": pending, "pending_sale": pending_sale, "raw_available": max(0.0, raw_available), "frozen": max(0.0, raw_available - 60.0) if leave["code"] == "annual" else 0.0,
-                    "available": available, "service_months": completed_service_months(hire_date, today),
+                    "pending": pending, "pending_sale": pending_sale, "raw_available": raw_available,
+                    "available": available, "frozen": frozen_surplus, "frozen_surplus": frozen_surplus,
+                    "usable_available": available, "service_months": completed_service_months(hire_date, today),
                     "paid_eligible": completed_service_months(hire_date, today) >= 6 if leave["code"] == "annual" else bool(leave["paid"]),
                     "accrual_note": "لا يستحق الموظف إجازة سنوية مدفوعة قبل إتمام ٦ أشهر، ويضاف يومان عن كل شهر حتى إتمام السنة." if leave["code"] == "annual" else "",
                     "requires_attachment": bool(leave["requires_attachment"]), "min_notice_days": leave["min_notice_days"], "paid": bool(leave["paid"]),
@@ -6126,10 +6425,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if target_id:
                 employee = self.db.execute("SELECT gender FROM employees WHERE id=?", (target_id,)).fetchone()
                 target_gender = str(employee["gender"] if employee and "gender" in employee.keys() else "unspecified").lower() if employee else None
-            rows = self.db.execute("SELECT * FROM leave_types WHERE active=1 ORDER BY id").fetchall()
-            if target_gender != "female":
+            include_inactive = is_system_admin(user) and self.query.get("include_inactive") == "1"
+            rows = self.db.execute("SELECT * FROM leave_types " + ("" if include_inactive else "WHERE active=1 ") + "ORDER BY id").fetchall()
+            if target_id and target_gender != "female":
                 rows = [row for row in rows if row["code"] != "maternity"]
-            self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"]), "paid": bool(r["paid"]), "requires_attachment": bool(r["requires_attachment"]), "max_hours": float(r["max_hours"] or 0)} for r in rows]})
+            self.send_json(200, {"items": [self.leave_type_payload(r) for r in rows], "can_manage": is_system_admin(user)})
 
         def api_leave_balances(self) -> None:
             user = self.current_user(True)
@@ -6139,6 +6439,126 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "leave.view"):
                 raise APIError(403, "لا يمكنك عرض رصيد هذا الموظف.", "forbidden")
             self.send_json(200, {"employee_id": employee_id, "year": year, "items": self.leave_balance_rows(employee_id, year)})
+
+        def api_leave_balance_patch(self) -> None:
+            """Create or replace a per-year leave balance adjustment.
+
+            Viewing balances remains available through the normal leave-view
+            rules, while mutation is deliberately stricter: only a system
+            administrator can edit the entitlement, carried and used values.
+            Every change is marked as a manual override and written to audit.
+            """
+            user = self.require_leave_policy_admin()
+            data = self.read_json()
+            employee_id = as_int(data.get("employee_id"), "employee_id", 1)
+            leave_type_id = as_int(data.get("leave_type_id"), "leave_type_id", 1)
+            year = as_int(data.get("year", local_now().year), "year", 2000, 2200)
+            employee = self.db.execute("SELECT id,full_name,employee_no FROM employees WHERE id=?", (employee_id,)).fetchone()
+            if employee is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found", {"field": "employee_id"})
+            leave_type = self.db.execute("SELECT id,code,name FROM leave_types WHERE id=?", (leave_type_id,)).fetchone()
+            if leave_type is None:
+                raise APIError(404, "نوع الإجازة غير موجود.", "not_found", {"field": "leave_type_id"})
+            entitlement = as_float(data.get("entitlement", 0), "entitlement", 0, 3660)
+            carried = as_float(data.get("carried", 0), "carried", 0, 3660)
+            used = as_float(data.get("used", 0), "used", 0, 3660)
+            previous = self.db.execute(
+                "SELECT entitlement,carried,used,manual_override FROM leave_balances WHERE employee_id=? AND leave_type_id=? AND year=?",
+                (employee_id, leave_type_id, year),
+            ).fetchone()
+            stamp = now_iso()
+            with self.db:
+                self.db.execute(
+                    """INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement,carried,used,manual_override)
+                       VALUES(?,?,?,?,?,?,1)
+                       ON CONFLICT(employee_id,leave_type_id,year) DO UPDATE SET
+                         entitlement=excluded.entitlement,carried=excluded.carried,used=excluded.used,manual_override=1""",
+                    (employee_id, leave_type_id, year, entitlement, carried, used),
+                )
+                audit(
+                    self.db,
+                    user["id"],
+                    "leave_balance.manual_update",
+                    "leave_balance",
+                    f"{employee_id}:{leave_type_id}:{year}",
+                    {
+                        "employee_id": employee_id,
+                        "employee_no": employee["employee_no"],
+                        "leave_type_id": leave_type_id,
+                        "leave_type_code": leave_type["code"],
+                        "year": year,
+                        "before": dict(previous) if previous else None,
+                        "after": {"entitlement": entitlement, "carried": carried, "used": used, "manual_override": True},
+                    },
+                )
+            rows = self.leave_balance_rows(employee_id, year)
+            updated = next((row for row in rows if int(row["leave_type_id"]) == leave_type_id), None)
+            self.send_json(200, {"employee_id": employee_id, "year": year, "balance": updated, "items": rows})
+
+        def api_end_of_service_calculator(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = as_int(self.query.get("employee_id"), "employee_id", 1) if self.query.get("employee_id") else self.own_employee_id()
+            if not has_permission(self.db, user, "salary.view"):
+                raise APIError(403, "لا تملك صلاحية عرض الراتب الأساسي وحساب نهاية الخدمة.", "forbidden", {"permission": "salary.view"})
+            if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
+                raise APIError(403, "لا يمكنك حساب نهاية خدمة موظف آخر.", "forbidden")
+            employee = self.db.execute(
+                """SELECT e.id,e.employee_no,e.full_name,e.nationality,e.hire_date,
+                          (SELECT ed.expires_on FROM employee_documents ed
+                            WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0
+                            ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
+                          e.basic_salary,e.salary,e.active
+                     FROM employees e WHERE e.id=?""",
+                (employee_id,),
+            ).fetchone()
+            if employee is None:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            if not employee["hire_date"]:
+                raise APIError(422, "تاريخ التعيين مطلوب قبل حساب نهاية الخدمة.", "hire_date_required", {"field": "hire_date"})
+            hire_date = parse_date(str(employee["hire_date"])[:10], "hire_date")
+            requested_end = self.query.get("end_date")
+            if requested_end:
+                end_date = parse_date(requested_end, "end_date")
+            elif employee["contract_end_on"] and not bool(employee["active"]):
+                end_date = parse_date(str(employee["contract_end_on"])[:10], "contract_end_on")
+            else:
+                end_date = local_now().date()
+            if end_date < hire_date:
+                raise APIError(422, "تاريخ نهاية الخدمة لا يمكن أن يسبق تاريخ التعيين.", "validation_error", {"field": "end_date"})
+            unpaid_days = approved_unpaid_days(self.db, employee_id, hire_date, end_date)
+            service_days = max(0.0, float((end_date - hire_date).days) - unpaid_days)
+            service_years = service_days / 365.0
+            basic_salary = Decimal(str(employee["basic_salary"] if employee["basic_salary"] is not None else employee["salary"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            daily_rate = (basic_salary / Decimal("30")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            first_years = min(service_years, 5.0) if service_years >= 1.0 else 0.0
+            later_years = max(0.0, service_years - 5.0) if service_years >= 1.0 else 0.0
+            first_days = Decimal(str(first_years)) * Decimal("21")
+            later_days = Decimal(str(later_years)) * Decimal("30")
+            earned_days = first_days + later_days
+            gross_before_cap = (daily_rate * earned_days).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            statutory_cap = (basic_salary * Decimal("24")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            amount = min(gross_before_cap, statutory_cap) if service_years >= 1.0 else Decimal("0.00")
+            citizen = is_uae_national(employee["nationality"])
+            if citizen:
+                amount = Decimal("0.00")
+            payment_deadline = end_date + timedelta(days=14)
+            self.send_json(200, {
+                "employee": {"id": employee["id"], "employee_no": employee["employee_no"], "full_name": employee["full_name"], "nationality": employee["nationality"], "hire_date": hire_date.isoformat(), "active": bool(employee["active"])},
+                "calculation": {
+                    "status": "uae_national_social_security" if citizen else "eligible" if service_years >= 1.0 else "not_eligible",
+                    "status_label": "تخضع استحقاقات المواطن لتشريعات المعاشات والتأمينات الاجتماعية" if citizen else "مستحق وفق مدة الخدمة" if service_years >= 1.0 else "لا يستحق قبل إكمال سنة خدمة",
+                    "start_date": hire_date.isoformat(), "end_date": end_date.isoformat(), "payment_deadline": payment_deadline.isoformat(),
+                    "service_days": round(service_days, 4), "unpaid_days": unpaid_days, "service_years": round(service_years, 6),
+                    "basic_salary": float(basic_salary), "daily_rate": float(daily_rate),
+                    "first_five_years": round(first_years, 6), "years_after_five": round(later_years, 6),
+                    "first_five_years_days": float(first_days), "years_after_five_days": float(later_days), "earned_days": float(earned_days),
+                    "gross_before_cap": float(gross_before_cap), "statutory_cap": float(statutory_cap), "cap_applied": gross_before_cap > statutory_cap,
+                    "amount": float(amount), "currency": "AED",
+                    "formula": "21 يوماً من الراتب الأساسي عن كل سنة من أول خمس سنوات، و30 يوماً عن كل سنة بعدها، مع احتساب كسر السنة نسبياً وحد أقصى يعادل أجر سنتين.",
+                    "legal_note": "الحاسبة تشغيلية للمراجعة الداخلية ولا تستبدل مراجعة وزارة الموارد البشرية أو المستشار القانوني عند وجود نظام ادخار أو حالة تعاقدية خاصة.",
+                },
+            })
 
         def api_leave_requests_get(self) -> None:
             user = self.current_user(True)
@@ -7591,7 +8011,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_inbox(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_document_expiry_notifications(self.db)
+            ensure_expiry_notifications(self.db)
             rows = self.db.execute(
                 """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
                           u.display_name AS sender_name,r.read_at,n.edited_at
@@ -7607,7 +8027,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_unread_count(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_document_expiry_notifications(self.db)
+            ensure_expiry_notifications(self.db)
             count = self.db.execute(
                 """SELECT COUNT(*) FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id

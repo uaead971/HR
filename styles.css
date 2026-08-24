@@ -140,6 +140,9 @@ td{padding:11px 10px;border-top:1px solid #efeee9;font-size:11px;vertical-align:
 .branch-card.selected{border-color:var(--gold);box-shadow:0 0 0 2px #c48a3a22}
 .branch-card h3{color:var(--green);font-size:14px;margin:0}
 .branch-card p{font-size:10px;color:var(--muted);margin:4px 0 11px}
+.branch-card .branch-license{font-size:11px;font-weight:700;margin:0 0 11px;color:var(--muted)}
+.branch-card .branch-license.warning{color:#98651f}
+.branch-card .branch-license.expired{color:#a63f37}
 .branch-card footer{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .map{height:440px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#e8ece7;position:relative}
 .map-fallback{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted)}
@@ -479,6 +482,8 @@ body *{visibility:hidden!important}
 .card-actions{align-items:center}
 
 .org-workspace{padding:0;overflow:hidden}
+.org-data-source{display:block;margin-top:4px;color:var(--muted);font-size:10px}
+.org-load-failed{min-height:180px;display:grid;place-items:center;padding:24px}.org-load-failed .empty{max-width:520px;text-align:center}.org-load-failed .empty p{margin:8px 0 14px;color:var(--muted)}
 .org-viewbar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--line);background:#fafaf7}
 .view-switch{display:flex;gap:3px;padding:3px;border:1px solid var(--line);border-radius:9px;background:#fff}
 .view-switch button{border:0;background:transparent;color:var(--muted);padding:8px 13px;border-radius:6px}
@@ -1026,6 +1031,7 @@ html[lang="en"] body,html[lang="en"] :is(button,input,select,textarea,.leaflet-c
 .field-error{display:block;margin-top:5px;color:#a13b35;font-size:12px;line-height:1.45}.form-grid input.invalid{border-color:#b5483c;box-shadow:0 0 0 3px #b5483c1c;background:#fff9f8}.form-grid input:focus:invalid{border-color:#b5483c}
 .leave-holiday-settings{margin-top:16px}.leave-holiday-settings .inline-form{display:grid;grid-template-columns:minmax(150px,.6fr) minmax(220px,1.4fr) auto;align-items:end;gap:10px;padding:14px;margin:0 0 12px;border:1px solid var(--line);background:#fafbf8}.leave-holiday-settings .inline-form label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:750}.leave-holiday-settings .inline-form input{height:42px}.leave-holiday-settings .list-item{border-top:1px solid var(--line)}
 .leave-type-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.leave-type-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;border:1px solid var(--line);background:#fbfcf9;border-radius:8px}.leave-type-row b{display:block;color:var(--ink);font-size:12px}.leave-type-row small{display:block;margin-top:3px;color:var(--muted);font-size:10px}.leave-type-row>span{flex:0 0 auto;padding:4px 8px;border-radius:999px;background:#eaf2ed;color:var(--emerald-700);font-size:11px;font-weight:750;white-space:nowrap}
+.leave-balance-admin{border-top:3px solid var(--gold)}.leave-balance-admin-form{align-items:end;margin-top:12px}.leave-balance-admin-form label{min-width:220px}.leave-balance-admin-list{display:grid;gap:10px;margin-top:16px}.leave-balance-admin-row{padding:14px;border:1px solid var(--line);border-radius:10px;background:#fbfcfa}.leave-balance-admin-heading,.leave-balance-admin-footer{display:flex;align-items:center;justify-content:space-between;gap:12px}.leave-balance-admin-heading h3{margin:0;color:var(--ink);font-size:14px}.leave-balance-admin-heading small,.leave-balance-admin-footer small{color:var(--muted);font-size:11px}.leave-balance-admin-fields{margin-top:12px}.leave-balance-admin-fields label{font-size:11px}.leave-balance-admin-fields input{font-weight:700}.leave-balance-admin-footer{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
 .department-head-node{padding:10px;border-bottom:1px dashed var(--line);background:#f2f6f1}.department-head-node .org-grid-person{border-color:#bfcfbf;background:#fff}.department-head-node+.department-people{padding-top:10px}
 @media(max-width:700px){.leave-holiday-settings .inline-form{grid-template-columns:1fr}.leave-holiday-settings .inline-form .span-2{grid-column:auto}.leave-type-list{grid-template-columns:1fr}}
 
@@ -1033,3 +1039,9 @@ html[lang="en"] body,html[lang="en"] :is(button,input,select,textarea,.leaflet-c
 .salary-certificate.print-target[data-certificate-mode="summary"] .salary-certificate-breakdown{display:none}
 @media(max-width:760px){.manual-salary-row{grid-template-columns:1fr 110px auto}.salary-breakdown-lines,.salary-certificate-breakdown>div{grid-template-columns:1fr}.salary-breakdown-card>footer,.salary-certificate-breakdown>footer{align-items:flex-start;flex-direction:column;gap:4px}}
 @media print{.salary-certificate.print-target .salary-certificate-breakdown{break-inside:avoid;page-break-inside:avoid}}
+
+/* Leave balance and end-of-service summaries */
+.profile-leave-balance{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-top:18px;padding:18px 20px;border:1px solid rgba(20,79,70,.14);border-radius:16px;background:linear-gradient(135deg,#f5fbf8,#fff)}
+.profile-leave-balance h3{margin:4px 0 6px}.profile-leave-balance p{margin:0;color:var(--muted);font-size:.88rem}.profile-leave-balance>strong{font-size:1.05rem;color:var(--green);white-space:nowrap}.leave-balance-surplus{display:grid;gap:3px;text-align:center;padding:10px 14px;border-radius:12px;background:#fff3e2;color:#8c5a16;min-width:110px}.leave-balance-surplus b{font-size:1.2rem}.leave-balance-surplus small{font-size:.74rem}
+.end-of-service-result{margin-top:18px}.eos-summary{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px;border-radius:16px;background:#f5fbf8}.eos-summary>div{display:grid;gap:4px}.eos-summary small,.eos-summary span{color:var(--muted)}.eos-summary strong{font-size:1.7rem}.eos-summary strong.success{color:var(--green)}.eos-summary strong.warn{color:#9b6b18}.eos-summary strong.danger{color:#b53f35}.eos-notes{margin-top:16px;padding:14px 16px;border-inline-start:4px solid var(--gold);background:#fffaf0;border-radius:10px}.eos-notes p{margin:0 0 8px}.eos-notes small{color:var(--muted)}
+@media(max-width:700px){.profile-leave-balance,.eos-summary{align-items:stretch;flex-direction:column}.leave-balance-surplus{align-self:flex-start}}
