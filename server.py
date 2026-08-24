@@ -67,7 +67,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "employee_custody.view": "عرض سجل عُهد الموظفين", "employee_custody.manage": "إدارة عُهد الموظفين",
         "employee_custody.print": "طباعة سجلات استلام وتسليم العُهد",
         "employee_report.view": "عرض تقرير الموظف الشامل", "employee_report.export": "طباعة وحفظ تقرير الموظف الشامل PDF",
-        "org.view": "عرض المؤسسة", "org.manage": "إدارة هوية المؤسسة",
+        "org.view": "عرض المؤسسة", "organization.view": "عرض المخطط الهيكلي للمؤسسة", "org.manage": "إدارة هوية المؤسسة",
         "branch.view": "عرض الفروع", "branch.manage": "إدارة الفروع والنطاقات",
         "reference.manage": "إدارة الدرجات والمسميات",
     },
@@ -108,7 +108,7 @@ ALL_PERMISSIONS = {permission for group in PERMISSION_CATALOG.values() for permi
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "admin": {"*"},
     "hr": {
-        "org.view", "org.manage", "branch.view", "branch.manage", "employee.view", "employee.manage", "employee.profile.edit", "employee.emergency.manage",
+        "org.view", "organization.view", "org.manage", "branch.view", "branch.manage", "employee.view", "employee.manage", "employee.profile.edit", "employee.emergency.manage",
         "salary.view", "attendance.view", "attendance.export", "shift.view", "shift.manage", "overtime.view",
         "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "evaluation.review", "evaluation.cycle.manage",
         "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
@@ -119,7 +119,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "employee_report.view", "employee_report.export",
     },
     "general_manager": {
-        "org.view", "branch.view", "employee.view", "attendance.view", "shift.view",
+        "org.view", "organization.view", "branch.view", "employee.view", "attendance.view", "shift.view",
         "overtime.view", "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "notification.send",
         "salary.view", "salary_certificate.issue", "salary_certificate.print", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.approve",
         "advance.view", "advance.approve", "lifecycle.view", "report.view",
@@ -2667,6 +2667,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def has_privileged_people_access(self, user: dict[str, Any], permission: str) -> bool:
             return str(user.get("role")) in PEOPLE_ADMIN_ROLES and has_permission(self.db, user, permission)
 
+        def has_organization_chart_access(self, user: dict[str, Any]) -> bool:
+            """Allow the dedicated chart permission without widening employee data access.
+
+            The chart is a separate, non-sensitive surface.  A responsible employee can
+            therefore receive ``organization.view`` explicitly while employee records,
+            salaries and other people endpoints remain protected by their own scopes.
+            Legacy HR/manager roles that already have employee.view continue to work.
+            """
+            return has_permission(self.db, user, "organization.view") or self.has_privileged_people_access(user, "employee.view")
+
         def team_member_row(self, manager_employee_id: int, employee_id: int) -> sqlite3.Row | None:
             return self.db.execute(
                 """SELECT e.id,e.employee_no,e.full_name
@@ -3290,7 +3300,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_org_grid(self) -> None:
             user = self.current_user(True); assert user is not None
-            if not self.has_privileged_people_access(user, "employee.view"):
+            if not self.has_organization_chart_access(user):
                 raise APIError(403, "المخطط الكامل متاح للإدارة المخولة فقط.", "forbidden")
             branch = self.query.get("branch_id"); department = self.query.get("department_id"); search = self.query.get("q","").strip()
             conditions = ["e.active=1"]; params: list[Any] = []
@@ -3411,7 +3421,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_org_hierarchy(self) -> None:
             user = self.current_user(True); assert user is not None
-            if not self.has_privileged_people_access(user, "employee.view"):
+            if not self.has_organization_chart_access(user):
                 raise APIError(403, "الهيكل الكامل متاح للإدارة المخولة فقط.", "forbidden")
             view=self.query.get("view","hierarchical")
             if view not in {"hierarchical","grid","sequential"}: raise APIError(422,"عرض الهيكل غير صالح.","validation_error")
