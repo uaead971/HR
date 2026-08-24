@@ -6438,7 +6438,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if employee_id != user.get("employee_id") and not self.has_privileged_people_access(user, "employee.view"):
                 raise APIError(403, "لا يمكنك حساب نهاية خدمة موظف آخر.", "forbidden")
             employee = self.db.execute(
-                "SELECT id,employee_no,full_name,nationality,hire_date,contract_end_on,basic_salary,salary,active FROM employees WHERE id=?",
+                """SELECT e.id,e.employee_no,e.full_name,e.nationality,e.hire_date,
+                          (SELECT ed.expires_on FROM employee_documents ed
+                            WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0
+                            ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
+                          e.basic_salary,e.salary,e.active
+                     FROM employees e WHERE e.id=?""",
                 (employee_id,),
             ).fetchone()
             if employee is None:
