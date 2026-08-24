@@ -6989,7 +6989,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             own = evaluation["employee_id"] == user.get("employee_id")
             published = self.evaluation_is_published(evaluation)
             hr_reviewer = has_permission(self.db, user, "evaluation.review")
-            manager_override = has_permission(self.db, user, "evaluation.override_manager") and str(user.get("role")) in {"hr", "admin"} and not own
+            manager_override = has_permission(self.db, user, "evaluation.override_manager") and not own
             current_manager = self.direct_manager_employee_id(int(evaluation["employee_id"]))
             direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
             if own and not published and int(evaluation["workflow_version"] or 1) >= 2:
@@ -7131,7 +7131,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
             manager_override = bool(
                 evaluation["employee_id"] != user.get("employee_id")
-                and str(user.get("role")) in {"hr", "admin"}
                 and has_permission(self.db, user, "evaluation.override_manager")
             )
             is_direct_manager = bool(
