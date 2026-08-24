@@ -1160,6 +1160,30 @@ def approved_unpaid_days(db: sqlite3.Connection, employee_id: int, start: date, 
     return round(total, 4)
 
 
+def service_duration_components(start: date, end: date, unpaid_days: float = 0.0) -> tuple[int, int, int]:
+    """Return service duration as calendar years, months and days.
+
+    The gratuity calculation stores service as elapsed days for the legal
+    formula, but the employee-facing result should be understandable and
+    stable rather than exposing a repeating decimal year value.  Unpaid
+    absence is removed from the end of the period before decomposing it into
+    calendar components.
+    """
+    excluded = max(0, int(round(float(unpaid_days or 0))))
+    adjusted_end = max(start, end - timedelta(days=excluded))
+    years = adjusted_end.year - start.year
+    months = adjusted_end.month - start.month
+    days = adjusted_end.day - start.day
+    if days < 0:
+        previous_month = adjusted_end.replace(day=1) - timedelta(days=1)
+        days += previous_month.day
+        months -= 1
+    if months < 0:
+        months += 12
+        years -= 1
+    return max(0, years), max(0, months), max(0, days)
+
+
 def leave_days_excluding_public_holidays(db: sqlite3.Connection, start: date, end: date) -> float:
     """Count requested leave days while excluding configured public holidays.
 
@@ -6529,13 +6553,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             unpaid_days = approved_unpaid_days(self.db, employee_id, hire_date, end_date)
             service_days = max(0.0, float((end_date - hire_date).days) - unpaid_days)
             service_years = service_days / 365.0
+            service_years_count, service_months_count, service_remainder_days = service_duration_components(hire_date, end_date, unpaid_days)
             basic_salary = Decimal(str(employee["basic_salary"] if employee["basic_salary"] is not None else employee["salary"] or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             daily_rate = (basic_salary / Decimal("30")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             first_years = min(service_years, 5.0) if service_years >= 1.0 else 0.0
             later_years = max(0.0, service_years - 5.0) if service_years >= 1.0 else 0.0
-            first_days = Decimal(str(first_years)) * Decimal("21")
-            later_days = Decimal(str(later_years)) * Decimal("30")
-            earned_days = first_days + later_days
+            first_days = (Decimal(str(first_years)) * Decimal("21")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            later_days = (Decimal(str(later_years)) * Decimal("30")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            earned_days = (first_days + later_days).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             gross_before_cap = (daily_rate * earned_days).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             statutory_cap = (basic_salary * Decimal("24")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
             amount = min(gross_before_cap, statutory_cap) if service_years >= 1.0 else Decimal("0.00")
@@ -6549,14 +6574,21 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "status": "uae_national_social_security" if citizen else "eligible" if service_years >= 1.0 else "not_eligible",
                     "status_label": "تخضع استحقاقات المواطن لتشريعات المعاشات والتأمينات الاجتماعية" if citizen else "مستحق وفق مدة الخدمة" if service_years >= 1.0 else "لا يستحق قبل إكمال سنة خدمة",
                     "start_date": hire_date.isoformat(), "end_date": end_date.isoformat(), "payment_deadline": payment_deadline.isoformat(),
-                    "service_days": round(service_days, 4), "unpaid_days": unpaid_days, "service_years": round(service_years, 6),
+                    "service_days": round(service_days, 2), "unpaid_days": round(unpaid_days, 2),
+                    "service_years": round(service_years, 2),
+                    "service_duration": {
+                        "years": service_years_count,
+                        "months": service_months_count,
+                        "days": service_remainder_days,
+                        "label": f"{service_years_count} سنة · {service_months_count} شهر · {service_remainder_days} يوم",
+                    },
                     "basic_salary": float(basic_salary), "daily_rate": float(daily_rate),
-                    "first_five_years": round(first_years, 6), "years_after_five": round(later_years, 6),
+                    "first_five_years": round(first_years, 2), "years_after_five": round(later_years, 2),
                     "first_five_years_days": float(first_days), "years_after_five_days": float(later_days), "earned_days": float(earned_days),
                     "gross_before_cap": float(gross_before_cap), "statutory_cap": float(statutory_cap), "cap_applied": gross_before_cap > statutory_cap,
                     "amount": float(amount), "currency": "AED",
-                    "formula": "21 يوماً من الراتب الأساسي عن كل سنة من أول خمس سنوات، و30 يوماً عن كل سنة بعدها، مع احتساب كسر السنة نسبياً وحد أقصى يعادل أجر سنتين.",
-                    "legal_note": "الحاسبة تشغيلية للمراجعة الداخلية ولا تستبدل مراجعة وزارة الموارد البشرية أو المستشار القانوني عند وجود نظام ادخار أو حالة تعاقدية خاصة.",
+                    "formula": "21 يوماً من الراتب الأساسي عن كل سنة من أول خمس سنوات، و30 يوماً عن كل سنة بعدها، مع احتساب كسر السنة نسبياً.",
+                    "legal_note": "الحد الأعلى النظامي للمكافأة هو أجر سنتين (24 شهراً) ولا يجوز أن تتجاوزه المكافأة. لا تدخل أيام الغياب أو الإجازات بدون أجر في مدة الخدمة المحتسبة. الحاسبة تشغيلية للمراجعة الداخلية ولا تستبدل مراجعة وزارة الموارد البشرية أو المستشار القانوني عند وجود نظام ادخار أو حالة تعاقدية خاصة.",
                 },
             })
 
