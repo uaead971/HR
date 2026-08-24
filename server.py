@@ -7557,8 +7557,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_certificate_history_get(self) -> None:
             user = self.require_permission("salary_certificate.verify")
-            if str(user.get("role")) not in {"admin", "hr"}:
-                raise APIError(403, "سجل شهادات الراتب متاح للموارد البشرية ومدير النظام فقط.", "forbidden")
             rows = self.db.execute(
                 """SELECT c.*,e.full_name AS employee_name,e.employee_no,u.display_name AS requester_name
                    FROM salary_certificates c JOIN employees e ON e.id=c.employee_id
@@ -7699,8 +7697,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_certificate_verify(self) -> None:
             user = self.require_permission("salary_certificate.verify")
-            if str(user.get("role")) not in {"admin", "hr"}:
-                raise APIError(403, "التحقق من شهادات الراتب متاح للموارد البشرية ومدير النظام فقط.", "forbidden")
             data = self.read_json()
             submitted = str(data.get("code") or data.get("verification_code") or data.get("certificate_no") or "").strip().upper()
             submitted = re.sub(r"\s+", "", submitted)
