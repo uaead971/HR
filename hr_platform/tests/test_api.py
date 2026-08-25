@@ -3211,6 +3211,39 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(viewer.request("GET", "/api/org/grid")["view"], "grid")
         self.assertEqual(viewer.request("GET", "/api/org/hierarchy?view=hierarchical")["view"], "hierarchical")
 
+    def test_66_v61_employee_service_archive_and_rehire_preserves_history(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"ARC-{suffix}", "full_name": "موظف الأرشيف وإعادة التوظيف",
+            "email": f"archive-{suffix}@demo.ae", "hire_date": "2020-02-01",
+            "salary": 8000, "manager_id": None,
+        }, expected=201)["employee"]
+        terminated = hr.request("POST", f"/api/employees/{employee['id']}/terminate", {
+            "termination_date": "2026-08-20", "termination_type": "resignation",
+            "termination_reason": "انتهاء علاقة العمل بطلب الموظف",
+            "termination_notes": "تمت مراجعة التسوية وتسليم العهد.",
+            "final_settlement_status": "paid", "final_settlement_amount": 1200,
+        })["employee"]
+        self.assertFalse(terminated["active"])
+        self.assertEqual(terminated["employment_status"], "terminated")
+        active_ids = {item["id"] for item in hr.request("GET", "/api/employees")["items"]}
+        self.assertNotIn(employee["id"], active_ids)
+        archived = next(item for item in hr.request("GET", "/api/employees?archive=1")["items"] if item["id"] == employee["id"])
+        self.assertEqual(archived["termination_type"], "resignation")
+        self.assertEqual(archived["termination_reason"], "انتهاء علاقة العمل بطلب الموظف")
+        history = hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["period_no"], 1)
+        self.assertIsNone(history[0]["rehired_at"])
+        rehired = hr.request("POST", f"/api/employees/{employee['id']}/rehire", {
+            "hire_date": "2026-09-01",
+        })["employee"]
+        self.assertTrue(rehired["active"])
+        self.assertEqual(rehired["hire_date"], "2026-09-01")
+        self.assertEqual(len(hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"]), 1)
+        self.assertIsNotNone(hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"][0]["rehired_at"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

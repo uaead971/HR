@@ -61,6 +61,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
     "people": {
         "employee.view": "عرض جميع ملفات الموظفين", "employee.manage": "إنشاء ملفات الموظفين وإدارة بياناتها التشغيلية",
         "employee.profile.edit": "تعديل البيانات الشخصية والوظيفية والصورة في ملف الموظف",
+        "employee.lifecycle.manage": "إنهاء خدمة وأرشفة وإعادة توظيف الموظفين",
         "employee.emergency.manage": "إدارة جهات اتصال الطوارئ للموظفين",
         "employee.team": "عرض أسماء وأرقام موظفي الفريق فقط", "department.manage": "إدارة الأقسام",
         "employee_document.manage": "إدارة وثائق الموظفين", "employee_action.manage": "إدارة المخالفات والتعهدات",
@@ -110,7 +111,7 @@ ALL_PERMISSIONS = {permission for group in PERMISSION_CATALOG.values() for permi
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "admin": {"*"},
     "hr": {
-        "org.view", "organization.view", "org.manage", "branch.view", "branch.manage", "employee.view", "employee.manage", "employee.profile.edit", "employee.emergency.manage",
+        "org.view", "organization.view", "org.manage", "branch.view", "branch.manage", "employee.view", "employee.manage", "employee.profile.edit", "employee.lifecycle.manage", "employee.emergency.manage",
         "salary.view", "attendance.view", "attendance.export", "shift.view", "shift.manage", "overtime.view",
         "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "evaluation.review", "evaluation.cycle.manage",
         "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
@@ -153,6 +154,18 @@ DOCUMENT_TYPE_LABELS_AR = {
 }
 
 CUSTODY_CONDITIONS = {"new", "used_clean", "used_average", "used_damaged"}
+
+TERMINATION_TYPES = {
+    "resignation", "end_of_contract", "mutual_agreement", "redundancy",
+    "termination_for_cause", "retirement", "death", "other",
+}
+TERMINATION_TYPE_LABELS_AR = {
+    "resignation": "استقالة", "end_of_contract": "انتهاء العقد",
+    "mutual_agreement": "اتفاق الطرفين", "redundancy": "إلغاء/تقليص الوظيفة",
+    "termination_for_cause": "إنهاء لسبب مشروع", "retirement": "تقاعد",
+    "death": "وفاة", "other": "سبب آخر",
+}
+FINAL_SETTLEMENT_STATUSES = {"pending", "paid", "not_applicable", "disputed"}
 
 CARD_TEMPLATES = {"portrait_orbit", "executive_horizontal", "minimal_vertical"}
 
@@ -1688,6 +1701,10 @@ def initialize_database(db_path: Path) -> None:
                     "basic_salary": "REAL NOT NULL DEFAULT 0", "housing_allowance": "REAL NOT NULL DEFAULT 0",
                     "transport_allowance": "REAL NOT NULL DEFAULT 0", "profession_allowance": "REAL NOT NULL DEFAULT 0",
                     "other_allowance": "REAL NOT NULL DEFAULT 0", "manual_allowances_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "termination_date": "TEXT", "termination_type": "TEXT NOT NULL DEFAULT ''",
+                    "termination_reason": "TEXT NOT NULL DEFAULT ''", "termination_notes": "TEXT NOT NULL DEFAULT ''",
+                    "notice_end_on": "TEXT", "final_settlement_status": "TEXT NOT NULL DEFAULT 'pending'",
+                    "final_settlement_amount": "REAL NOT NULL DEFAULT 0", "terminated_by": "INTEGER", "terminated_at": "TEXT",
                 },
                 "users": {
                     "must_change_password": "INTEGER NOT NULL DEFAULT 0",
@@ -1774,6 +1791,46 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS employee_service_history (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       employee_id INTEGER NOT NULL,
+                       period_no INTEGER NOT NULL,
+                       hire_date TEXT,
+                       termination_date TEXT NOT NULL,
+                       contract_start_on TEXT,
+                       contract_end_on TEXT,
+                       termination_type TEXT NOT NULL,
+                       termination_reason TEXT NOT NULL,
+                       termination_notes TEXT NOT NULL DEFAULT '',
+                       notice_end_on TEXT,
+                       final_settlement_status TEXT NOT NULL DEFAULT 'pending',
+                       final_settlement_amount REAL NOT NULL DEFAULT 0,
+                       department_id INTEGER,
+                       branch_id INTEGER,
+                       manager_id INTEGER,
+                       approval_employee_id INTEGER,
+                       job_title TEXT NOT NULL DEFAULT '',
+                       job_grade TEXT NOT NULL DEFAULT '',
+                       basic_salary REAL NOT NULL DEFAULT 0,
+                       gross_salary REAL NOT NULL DEFAULT 0,
+                       previous_user_role TEXT NOT NULL DEFAULT '',
+                       terminated_by INTEGER,
+                       terminated_at TEXT NOT NULL,
+                       rehired_at TEXT,
+                       rehired_by INTEGER,
+                       created_at TEXT NOT NULL,
+                       updated_at TEXT NOT NULL,
+                       UNIQUE(employee_id, period_no),
+                       FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+                       FOREIGN KEY (terminated_by) REFERENCES users(id) ON DELETE SET NULL,
+                       FOREIGN KEY (rehired_by) REFERENCES users(id) ON DELETE SET NULL)"""
+            )
+            history_columns = {row["name"] for row in db.execute("PRAGMA table_info(employee_service_history)")}
+            for column, definition in {"contract_start_on": "TEXT", "contract_end_on": "TEXT"}.items():
+                if column not in history_columns:
+                    db.execute(f"ALTER TABLE employee_service_history ADD COLUMN {column} {definition}")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_employee_service_history_employee ON employee_service_history(employee_id, period_no DESC)")
             db.execute(
                 """CREATE TABLE IF NOT EXISTS visual_identity_slides (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2466,13 +2523,21 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
     salary_components = ",e.basic_salary,e.housing_allowance,e.transport_allowance,e.profession_allowance,e.other_allowance,e.manual_allowances_json" if include_salary else ",NULL AS basic_salary,NULL AS housing_allowance,NULL AS transport_allowance,NULL AS profession_allowance,NULL AS other_allowance,NULL AS manual_allowances_json"
     sensitive = "," + ",".join(f"e.{field}" for field in EMPLOYEE_SENSITIVE_FIELDS) if include_sensitive else ""
     emergency_count = "," + "(SELECT COUNT(*) FROM employee_emergency_contacts ec WHERE ec.employee_id=e.id AND ec.archived=0) AS emergency_contact_count" if include_sensitive else ""
+    # Keep expiry values available to the normalizer for compliance badges,
+    # but mark the projection so non-profile listings can remove all personal
+    # document/identity fields before serializing the response.
+    sensitive_marker = "1" if include_sensitive else "0"
     return f"""
         SELECT e.id,e.employee_no,e.full_name,e.email,e.phone,e.gender,
                COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
                e.passport_expires_on,e.emirates_id_expires_on,
-               e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active{sensitive}{emergency_count},
+               e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active,
+               e.termination_date,e.termination_type,e.termination_reason,e.termination_notes,e.notice_end_on,
+               e.final_settlement_status,e.final_settlement_amount,e.terminated_at,
+               (SELECT COUNT(*) FROM employee_service_history sh WHERE sh.employee_id=e.id) AS service_period_count{sensitive}{emergency_count},
+               {sensitive_marker} AS _include_sensitive,
                (SELECT ed.issued_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_start_on,
                (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
                (SELECT MIN(ed.expires_on) FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL) AS nearest_document_expiry,
@@ -2526,7 +2591,9 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None
     data = dict(row)
+    include_sensitive = bool(data.pop("_include_sensitive", False))
     data["active"] = bool(data["active"])
+    data["employment_status"] = "active" if data["active"] else "terminated"
     data.update(expiry_compliance(
         (data.get("contract_end_on"), "عقد العمل"),
         (data.get("nearest_document_expiry"), "وثيقة الموظف"),
@@ -2569,6 +2636,9 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
             data["service_days"]=service_days; data["service_years"]=round(service_days/365.2425,1)
         except ValueError:
             data["service_days"]=None; data["service_years"]=None
+    if not include_sensitive:
+        for field in EMPLOYEE_SENSITIVE_FIELDS:
+            data.pop(field, None)
     return data
 
 
@@ -2719,6 +2789,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/employees/(\d+)/comprehensive-report/export", self.api_employee_report_export),
                     ("GET", r"/api/employees/(\d+)", self.api_employee_get),
                     ("PATCH", r"/api/employees/(\d+)", self.api_employee_patch),
+                    ("GET", r"/api/employees/(\d+)/service-history", self.api_employee_service_history),
+                    ("POST", r"/api/employees/(\d+)/terminate", self.api_employee_terminate),
+                    ("POST", r"/api/employees/(\d+)/rehire", self.api_employee_rehire),
                     ("GET", r"/api/employees/(\d+)/emergency-contacts", self.api_employee_emergency_contacts_get),
                     ("POST", r"/api/employees/(\d+)/emergency-contacts", self.api_employee_emergency_contact_post),
                     ("PATCH", r"/api/emergency-contacts/(\d+)", self.api_employee_emergency_contact_patch),
@@ -4773,10 +4846,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True)
             assert user is not None
             scope = "self"
+            archive_mode = self.query.get("archive") in {"1", "true", "terminated", "archived"}
             if self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "employee.profile.edit"):
-                rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + " ORDER BY e.full_name").fetchall()
+                status_clause = " WHERE e.active=0" if archive_mode else " WHERE e.active=1"
+                rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + status_clause + " ORDER BY e.full_name").fetchall()
                 payload = [normalize_employee(row) for row in rows]
-                scope = "all"
+                scope = "archive" if archive_mode else "all"
             elif has_permission(self.db, user, "employee.team") and user.get("employee_id"):
                 rows = self.db.execute(
                     """SELECT DISTINCT e.id,e.employee_no,e.full_name
@@ -4793,6 +4868,136 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             else:
                 raise APIError(403, "لا تملك صلاحية عرض الموظفين.", "forbidden")
             self.send_json(200, {"items": payload, "scope": scope})
+
+        def service_history_rows(self, employee_id: int) -> list[dict[str, Any]]:
+            rows = self.db.execute(
+                """SELECT sh.*,d.name AS department_name,b.name AS branch_name,m.full_name AS manager_name,
+                          a.full_name AS approval_employee_name,u.display_name AS terminated_by_name
+                     FROM employee_service_history sh
+                     LEFT JOIN departments d ON d.id=sh.department_id
+                     LEFT JOIN branches b ON b.id=sh.branch_id
+                     LEFT JOIN employees m ON m.id=sh.manager_id
+                     LEFT JOIN employees a ON a.id=sh.approval_employee_id
+                     LEFT JOIN users u ON u.id=sh.terminated_by
+                    WHERE sh.employee_id=? ORDER BY sh.period_no DESC""",
+                (employee_id,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                item["termination_type_label"] = TERMINATION_TYPE_LABELS_AR.get(item.get("termination_type"), item.get("termination_type") or "")
+                result.append(item)
+            return result
+
+        def api_employee_service_history(self, employee_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            if not self.db.execute("SELECT id FROM employees WHERE id=?", (employee_id,)).fetchone():
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            if not (self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "employee.lifecycle.manage")):
+                raise APIError(403, "لا تملك صلاحية عرض سجل الخدمة.", "forbidden")
+            self.send_json(200, {"items": self.service_history_rows(employee_id)})
+
+        def api_employee_terminate(self, employee_id: int) -> None:
+            user = self.require_permission("employee.lifecycle.manage")
+            existing = self.db.execute("SELECT * FROM employees WHERE id=?", (employee_id,)).fetchone()
+            if not existing:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            if not bool(existing["active"]):
+                raise APIError(409, "الموظف موجود بالفعل في الأرشيف.", "employee_already_terminated")
+            data = self.read_json()
+            termination_date = parse_date(data.get("termination_date") or local_now().date().isoformat(), "termination_date").isoformat()
+            termination_type = str(data.get("termination_type") or "").strip().lower()
+            if termination_type not in TERMINATION_TYPES:
+                raise APIError(422, "نوع إنهاء الخدمة غير صالح.", "validation_error", {"field": "termination_type"})
+            reason = require_text(data, "termination_reason", 1000)
+            notes = optional_text(data, "termination_notes", 4000)
+            notice_end_on = parse_date(data["notice_end_on"], "notice_end_on").isoformat() if data.get("notice_end_on") else None
+            if notice_end_on and notice_end_on < termination_date:
+                raise APIError(422, "تاريخ نهاية الإنذار لا يمكن أن يسبق تاريخ نهاية الخدمة.", "validation_error", {"field": "notice_end_on"})
+            settlement_status = str(data.get("final_settlement_status") or "pending").strip().lower()
+            if settlement_status not in FINAL_SETTLEMENT_STATUSES:
+                raise APIError(422, "حالة التسوية النهائية غير صالحة.", "validation_error", {"field": "final_settlement_status"})
+            settlement_amount = as_float(data.get("final_settlement_amount", 0), "final_settlement_amount", 0, 100_000_000)
+            stamp = now_iso()
+            account = self.db.execute("SELECT id,role FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
+            contract = self.db.execute(
+                "SELECT issued_on,expires_on FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC LIMIT 1",
+                (employee_id,),
+            ).fetchone()
+            period_no = int(self.db.execute("SELECT COALESCE(MAX(period_no),0)+1 FROM employee_service_history WHERE employee_id=?", (employee_id,)).fetchone()[0])
+            try:
+                with self.db:
+                    self.db.execute(
+                        """INSERT INTO employee_service_history(
+                               employee_id,period_no,hire_date,termination_date,contract_start_on,contract_end_on,termination_type,termination_reason,termination_notes,
+                               notice_end_on,final_settlement_status,final_settlement_amount,department_id,branch_id,manager_id,
+                               approval_employee_id,job_title,job_grade,basic_salary,gross_salary,previous_user_role,terminated_by,terminated_at,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (employee_id, period_no, existing["hire_date"], termination_date,
+                         contract["issued_on"] if contract else None, contract["expires_on"] if contract else None,
+                         termination_type, reason, notes,
+                         notice_end_on, settlement_status, settlement_amount, existing["department_id"], existing["branch_id"],
+                         existing["manager_id"], existing["approval_employee_id"], existing["job_title"], existing["job_grade"],
+                         float(existing["basic_salary"] or 0), float(existing["salary"] or 0), account["role"] if account else "",
+                         user["id"], stamp, stamp, stamp),
+                    )
+                    self.db.execute(
+                        """UPDATE employees SET active=0,termination_date=?,termination_type=?,termination_reason=?,termination_notes=?,
+                               notice_end_on=?,final_settlement_status=?,final_settlement_amount=?,terminated_by=?,terminated_at=?,
+                               department_id=NULL,branch_id=NULL,manager_id=NULL,approval_employee_id=NULL,updated_at=? WHERE id=?""",
+                        (termination_date, termination_type, reason, notes, notice_end_on, settlement_status, settlement_amount, user["id"], stamp, stamp, employee_id),
+                    )
+                    self.db.execute("UPDATE employee_documents SET archived=1,updated_at=? WHERE employee_id=? AND archived=0", (stamp, employee_id))
+                    self.db.execute("UPDATE users SET active=0,updated_at=? WHERE employee_id=?", (stamp, employee_id))
+                    self.db.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE employee_id=?)", (employee_id,))
+                    self.db.execute("UPDATE employees SET manager_id=NULL WHERE manager_id=?", (employee_id,))
+                    self.db.execute("UPDATE employees SET approval_employee_id=NULL WHERE approval_employee_id=?", (employee_id,))
+                    self.db.execute("UPDATE departments SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute("UPDATE branches SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute("UPDATE organization SET general_manager_employee_id=NULL,updated_at=? WHERE general_manager_employee_id=?", (stamp, employee_id))
+                    audit(self.db, user["id"], "employee.terminate", "employee", employee_id, {
+                        "period_no": period_no, "termination_date": termination_date, "termination_type": termination_type,
+                        "final_settlement_status": settlement_status, "final_settlement_amount": settlement_amount,
+                    })
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "تعذر حفظ سجل إنهاء الخدمة.", "termination_conflict") from exc
+            self.send_json(200, {"employee": normalize_employee(self.db.execute(employee_query(has_permission(self.db, user, "salary.view"), True) + " WHERE e.id=?", (employee_id,)).fetchone()), "history": self.service_history_rows(employee_id)})
+
+        def api_employee_rehire(self, employee_id: int) -> None:
+            user = self.require_permission("employee.lifecycle.manage")
+            existing = self.db.execute("SELECT * FROM employees WHERE id=?", (employee_id,)).fetchone()
+            if not existing:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            if bool(existing["active"]):
+                raise APIError(409, "الموظف على رأس العمل بالفعل.", "employee_already_active")
+            data = self.read_json()
+            hire_date = parse_date(data.get("hire_date") or "", "hire_date").isoformat()
+            values = self.parse_employee(data, partial=True)
+            for key in ("employee_no", "full_name", "email", "birth_date", "gender", "passport_no", "passport_expires_on", "emirates_id_no", "emirates_id_expires_on", "marital_status", "photo_data"):
+                values.pop(key, None)
+            values["hire_date"] = hire_date
+            values["active"] = 1
+            contract_dates = self.parse_contract_dates(data)
+            approval_id = values.get("approval_employee_id")
+            if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
+                raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
+            stamp = now_iso()
+            values.update({"termination_date": None, "termination_type": "", "termination_reason": "", "termination_notes": "", "notice_end_on": None, "final_settlement_status": "pending", "final_settlement_amount": 0, "terminated_by": None, "terminated_at": None, "updated_at": stamp})
+            try:
+                with self.db:
+                    self.db.execute("UPDATE employees SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), employee_id))
+                    if contract_dates:
+                        self.sync_employee_contract(employee_id, contract_dates, user["id"], stamp)
+                    account = self.db.execute("SELECT id,role FROM users WHERE employee_id=? ORDER BY active DESC,id LIMIT 1", (employee_id,)).fetchone()
+                    if account:
+                        self.db.execute("UPDATE users SET active=1,updated_at=? WHERE id=?", (stamp, account["id"]))
+                    self.db.execute("UPDATE employee_service_history SET rehired_at=?,rehired_by=?,updated_at=? WHERE employee_id=? AND id=(SELECT id FROM employee_service_history WHERE employee_id=? ORDER BY period_no DESC LIMIT 1)", (stamp, user["id"], stamp, employee_id, employee_id))
+                    audit(self.db, user["id"], "employee.rehire", "employee", employee_id, {"hire_date": hire_date, "contract_dates": contract_dates is not None, "account_reactivated": bool(account)})
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "rehire_conflict") from exc
+            row = self.db.execute(employee_query(has_permission(self.db, user, "salary.view"), True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            self.send_json(200, {"employee": normalize_employee(row), "account_reactivated": bool(account), "history": self.service_history_rows(employee_id)})
 
         def parse_employee(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             result: dict[str, Any] = {}
