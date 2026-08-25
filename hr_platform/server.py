@@ -169,6 +169,21 @@ FINAL_SETTLEMENT_STATUSES = {"pending", "paid", "not_applicable", "disputed"}
 
 CARD_TEMPLATES = {"portrait_orbit", "executive_horizontal", "minimal_vertical"}
 
+# Approved grade/level salary scale.  These are base monthly salaries in AED;
+# allowances remain separate employee-level components.  Keep this catalogue
+# limited to the grade and salary values supplied by the organization.
+JOB_GRADE_SALARY_SCALE = (
+    ("1", "الأولى", 8000, 7650, 7300, 7000),
+    ("2", "الثانية", 6500, 6250, 6000, 5750),
+    ("3", "الثالثة", 5200, 5000, 4800, 4600),
+    ("4", "الرابعة", 4200, 4050, 3900, 3750),
+    ("5", "الخامسة", 3400, 3300, 3200, 3100),
+    ("6", "السادسة", 2800, 2700, 2600, 2500),
+    ("7", "السابعة", 2300, 2200, 2100, 2000),
+    ("8", "الثامنة", 1800, 1750, 1700, 1650),
+)
+JOB_GRADE_LEVELS = ("A", "B", "C", "D")
+
 GENERIC_JOB_GOALS = (
     ("جودة ودقة الإنجاز", "إنجاز المسؤوليات الأساسية وفق الإجراءات المعتمدة وبأقل نسبة أخطاء.", "نسبة الأعمال المقبولة من المرة الأولى", 25),
     ("الإنتاجية والالتزام بالمواعيد", "تحقيق حجم العمل المستهدف وتسليم المهام في مواعيدها.", "نسبة المهام المنجزة ضمن الوقت المستهدف", 25),
@@ -1737,6 +1752,7 @@ def initialize_database(db_path: Path) -> None:
                 "branches": {"license_expires_on": "TEXT"},
                 "employees": {
                     "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
+                    "job_grade_level": "TEXT NOT NULL DEFAULT 'A'",
                     "approval_employee_id": "INTEGER",
                     "gender": "TEXT NOT NULL DEFAULT 'unspecified'",
                     "qualification": "TEXT NOT NULL DEFAULT ''", "nationality": "TEXT NOT NULL DEFAULT ''",
@@ -1755,6 +1771,12 @@ def initialize_database(db_path: Path) -> None:
                     "termination_reason": "TEXT NOT NULL DEFAULT ''", "termination_notes": "TEXT NOT NULL DEFAULT ''",
                     "notice_end_on": "TEXT", "final_settlement_status": "TEXT NOT NULL DEFAULT 'pending'",
                     "final_settlement_amount": "REAL NOT NULL DEFAULT 0", "terminated_by": "INTEGER", "terminated_at": "TEXT",
+                },
+                "job_grades": {
+                    "level_a_salary_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "level_b_salary_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "level_c_salary_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "level_d_salary_cents": "INTEGER NOT NULL DEFAULT 0",
                 },
                 "users": {
                     "must_change_password": "INTEGER NOT NULL DEFAULT 0",
@@ -2053,6 +2075,16 @@ def initialize_database(db_path: Path) -> None:
             )
             for name in ("الإدارة العامة", "الموارد البشرية", "العمليات", "المالية"):
                 db.execute("INSERT OR IGNORE INTO departments(name,created_at) VALUES(?,?)", (name, stamp))
+            for code, name, level_a, level_b, level_c, level_d in JOB_GRADE_SALARY_SCALE:
+                salaries = (level_a * 100, level_b * 100, level_c * 100, level_d * 100)
+                db.execute(
+                    """INSERT OR IGNORE INTO job_grades(
+                           code,name,min_salary_cents,max_salary_cents,
+                           level_a_salary_cents,level_b_salary_cents,level_c_salary_cents,level_d_salary_cents,
+                           created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (code, name, min(salaries), max(salaries), *salaries, stamp, stamp),
+                )
             grade_seed = (("G-07", "الدرجة السابعة"), ("G-12", "الدرجة الثانية عشرة"), ("G-15", "الدرجة الخامسة عشرة"))
             for code, name in grade_seed:
                 db.execute("INSERT OR IGNORE INTO job_grades(code,name,created_at,updated_at) VALUES(?,?,?,?)", (code, name, stamp, stamp))
@@ -2537,6 +2569,23 @@ def normalize_manual_allowances(value: Any) -> list[dict[str, Any]]:
     return result
 
 
+def normalize_job_grade(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    """Expose a grade's four letter salaries in AED for the UI and APIs."""
+    data = dict(row) if isinstance(row, sqlite3.Row) else dict(row)
+    levels: dict[str, float] = {}
+    for level in JOB_GRADE_LEVELS:
+        cents = int(data.get(f"level_{level.lower()}_salary_cents") or 0)
+        levels[level] = round(cents / 100, 2)
+        data[f"level_{level.lower()}_salary"] = levels[level]
+    if not data.get("min_salary") and any(levels.values()):
+        data["min_salary"] = min(levels.values())
+    if not data.get("max_salary") and any(levels.values()):
+        data["max_salary"] = max(levels.values())
+    data["salary_scale"] = levels
+    data["active"] = bool(data.get("active", True))
+    return data
+
+
 def salary_breakdown_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     """Build a consistent salary breakdown and gross total from an employee row."""
     data = dict(row) if isinstance(row, sqlite3.Row) else row
@@ -2580,7 +2629,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
     return f"""
         SELECT e.id,e.employee_no,e.full_name,e.email,e.phone,e.gender,
                COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
-               e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
+               e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
                e.passport_expires_on,e.emirates_id_expires_on,
                e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active,
@@ -2619,7 +2668,7 @@ def organization_employee_query() -> str:
         SELECT e.id,e.employee_no,e.full_name,e.gender,
                COALESCE(jt.name,e.job_title) AS job_title,
                COALESCE(jg.code,e.job_grade) AS job_grade,
-               e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
+               e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,
                e.passport_expires_on,e.emirates_id_expires_on,
                e.branch_id,b.name AS branch_name,
@@ -4106,18 +4155,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_job_grades_get(self) -> None:
             self.current_user(True)
             rows = self.db.execute("SELECT *,min_salary_cents/100.0 AS min_salary,max_salary_cents/100.0 AS max_salary FROM job_grades ORDER BY code").fetchall()
-            self.send_json(200, {"items": [dict(r) | {"active": bool(r["active"])} for r in rows]})
+            self.send_json(200, {"items": [normalize_job_grade(r) for r in rows]})
 
         def api_job_grades_post(self) -> None:
             user = self.require_permission("reference.manage"); data = self.read_json(); stamp = now_iso()
             code, name = require_text(data, "code", 40), require_text(data, "name", 120)
-            minimum, maximum = money_cents(data.get("min_salary", 0), "min_salary"), money_cents(data.get("max_salary", 0), "max_salary")
+            scale = {level: money_cents(data.get(f"level_{level.lower()}_salary", 0), f"level_{level.lower()}_salary") for level in JOB_GRADE_LEVELS}
+            minimum = money_cents(data.get("min_salary", min(scale.values())), "min_salary") if "min_salary" in data else min(scale.values())
+            maximum = money_cents(data.get("max_salary", max(scale.values())), "max_salary") if "max_salary" in data else max(scale.values())
             if maximum and maximum < minimum: raise APIError(422, "الحد الأعلى أقل من الحد الأدنى.", "validation_error")
             try:
                 with self.db:
-                    cur = self.db.execute("INSERT INTO job_grades(code,name,min_salary_cents,max_salary_cents,created_at,updated_at) VALUES(?,?,?,?,?,?)", (code,name,minimum,maximum,stamp,stamp)); audit(self.db,user["id"],"job_grade.create","job_grade",cur.lastrowid)
+                    cur = self.db.execute(
+                        """INSERT INTO job_grades(code,name,min_salary_cents,max_salary_cents,
+                               level_a_salary_cents,level_b_salary_cents,level_c_salary_cents,level_d_salary_cents,
+                               created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                        (code, name, minimum, maximum, *(scale[level] for level in JOB_GRADE_LEVELS), stamp, stamp),
+                    ); audit(self.db,user["id"],"job_grade.create","job_grade",cur.lastrowid)
             except sqlite3.IntegrityError as exc: raise APIError(409,"رمز الدرجة مستخدم.","duplicate_reference") from exc
-            self.send_json(201,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(cur.lastrowid,)).fetchone())})
+            self.send_json(201,{"job_grade":normalize_job_grade(self.db.execute("SELECT * FROM job_grades WHERE id=?",(cur.lastrowid,)).fetchone())})
 
         def api_job_grade_patch(self, grade_id: int) -> None:
             user=self.require_permission("reference.manage"); data=self.read_json(); existing=self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone()
@@ -4125,8 +4181,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             allowed={}
             if "code" in data: allowed["code"]=require_text(data,"code",40)
             if "name" in data: allowed["name"]=require_text(data,"name",120)
+            for level in JOB_GRADE_LEVELS:
+                key = f"level_{level.lower()}_salary"
+                if key in data: allowed[f"level_{level.lower()}_salary_cents"] = money_cents(data[key], key)
             if "min_salary" in data: allowed["min_salary_cents"]=money_cents(data["min_salary"],"min_salary")
             if "max_salary" in data: allowed["max_salary_cents"]=money_cents(data["max_salary"],"max_salary")
+            if any(f"level_{level.lower()}_salary_cents" in allowed for level in JOB_GRADE_LEVELS):
+                scale_values = [allowed.get(f"level_{level.lower()}_salary_cents", existing[f"level_{level.lower()}_salary_cents"]) for level in JOB_GRADE_LEVELS]
+                allowed.setdefault("min_salary_cents", min(scale_values))
+                allowed.setdefault("max_salary_cents", max(scale_values))
             if "active" in data: allowed["active"]=1 if bool(data["active"]) else 0
             if not allowed: raise APIError(422,"لا توجد تغييرات.","validation_error")
             minimum=allowed.get("min_salary_cents",existing["min_salary_cents"]); maximum=allowed.get("max_salary_cents",existing["max_salary_cents"])
@@ -4137,7 +4200,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     self.db.execute("UPDATE job_grades SET "+",".join(f"{k}=?" for k in allowed)+" WHERE id=?",(*allowed.values(),grade_id))
                     audit(self.db,user["id"],"job_grade.update","job_grade",grade_id,allowed)
             except sqlite3.IntegrityError as exc: raise APIError(409,"رمز الدرجة مستخدم.","duplicate_reference") from exc
-            self.send_json(200,{"job_grade":dict(self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone())})
+            self.send_json(200,{"job_grade":normalize_job_grade(self.db.execute("SELECT * FROM job_grades WHERE id=?",(grade_id,)).fetchone())})
 
         def api_job_grade_delete(self, grade_id: int) -> None:
             user=self.require_permission("reference.manage")
@@ -4636,7 +4699,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee = self.db.execute(
                 """SELECT e.id,e.employee_no,e.full_name,e.hire_date,e.photo_data,e.active,e.gender,e.created_at,e.updated_at,
                           COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
-                          jg.name AS job_grade_name,d.name AS department_name,b.name AS branch_name
+                          e.job_grade_level,jg.name AS job_grade_name,d.name AS department_name,b.name AS branch_name
                      FROM employees e
                      LEFT JOIN job_titles jt ON jt.id=e.job_title_id
                      LEFT JOIN job_grades jg ON jg.id=e.job_grade_id
@@ -4820,7 +4883,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "employee": {
                     "id": employee["id"], "employee_no": employee["employee_no"], "full_name": employee["full_name"],
                     "job_title": employee["job_title"], "job_grade": employee["job_grade"],
-                    "job_grade_name": employee["job_grade_name"], "department_name": employee["department_name"],
+                    "job_grade_level": employee["job_grade_level"], "job_grade_name": employee["job_grade_name"], "department_name": employee["department_name"],
                     "branch_name": employee["branch_name"], "hire_date": period["hire_date"].isoformat(),
                     "photo_data": employee["photo_data"], "active": bool(employee["active"]),
                 },
@@ -5087,6 +5150,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def parse_employee(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             result: dict[str, Any] = {}
+            scale_salary: float | None = None
             for key, max_len in (("employee_no", 40), ("full_name", 180)):
                 if not partial or key in data:
                     result[key] = require_text(data, key, max_len)
@@ -5124,9 +5188,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if "job_grade_id" in data:
                 result["job_grade_id"] = as_int(data["job_grade_id"], "job_grade_id", 1) if data["job_grade_id"] not in (None, "") else None
                 if result["job_grade_id"]:
-                    grade = self.db.execute("SELECT code FROM job_grades WHERE id=? AND active=1", (result["job_grade_id"],)).fetchone()
+                    grade = self.db.execute(
+                        """SELECT code,level_a_salary_cents,level_b_salary_cents,level_c_salary_cents,level_d_salary_cents
+                           FROM job_grades WHERE id=? AND active=1""",
+                        (result["job_grade_id"],),
+                    ).fetchone()
                     if not grade: raise APIError(422, "الدرجة الوظيفية غير موجودة أو غير نشطة.", "validation_error")
                     result["job_grade"] = grade["code"]
+                    selected_level = str(data.get("job_grade_level") or result.get("job_grade_level") or "A").strip().upper()
+                    if selected_level not in JOB_GRADE_LEVELS:
+                        raise APIError(422, "حرف الدرجة يجب أن يكون A أو B أو C أو D.", "validation_error", {"field": "job_grade_level"})
+                    result["job_grade_level"] = selected_level
+                    scale_salary = round(int(grade[f"level_{selected_level.lower()}_salary_cents"] or 0) / 100, 2)
+            elif "job_grade_level" in data or not partial:
+                selected_level = str(data.get("job_grade_level") or "A").strip().upper()
+                if selected_level not in JOB_GRADE_LEVELS:
+                    raise APIError(422, "حرف الدرجة يجب أن يكون A أو B أو C أو D.", "validation_error", {"field": "job_grade_level"})
+                result["job_grade_level"] = selected_level
             if "hire_date" in data:
                 result["hire_date"] = parse_date(data["hire_date"], "hire_date").isoformat() if data["hire_date"] else None
             if "birth_date" in data or not partial:
@@ -5166,6 +5244,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 manual = normalize_manual_allowances(result.get("manual_allowances_json", []))
                 total = sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS) + sum(item["amount"] for item in manual)
                 result["salary"] = round(total, 2)
+            if scale_salary is not None and scale_salary > 0:
+                # The salary scale is authoritative for the base salary.  The
+                # employee may still receive separate allowance components.
+                result["basic_salary"] = scale_salary
+                manual = normalize_manual_allowances(result.get("manual_allowances_json", []))
+                result["salary"] = round(
+                    scale_salary
+                    + sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS if key != "basic_salary")
+                    + sum(item["amount"] for item in manual),
+                    2,
+                )
             elif "salary" in data and not any(key in data for key in SALARY_COMPONENT_FIELDS):
                 # Legacy callers can still set one gross value; it is treated
                 # as the basic salary so the new breakdown remains coherent.
@@ -5420,7 +5509,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if not has_permission(self.db, user, "org.manage"):
                     raise APIError(403, "لا تملك صلاحية تعيين المدير العام.", "forbidden", {"permission": "org.manage"})
             values = self.parse_employee(data, partial=True)
-            salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
+            salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json", "job_grade_id", "job_grade_level"))
             if salary_touched:
                 merged_salary = {key: float(existing_employee[key] or 0) for key in SALARY_COMPONENT_FIELDS}
                 for key in SALARY_COMPONENT_FIELDS:
@@ -5441,7 +5530,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             contract_dates = self.parse_contract_dates(data, current_contract)
             languages = self.parse_languages(data["languages"]) if "languages" in data else None
             profile_editor = has_permission(self.db, user, "employee.profile.edit")
-            reference_only = set(values).issubset({"job_title_id", "job_title", "job_grade_id", "job_grade"}) and has_permission(self.db, user, "reference.manage")
+            reference_only = set(values).issubset({"job_title_id", "job_title", "job_grade_id", "job_grade", "job_grade_level", "basic_salary", "salary"}) and has_permission(self.db, user, "reference.manage")
             if contract_dates and not profile_editor:
                 raise APIError(403, "لا تملك صلاحية تعديل عقد الموظف.", "forbidden", {"permission": "employee.profile.edit"})
             if not profile_editor and not reference_only:

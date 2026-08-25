@@ -117,6 +117,7 @@ to{opacity:1;transform:none}
 .reference-list-item{grid-template-columns:auto minmax(0,1fr) auto;align-items:center;row-gap:9px}
 .reference-list-item .reference-actions{grid-column:1/-1;justify-content:flex-end;padding-top:8px;border-top:1px solid #edf0eb}
 .reference-list-item .reference-actions button{min-height:32px;padding:6px 10px;font-size:11px}
+.grade-salary-scale{display:grid;grid-template-columns:repeat(4,minmax(58px,1fr));gap:6px;margin-top:8px}.grade-salary-scale span{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:5px 7px;border:1px solid #dfe8e1;border-radius:6px;background:#f7fbf8;font-size:10px}.grade-salary-scale b{color:var(--emerald-700)}.grade-salary-scale strong{color:var(--ink);font-size:11px;direction:ltr;unicode-bidi:isolate}
 .status{display:inline-flex;align-items:center;border-radius:18px;background:#e2f0e9;color:#176046;padding:4px 8px;font-size:9px;white-space:nowrap}
 .status.warn{background:#f8ecd7;color:#905b15}
 .status.red{background:#f5e2df;color:#953b30}

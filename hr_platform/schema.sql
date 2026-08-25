@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS job_grades (
   name TEXT NOT NULL,
   min_salary_cents INTEGER NOT NULL DEFAULT 0,
   max_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_a_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_b_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_c_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_d_salary_cents INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -119,6 +123,7 @@ CREATE TABLE IF NOT EXISTS employees (
   gender TEXT NOT NULL DEFAULT 'unspecified',
   job_title TEXT NOT NULL DEFAULT '',
   job_grade TEXT NOT NULL DEFAULT '',
+  job_grade_level TEXT NOT NULL DEFAULT 'A',
   job_title_id INTEGER,
   job_grade_id INTEGER,
   department_id INTEGER,
