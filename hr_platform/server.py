@@ -490,6 +490,11 @@ def _pdf_unicode_font() -> tuple[bytes, dict[int, int]] | None:
     if _PDF_FONT_CACHE is not None:
         return _PDF_FONT_CACHE
     paths = (
+        # Noto/DejaVu are installed in the production Docker image.  Keep
+        # these before platform fonts so the generated PDF is deterministic
+        # on Render and on local macOS installations.
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf"),
         Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
         Path("/Library/Fonts/Arial Unicode.ttf"),
         Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
@@ -943,11 +948,11 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
         width_entries = " ".join(f"{glyph} [{font_widths.get(glyph, 600)}]" for glyph in sorted(used_glyphs))
         cid_widths = f"/W [{width_entries}]" if width_entries else ""
         objects.extend([
-            b"<< /Type /FontDescriptor /FontName /Arial /Flags 4 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 " + str(compressed_number).encode("ascii") + b" 0 R >>",
+            b"<< /Type /FontDescriptor /FontName /KhaishaSans /Flags 4 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 " + str(compressed_number).encode("ascii") + b" 0 R >>",
             b"<< /Length " + str(len(to_unicode)).encode("ascii") + b" >>\nstream\n" + to_unicode + b"\nendstream",
             b"<< /Length " + str(len(compressed_font)).encode("ascii") + b" /Filter /FlateDecode >>\nstream\n" + compressed_font + b"\nendstream",
-            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
-            f"<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /KhaishaSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /Type0 /BaseFont /KhaishaSans /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
         ])
     else:
         font_number = 3 + page_count * 2 + 1
@@ -973,50 +978,95 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
 
 
 def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
-    """Create a dependency-free, printable PDF attachment for approved certificates.
-
-    The browser renders the polished bilingual certificate; the email attachment is
-    intentionally generated server-side so it is available even when the recipient
-    never opens the web application.  ASCII-safe fallback text keeps this valid on
-    installations without a PDF package or Arabic font files.
-    """
+    """Create a dependency-free bilingual PDF attachment for approved certificates."""
     employee = certificate.get("employee") or {}
     organization = certificate.get("organization") or {}
     breakdown = certificate.get("salary_breakdown") or employee.get("salary_breakdown") or {}
     manual = breakdown.get("manual_allowances") or []
-    lines = [
-        organization.get("display_name") or "Khaisha - HR",
-        "SALARY CERTIFICATE / شهادة راتب",
-        f"Issue No: {certificate.get('certificate_no')}",
-        f"Verification: {certificate.get('verification_code')}",
-        f"Employee: {employee.get('name') or employee.get('full_name')}",
-        f"Employee No: {employee.get('employee_no') or employee.get('employee_number')}",
-        f"Job Title: {employee.get('job_title') or '-'}",
-        f"Basic Salary (AED): {float(breakdown.get('basic_salary') or 0):,.2f}",
-        f"Housing Allowance (AED): {float(breakdown.get('housing_allowance') or 0):,.2f}",
-        f"Transport Allowance (AED): {float(breakdown.get('transport_allowance') or 0):,.2f}",
-        f"Profession Allowance (AED): {float(breakdown.get('profession_allowance') or 0):,.2f}",
-        f"Other Allowance (AED): {float(breakdown.get('other_allowance') or 0):,.2f}",
-        *[f"{item.get('name')}: {float(item.get('amount') or 0):,.2f} AED" for item in manual if isinstance(item, dict)],
-        f"Total Monthly Salary (AED): {float(certificate.get('salary') or breakdown.get('total') or 0):,.2f}",
-        f"Purpose: {certificate.get('purpose') or 'To whom it may concern'}",
-        f"Issued At: {certificate.get('issued_at') or '-'}",
-        "This electronic document is verifiable in the HR system.",
+    # The detailed breakdown is the source of truth.  Older records may still
+    # carry the legacy ``salary_snapshot`` value, so only use it when no
+    # breakdown was persisted at all.
+    gross_total = breakdown.get("total") if isinstance(breakdown, dict) and "total" in breakdown else certificate.get("salary")
+    # Keep each language in its own column. Mixing Arabic and English in one
+    # low-level PDF text run lets viewers apply an unpredictable bidi order;
+    # separate runs keep the Arabic column RTL and the English column LTR.
+    rows = [
+        (organization.get("display_name") or "خيشة - Khaisha", "Khaisha - Khaisha"),
+        ("شهادة راتب", "Salary Certificate"),
+        (f"رقم الإصدار: {certificate.get('certificate_no') or '-'}", f"Issue No: {certificate.get('certificate_no') or '-'}"),
+        (f"رمز التحقق: {certificate.get('verification_code') or '-'}", f"Verification code: {certificate.get('verification_code') or '-'}"),
+        (f"اسم الموظف: {employee.get('name') or employee.get('full_name') or '-'}", f"Employee name: {employee.get('name') or employee.get('full_name') or '-'}"),
+        (f"الرقم الوظيفي: {employee.get('employee_no') or employee.get('employee_number') or '-'}", f"Employee No: {employee.get('employee_no') or employee.get('employee_number') or '-'}"),
+        (f"المسمى الوظيفي: {employee.get('job_title') or '-'}", f"Job title: {employee.get('job_title') or '-'}"),
+        (f"الراتب الأساسي: {float(breakdown.get('basic_salary') or 0):,.2f} درهم", f"Basic salary: AED {float(breakdown.get('basic_salary') or 0):,.2f}"),
+        (f"بدل السكن: {float(breakdown.get('housing_allowance') or 0):,.2f} درهم", f"Housing allowance: AED {float(breakdown.get('housing_allowance') or 0):,.2f}"),
+        (f"بدل المواصلات: {float(breakdown.get('transport_allowance') or 0):,.2f} درهم", f"Transport allowance: AED {float(breakdown.get('transport_allowance') or 0):,.2f}"),
+        (f"بدل طبيعة مهنة: {float(breakdown.get('profession_allowance') or 0):,.2f} درهم", f"Profession allowance: AED {float(breakdown.get('profession_allowance') or 0):,.2f}"),
+        (f"بدل آخر: {float(breakdown.get('other_allowance') or 0):,.2f} درهم", f"Other allowance: AED {float(breakdown.get('other_allowance') or 0):,.2f}"),
+        *[(f"{item.get('name')}: {float(item.get('amount') or 0):,.2f} درهم", f"{item.get('name')}: AED {float(item.get('amount') or 0):,.2f}") for item in manual if isinstance(item, dict)],
+        (f"إجمالي الراتب الشهري: {float(gross_total or 0):,.2f} درهم", f"Total monthly salary: AED {float(gross_total or 0):,.2f}"),
+        (f"الغرض: {certificate.get('purpose') or 'إلى من يهمه الأمر'}", f"Purpose: {certificate.get('purpose') or 'To whom it may concern'}"),
+        (f"تاريخ الإصدار: {certificate.get('issued_at') or '-'}", f"Issued at: {certificate.get('issued_at') or '-'}"),
+        ("هذه وثيقة إلكترونية قابلة للتحقق في نظام الموارد البشرية.", "This electronic document is verifiable in the HR system."),
     ]
-    content_lines = ["BT", "/F1 12 Tf", "72 760 Td"]
-    for index, line in enumerate(lines):
-        if index:
-            content_lines.append("0 -28 Td")
-        content_lines.append(f"({_pdf_text(line)}) Tj")
-    content_lines.append("ET")
-    stream = "\n".join(content_lines).encode("ascii", "ignore")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
-    ]
+    font_bundle = _pdf_unicode_font()
+    used_glyphs: dict[int, int] = {}
+    content_lines: list[str] = []
+    for index, (arabic_text, english_text) in enumerate(rows):
+        y = 785 - index * 38
+        for text, x, font_size in ((arabic_text, 320, 10.0), (english_text, 52, 9.5)):
+            text = str(text or "-")
+            if font_bundle:
+                _, cmap = font_bundle
+                encoded = bytearray()
+                for character in _shape_arabic_for_pdf(text):
+                    codepoint = ord(character)
+                    glyph = int(cmap.get(codepoint, 0))
+                    if not glyph:
+                        decomposition = unicodedata.decomposition(character).split()
+                        if len(decomposition) >= 2 and decomposition[0].startswith("<"):
+                            codepoint = int(decomposition[1], 16)
+                            glyph = int(cmap.get(codepoint, 0))
+                    encoded.extend(struct.pack(">H", glyph))
+                    if glyph:
+                        used_glyphs[glyph] = codepoint
+                content_lines.extend(["BT", "0.13 0.24 0.22 rg", f"/F2 {font_size:.2f} Tf", f"1 0 0 1 {x} {y} Tm", f"<{encoded.hex().upper()}> Tj", "ET"])
+            else:
+                content_lines.extend(["BT", "/F1 10 Tf", f"1 0 0 1 {x} {y} Tm", f"({_pdf_text(text)}) Tj", "ET"])
+    stream = "\n".join(content_lines).encode("ascii")
+    if font_bundle:
+        font_data, _ = font_bundle
+        font_descriptor_number, to_unicode_number, compressed_number, cid_number, type0_number = 5, 6, 7, 8, 9
+        to_unicode_lines = ["/CIDInit /ProcSet findresource begin", "12 dict begin", "begincmap", "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def", "/CMapName /Adobe-Identity-UCS def", "/CMapType 2 def", "1 begincodespacerange", "<0000> <FFFF>", "endcodespacerange"]
+        entries = [f"<{glyph:04X}> <{_pdf_utf16_codepoint(codepoint)}>" for glyph, codepoint in sorted(used_glyphs.items())]
+        for start_index in range(0, len(entries), 100):
+            chunk = entries[start_index:start_index + 100]
+            to_unicode_lines.append(f"{len(chunk)} beginbfchar"); to_unicode_lines.extend(chunk); to_unicode_lines.append("endbfchar")
+        to_unicode_lines.extend(["endcmap", "CMapName currentdict /CMap defineresource pop", "end", "end"])
+        to_unicode = "\n".join(to_unicode_lines).encode("ascii")
+        compressed_font = zlib.compress(font_data, 9)
+        font_widths = _ttf_glyph_widths(font_data)
+        width_entries = " ".join(f"{glyph} [{font_widths.get(glyph, 600)}]" for glyph in sorted(used_glyphs))
+        cid_widths = f"/W [{width_entries}]" if width_entries else ""
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F2 9 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+            b"<< /Type /FontDescriptor /FontName /KhaishaSans /Flags 4 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 7 0 R >>",
+            b"<< /Length " + str(len(to_unicode)).encode("ascii") + b" >>\nstream\n" + to_unicode + b"\nendstream",
+            b"<< /Length " + str(len(compressed_font)).encode("ascii") + b" /Filter /FlateDecode >>\nstream\n" + compressed_font + b"\nendstream",
+            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /KhaishaSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /Type0 /BaseFont /KhaishaSans /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
+        ]
+    else:
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+            b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        ]
     output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     offsets = [0]
     for number, obj in enumerate(objects, 1):
@@ -4919,6 +4969,29 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if settlement_status not in FINAL_SETTLEMENT_STATUSES:
                 raise APIError(422, "حالة التسوية النهائية غير صالحة.", "validation_error", {"field": "final_settlement_status"})
             settlement_amount = as_float(data.get("final_settlement_amount", 0), "final_settlement_amount", 0, 100_000_000)
+            attachment = data.get("termination_attachment") or data.get("attachment")
+            attachment_values: dict[str, Any] | None = None
+            if attachment not in (None, ""):
+                if not isinstance(attachment, dict):
+                    raise APIError(422, "مرفق إنهاء الخدمة غير صالح.", "invalid_upload", {"field": "termination_attachment"})
+                attachment_data = validate_data_url(
+                    attachment.get("data_url"),
+                    "مرفق إنهاء الخدمة",
+                    ("image/png", "image/jpeg", "image/webp", "application/pdf"),
+                    2_000_000,
+                )
+                assert attachment_data is not None
+                attachment_name = require_text(attachment, "file_name", 240)
+                attachment_mime = attachment_data[5:attachment_data.index(";")].lower()
+                allowed_extensions = {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/webp": {".webp"}, "application/pdf": {".pdf"}}
+                if Path(attachment_name).suffix.lower() not in allowed_extensions[attachment_mime]:
+                    raise APIError(422, "امتداد مرفق إنهاء الخدمة لا يطابق نوع محتواه.", "invalid_upload", {"field": "termination_attachment"})
+                attachment_values = {
+                    "file_name": attachment_name,
+                    "mime_type": attachment_mime,
+                    "data_url": attachment_data,
+                    "title": optional_text(attachment, "title", 180) or f"مرفق إنهاء الخدمة - {TERMINATION_TYPE_LABELS_AR.get(termination_type, termination_type)}",
+                }
             stamp = now_iso()
             account = self.db.execute("SELECT id,role FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
             contract = self.db.execute(
@@ -4949,6 +5022,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         (termination_date, termination_type, reason, notes, notice_end_on, settlement_status, settlement_amount, user["id"], stamp, stamp, employee_id),
                     )
                     self.db.execute("UPDATE employee_documents SET archived=1,updated_at=? WHERE employee_id=? AND archived=0", (stamp, employee_id))
+                    if attachment_values:
+                        self.db.execute(
+                            """INSERT INTO employee_documents(
+                                   employee_id,document_type,title,document_number,issuer,issued_on,expires_on,no_expiry,
+                                   file_name,mime_type,data_url,notes,archived,visible_to_employee,uploaded_by,created_at,updated_at)
+                               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (
+                                employee_id, "other", attachment_values["title"], "", "", termination_date, None, 1,
+                                attachment_values["file_name"], attachment_values["mime_type"], attachment_values["data_url"],
+                                "مرفق محفوظ ضمن سجل إنهاء الخدمة ولا يُعرض للموظف.", 1, 0, user["id"], stamp, stamp,
+                            ),
+                        )
                     self.db.execute("UPDATE users SET active=0,updated_at=? WHERE employee_id=?", (stamp, employee_id))
                     self.db.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE employee_id=?)", (employee_id,))
                     self.db.execute("UPDATE employees SET manager_id=NULL WHERE manager_id=?", (employee_id,))
@@ -4959,6 +5044,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     audit(self.db, user["id"], "employee.terminate", "employee", employee_id, {
                         "period_no": period_no, "termination_date": termination_date, "termination_type": termination_type,
                         "final_settlement_status": settlement_status, "final_settlement_amount": settlement_amount,
+                        "attachment": bool(attachment_values),
                     })
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "تعذر حفظ سجل إنهاء الخدمة.", "termination_conflict") from exc
@@ -8527,6 +8613,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def certificate_payload(self, row: sqlite3.Row) -> dict[str, Any]:
             expected = certificate_integrity_hash(db_path, row)
             integrity_valid = bool(row["integrity_hash"]) and hmac.compare_digest(str(row["integrity_hash"]), expected)
+            employee_snapshot = parse_json_text(row["employee_snapshot"], {})
+            snapshot_breakdown = employee_snapshot.get("salary_breakdown") if isinstance(employee_snapshot, dict) else None
+            # Detailed salary components are authoritative for a certificate.
+            # Fall back to the immutable legacy snapshot only for certificates
+            # created before the detailed salary model was introduced.
+            salary_value = snapshot_breakdown.get("total") if isinstance(snapshot_breakdown, dict) and "total" in snapshot_breakdown else row["salary_snapshot"]
             payload = {
                 "id": row["id"], "certificate_no": row["certificate_no"], "employee_id": row["employee_id"],
                 "verification_code": row["verification_code"], "verification_status": row["verification_status"],
@@ -8538,9 +8630,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "decision_note": row["decision_note"] if "decision_note" in row.keys() else "",
                 "email_outbox_id": row["email_outbox_id"] if "email_outbox_id" in row.keys() else None,
                 "integrity_valid": integrity_valid, "document_fingerprint": expected[:16].upper(),
-                "issued_by": row["issued_by"], "purpose": row["purpose"], "salary": row["salary_snapshot"],
+                "issued_by": row["issued_by"], "purpose": row["purpose"], "salary": salary_value,
                 "organization": parse_json_text(row["organization_snapshot"], {}),
-                "employee": parse_json_text(row["employee_snapshot"], {}),
+                "employee": employee_snapshot,
                 "issued_at": row["issued_at"], "print_count": row["print_count"], "last_printed_at": row["last_printed_at"],
                 "verification_count": row["verification_count"], "last_verified_at": row["last_verified_at"],
             }
@@ -8609,6 +8701,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             purpose = require_text(self.read_json(), "purpose", 500)
             if self.db.execute("SELECT 1 FROM salary_certificates WHERE employee_id=? AND request_status='requested'", (employee_id,)).fetchone():
                 raise APIError(409, "لديك طلب شهادة راتب قيد المراجعة بالفعل.", "request_pending")
+            employee = self.db.execute(employee_query(True) + " WHERE e.id=? AND e.active=1", (employee_id,)).fetchone()
+            if employee is None:
+                raise APIError(404, "ملف الموظف غير موجود أو غير نشط.", "not_found")
+            gross_salary = salary_breakdown_from_row(employee)["total"]
             stamp = now_iso(); year = local_now().year
             with self.db:
                 sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
@@ -8616,11 +8712,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 verification_code = f"REQ-{year}-{secrets.token_hex(6).upper()}"
                 cur = self.db.execute(
                     """INSERT INTO salary_certificates(certificate_no,verification_code,integrity_hash,verification_status,employee_id,issued_by,purpose,salary_snapshot,organization_snapshot,employee_snapshot,issued_at,request_status,requester_id,requested_at)
-                       SELECT ?,?,'','valid',e.id,?, ?,e.salary,'{}','{}',?,?,?,? FROM employees e WHERE e.id=? AND e.active=1""",
-                    (certificate_no, verification_code, user["id"], purpose, stamp, "requested", user["id"], stamp, employee_id),
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (certificate_no, verification_code, "", "valid", employee_id, user["id"], purpose, gross_salary, "{}", "{}", stamp, "requested", user["id"], stamp),
                 )
-                if not cur.rowcount:
-                    raise APIError(404, "ملف الموظف غير موجود أو غير نشط.", "not_found")
                 request_id = int(cur.lastrowid)
                 hr_recipients = self.approval_recipient_ids("salary_certificate.issue", int(user["id"]))
                 if hr_recipients:
@@ -8653,10 +8747,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
                 certificate_no = f"SAL-{local_now().year}-{sequence:06d}"
                 verification_code = new_certificate_verification_code(self.db, local_now().year)
-                values = {"certificate_no": certificate_no, "verification_code": verification_code, "employee_id": row["employee_id"], "issued_by": user["id"], "purpose": row["purpose"], "salary_snapshot": employee["salary"], "organization_snapshot": json_text(serialize_org(org)), "employee_snapshot": json_text(normalize_employee(employee)), "issued_at": stamp}
+                gross_salary = salary_breakdown_from_row(employee)["total"]
+                values = {"certificate_no": certificate_no, "verification_code": verification_code, "employee_id": row["employee_id"], "issued_by": user["id"], "purpose": row["purpose"], "salary_snapshot": gross_salary, "organization_snapshot": json_text(serialize_org(org)), "employee_snapshot": json_text(normalize_employee(employee)), "issued_at": stamp}
                 digest = certificate_integrity_hash(db_path, values)
                 with self.db:
-                    self.db.execute("""UPDATE salary_certificates SET certificate_no=?,verification_code=?,integrity_hash=?,verification_status='valid',issued_by=?,salary_snapshot=?,organization_snapshot=?,employee_snapshot=?,issued_at=?,request_status='approved',approved_by=?,approved_at=?,decision_note=? WHERE id=?""", (certificate_no, verification_code, digest, user["id"], employee["salary"], values["organization_snapshot"], values["employee_snapshot"], stamp, user["id"], stamp, note, certificate_id))
+                    self.db.execute("""UPDATE salary_certificates SET certificate_no=?,verification_code=?,integrity_hash=?,verification_status='valid',issued_by=?,salary_snapshot=?,organization_snapshot=?,employee_snapshot=?,issued_at=?,request_status='approved',approved_by=?,approved_at=?,decision_note=? WHERE id=?""", (certificate_no, verification_code, digest, user["id"], gross_salary, values["organization_snapshot"], values["employee_snapshot"], stamp, user["id"], stamp, note, certificate_id))
                     row = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
                     certificate = self.certificate_payload(row)
                     pdf_data = build_salary_certificate_pdf(certificate)
@@ -8696,13 +8791,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 verification_code = new_certificate_verification_code(self.db, local_now().year)
                 org_snapshot = serialize_org(org)
                 employee_snapshot = normalize_employee(employee)
+                gross_salary = salary_breakdown_from_row(employee)["total"]
                 values = {
                     "certificate_no": certificate_no,
                     "verification_code": verification_code,
                     "employee_id": employee_id,
                     "issued_by": user["id"],
                     "purpose": optional_text(data, "purpose", 500),
-                    "salary_snapshot": employee["salary"],
+                    "salary_snapshot": gross_salary,
                     "organization_snapshot": json_text(org_snapshot),
                     "employee_snapshot": json_text(employee_snapshot),
                     "issued_at": stamp,
@@ -8710,7 +8806,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 integrity_hash = certificate_integrity_hash(db_path, values)
                 cur = self.db.execute(
                     "INSERT INTO salary_certificates(certificate_no,verification_code,integrity_hash,employee_id,issued_by,purpose,salary_snapshot,organization_snapshot,employee_snapshot,issued_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (certificate_no, verification_code, integrity_hash, employee_id, user["id"], values["purpose"], employee["salary"], values["organization_snapshot"], values["employee_snapshot"], stamp),
+                    (certificate_no, verification_code, integrity_hash, employee_id, user["id"], values["purpose"], gross_salary, values["organization_snapshot"], values["employee_snapshot"], stamp),
                 )
                 cert_id = int(cur.lastrowid)
                 audit(self.db, user["id"], "salary_certificate.issue", "salary_certificate", cert_id, {"employee_id": employee_id, "certificate_no": certificate_no, "verification_code_suffix": verification_code[-4:]})
