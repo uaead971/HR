@@ -3506,7 +3506,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 self.db.execute("UPDATE users SET password_hash=?,password_salt=?,must_change_password=0,last_password_change_at=?,updated_at=? WHERE id=?", (digest, salt, stamp, stamp, user["id"]))
                 self.db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
                 audit(self.db, user["id"], "auth.password_changed", "user", user["id"])
-            self.send_json(200, {"ok": True, "reauthenticate": True}, cookie=f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+            self.send_json(200, {"ok": True, "reauthenticate": True, "message": "تم تغيير كلمة المرور بنجاح. يجب تسجيل الدخول مجدداً."}, cookie=f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
 
         def reset_token_row(self, raw_token: str) -> sqlite3.Row | None:
             if not raw_token or len(raw_token) > 180: return None
