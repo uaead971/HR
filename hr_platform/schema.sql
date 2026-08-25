@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS branches (
   latitude REAL NOT NULL CHECK (latitude BETWEEN -90 AND 90),
   longitude REAL NOT NULL CHECK (longitude BETWEEN -180 AND 180),
   radius_m INTEGER NOT NULL CHECK (radius_m BETWEEN 50 AND 5000),
+  license_expires_on TEXT,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -123,6 +124,7 @@ CREATE TABLE IF NOT EXISTS employees (
   department_id INTEGER,
   branch_id INTEGER,
   manager_id INTEGER,
+  approval_employee_id INTEGER,
   hire_date TEXT,
   qualification TEXT NOT NULL DEFAULT '',
   nationality TEXT NOT NULL DEFAULT '',
@@ -154,6 +156,7 @@ CREATE TABLE IF NOT EXISTS employees (
   FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL,
   FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE SET NULL,
   FOREIGN KEY (manager_id) REFERENCES employees(id) ON DELETE SET NULL,
+  FOREIGN KEY (approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE SET NULL,
   FOREIGN KEY (job_grade_id) REFERENCES job_grades(id) ON DELETE SET NULL
 );
@@ -316,12 +319,14 @@ CREATE TABLE IF NOT EXISTS overtime_requests (
   duration_minutes INTEGER NOT NULL CHECK (duration_minutes > 0),
   reason TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('draft','submitted','approved','rejected','cancelled')),
+  approval_employee_id INTEGER,
   rejection_reason TEXT,
   decided_by INTEGER,
   decided_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -356,6 +361,7 @@ CREATE TABLE IF NOT EXISTS leave_balances (
   entitlement REAL NOT NULL DEFAULT 0,
   carried REAL NOT NULL DEFAULT 0,
   used REAL NOT NULL DEFAULT 0,
+  manual_override INTEGER NOT NULL DEFAULT 0 CHECK (manual_override IN (0,1)),
   PRIMARY KEY (employee_id, leave_type_id, year),
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
   FOREIGN KEY (leave_type_id) REFERENCES leave_types(id) ON DELETE CASCADE
@@ -375,6 +381,7 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   attachment_data TEXT,
   status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('draft','submitted','approved','rejected','cancelled')),
   manager_employee_id INTEGER,
+  approval_employee_id INTEGER,
   manager_decision TEXT NOT NULL DEFAULT 'pending' CHECK (manager_decision IN ('pending','approved','rejected')),
   manager_comment TEXT NOT NULL DEFAULT '',
   manager_decided_by INTEGER,
@@ -388,6 +395,7 @@ CREATE TABLE IF NOT EXISTS leave_requests (
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
   FOREIGN KEY (leave_type_id) REFERENCES leave_types(id) ON DELETE RESTRICT,
   FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
+  FOREIGN KEY (approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
   FOREIGN KEY (manager_decided_by) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
 );
@@ -609,6 +617,7 @@ CREATE TABLE IF NOT EXISTS document_expiry_alerts (
   document_id INTEGER NOT NULL,
   expires_on TEXT NOT NULL,
   notification_id INTEGER,
+  alert_window_days INTEGER NOT NULL DEFAULT 90 CHECK (alert_window_days IN (90,30,14,7)),
   created_at TEXT NOT NULL,
   UNIQUE(document_id, expires_on),
   FOREIGN KEY (document_id) REFERENCES employee_documents(id) ON DELETE CASCADE,
@@ -616,6 +625,35 @@ CREATE TABLE IF NOT EXISTS document_expiry_alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_expiry_alerts_document ON document_expiry_alerts(document_id);
+
+CREATE TABLE IF NOT EXISTS employee_expiry_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  document_type TEXT NOT NULL,
+  expires_on TEXT NOT NULL,
+  alert_window_days INTEGER NOT NULL DEFAULT 90 CHECK (alert_window_days IN (90,30,14,7)),
+  notification_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(employee_id, document_type, expires_on),
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_employee_expiry_alerts_employee ON employee_expiry_alerts(employee_id, expires_on);
+
+CREATE TABLE IF NOT EXISTS branch_expiry_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  branch_id INTEGER NOT NULL,
+  expires_on TEXT NOT NULL,
+  alert_window_days INTEGER NOT NULL CHECK (alert_window_days IN (60,30)),
+  notification_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(branch_id, expires_on, alert_window_days),
+  FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_branch_expiry_alerts_branch ON branch_expiry_alerts(branch_id, expires_on);
 
 CREATE TABLE IF NOT EXISTS salary_certificates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1952,11 +1952,30 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(len(certificate["document_fingerprint"]), 16)
 
         employee.request("POST", "/api/salary-certificates/verify", {"code": certificate["verification_code"]}, expected=403)
+
+        # A permission grant is authoritative even when the account keeps the
+        # employee role; verification must not be hard-coded to HR/admin roles.
+        with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+            employee_user_id = db.execute("SELECT id FROM users WHERE email=?", ("employee@demo.ae",)).fetchone()[0]
+            db.execute(
+                "INSERT OR REPLACE INTO user_permissions(user_id,permission,granted) VALUES(?,?,1)",
+                (employee_user_id, "salary_certificate.verify"),
+            )
+            db.commit()
+        try:
+            self.assertEqual(employee.request("GET", "/api/salary-certificates/history")["items"][0]["id"], certificate["id"])
+            employee_verified = employee.request("POST", "/api/salary-certificates/verify", {"code": certificate["verification_code"]})
+            self.assertTrue(employee_verified["valid"])
+        finally:
+            with contextlib.closing(sqlite3.connect(self.db_path)) as db:
+                db.execute("DELETE FROM user_permissions WHERE user_id=? AND permission=?", (employee_user_id, "salary_certificate.verify"))
+                db.commit()
+
         verified = hr.request("POST", "/api/salary-certificates/verify", {"code": certificate["verification_code"]})
         self.assertTrue(verified["valid"])
         self.assertEqual(verified["status"], "valid")
         self.assertEqual(verified["certificate"]["employee"]["id"], employee_id)
-        self.assertEqual(verified["certificate"]["verification_count"], 1)
+        self.assertEqual(verified["certificate"]["verification_count"], 2)
         self.assertTrue(verified["issuer"]["name"])
 
         missing = hr.request("POST", "/api/salary-certificates/verify", {"code": "VRF-2099-FFFF-FFFF-FFFF"})
