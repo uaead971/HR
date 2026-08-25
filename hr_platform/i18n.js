@@ -129,6 +129,7 @@
     ,'الاستحقاق':'Entitlement','المرحل':'Carried forward','المستخدم':'Used','حفظ تعديل الرصيد':'Save balance adjustment'
     ,'تم حفظ رصيد الإجازة وتسجيل التعديل في سجل التدقيق':'Leave balance saved and the adjustment was recorded in the audit log.','اختر الموظف أولاً للاستعلام عن الرصيد.':'Choose an employee first to query the balance.'
     ,'إضافة وتعديل أرصدة الموظفين (مدير النظام فقط)':'Add and edit employee balances (system administrator only)'
+    ,'سلم رواتب الدرجة':'Grade salary scale','أدخل الراتب الأساسي الشهري لكل حرف في هذه الدرجة.':'Enter the monthly base salary for each letter in this grade.','حرف الدرجة':'Grade level','الراتب الأساسي حسب السلم':'Base salary from scale','يُحدد الراتب الأساسي من سلم الدرجة والحرف.':'Base salary is determined by the grade and level.','لا يوجد راتب مسجل لهذا الحرف.':'No salary is registered for this level.','الحرف':'Level','الأولى':'First','الثانية':'Second','الثالثة':'Third','الرابعة':'Fourth','الخامسة':'Fifth','السادسة':'Sixth','السابعة':'Seventh','الثامنة':'Eighth','الراتب الأساسي الشهري':'Monthly base salary'
   });
 
   const originals = new WeakMap();

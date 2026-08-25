@@ -80,6 +80,10 @@ CREATE TABLE IF NOT EXISTS job_grades (
   name TEXT NOT NULL,
   min_salary_cents INTEGER NOT NULL DEFAULT 0,
   max_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_a_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_b_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_c_salary_cents INTEGER NOT NULL DEFAULT 0,
+  level_d_salary_cents INTEGER NOT NULL DEFAULT 0,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -119,6 +123,7 @@ CREATE TABLE IF NOT EXISTS employees (
   gender TEXT NOT NULL DEFAULT 'unspecified',
   job_title TEXT NOT NULL DEFAULT '',
   job_grade TEXT NOT NULL DEFAULT '',
+  job_grade_level TEXT NOT NULL DEFAULT 'A',
   job_title_id INTEGER,
   job_grade_id INTEGER,
   department_id INTEGER,
@@ -151,6 +156,15 @@ CREATE TABLE IF NOT EXISTS employees (
   manual_allowances_json TEXT NOT NULL DEFAULT '[]',
   photo_data TEXT,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  termination_date TEXT,
+  termination_type TEXT NOT NULL DEFAULT '',
+  termination_reason TEXT NOT NULL DEFAULT '',
+  termination_notes TEXT NOT NULL DEFAULT '',
+  notice_end_on TEXT,
+  final_settlement_status TEXT NOT NULL DEFAULT 'pending',
+  final_settlement_amount REAL NOT NULL DEFAULT 0,
+  terminated_by INTEGER,
+  terminated_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL,
@@ -160,6 +174,45 @@ CREATE TABLE IF NOT EXISTS employees (
   FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE SET NULL,
   FOREIGN KEY (job_grade_id) REFERENCES job_grades(id) ON DELETE SET NULL
 );
+
+-- Immutable employment episodes.  The employee row remains the person
+-- master record; every completed service period is retained here so a later
+-- rehire never overwrites the previous employment history.
+CREATE TABLE IF NOT EXISTS employee_service_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  period_no INTEGER NOT NULL,
+  hire_date TEXT,
+  termination_date TEXT NOT NULL,
+  contract_start_on TEXT,
+  contract_end_on TEXT,
+  termination_type TEXT NOT NULL,
+  termination_reason TEXT NOT NULL,
+  termination_notes TEXT NOT NULL DEFAULT '',
+  notice_end_on TEXT,
+  final_settlement_status TEXT NOT NULL DEFAULT 'pending',
+  final_settlement_amount REAL NOT NULL DEFAULT 0,
+  department_id INTEGER,
+  branch_id INTEGER,
+  manager_id INTEGER,
+  approval_employee_id INTEGER,
+  job_title TEXT NOT NULL DEFAULT '',
+  job_grade TEXT NOT NULL DEFAULT '',
+  basic_salary REAL NOT NULL DEFAULT 0,
+  gross_salary REAL NOT NULL DEFAULT 0,
+  previous_user_role TEXT NOT NULL DEFAULT '',
+  terminated_by INTEGER,
+  terminated_at TEXT NOT NULL,
+  rehired_at TEXT,
+  rehired_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(employee_id, period_no),
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (terminated_by) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (rehired_by) REFERENCES users(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_employee_service_history_employee ON employee_service_history(employee_id, period_no DESC);
 
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
