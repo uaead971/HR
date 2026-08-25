@@ -617,6 +617,7 @@ CREATE TABLE IF NOT EXISTS document_expiry_alerts (
   document_id INTEGER NOT NULL,
   expires_on TEXT NOT NULL,
   notification_id INTEGER,
+  alert_window_days INTEGER NOT NULL DEFAULT 90 CHECK (alert_window_days IN (90,30,14,7)),
   created_at TEXT NOT NULL,
   UNIQUE(document_id, expires_on),
   FOREIGN KEY (document_id) REFERENCES employee_documents(id) ON DELETE CASCADE,
@@ -624,6 +625,21 @@ CREATE TABLE IF NOT EXISTS document_expiry_alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_document_expiry_alerts_document ON document_expiry_alerts(document_id);
+
+CREATE TABLE IF NOT EXISTS employee_expiry_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  document_type TEXT NOT NULL,
+  expires_on TEXT NOT NULL,
+  alert_window_days INTEGER NOT NULL DEFAULT 90 CHECK (alert_window_days IN (90,30,14,7)),
+  notification_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(employee_id, document_type, expires_on),
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_employee_expiry_alerts_employee ON employee_expiry_alerts(employee_id, expires_on);
 
 CREATE TABLE IF NOT EXISTS branch_expiry_alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
