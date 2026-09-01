@@ -1,4 +1,4 @@
-# خيشة - Khaisha HR
+# خيشة - Khaisha HR V5.8.0
 
 نظام ويب ثنائي اللغة لإدارة الموارد البشرية. التطبيق الفعلي موجود في مجلد [`hr_platform`](hr_platform/).
 
@@ -46,7 +46,7 @@ cd hr_platform
 python3 -m unittest -v tests.test_api
 ```
 
-هذا المستودع لا يحتوي على اتصال GitHub أو أسرار نشر. بعد إنشاء مستودع فارغ على GitHub نفّذ من مجلد المشروع:
+لا تحفظ أسرار GitHub أو Render داخل المستودع. عند تهيئة نسخة جديدة نفّذ من مجلد المشروع:
 
 ```bash
 git remote add origin https://github.com/<owner>/<repository>.git

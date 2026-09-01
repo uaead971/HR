@@ -39,7 +39,7 @@ from zoneinfo import ZoneInfo
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.7.0"
+APP_VERSION = "5.8.0"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -50,6 +50,10 @@ MAX_IMAGE_BYTES = 1_500_000
 MAX_VISUAL_IDENTITY_IMAGE_BYTES = 1_350_000
 PBKDF2_ROUNDS = 310_000
 PASSWORD_RESET_MINUTES = 30
+WORK_PERMISSION_MAX_REQUESTS = 2
+WORK_PERMISSION_MAX_HOURS_PER_REQUEST = 2.0
+WORK_PERMISSION_MAX_MONTHLY_HOURS = 4.0
+EMERGENCY_LEAVE_CODES = {"weather_emergency", "force_majeure"}
 
 
 PERMISSION_CATALOG: dict[str, dict[str, str]] = {
@@ -121,20 +125,17 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
         "employee_report.view", "employee_report.export",
     },
-    "general_manager": {
-        "org.view", "organization.view", "branch.view", "employee.view", "attendance.view", "shift.view",
-        "overtime.view", "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "notification.send",
-        "salary.view", "salary_certificate.issue", "salary_certificate.print", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.approve",
-        "advance.view", "advance.approve", "lifecycle.view", "report.view",
-    },
+    # Legacy databases may still contain this value.  It is deliberately
+    # limited to the direct-manager ceiling and is migrated to ``manager``.
+    "general_manager": {"attendance.team", "leave.team"},
     "manager": {
-        "org.view", "branch.view", "employee.team", "attendance.team", "shift.view",
-        "overtime.view", "leave.team", "evaluation.view",
+        "attendance.team", "leave.team",
     },
-    "employee": {"org.view", "branch.view", "shift.view"},
+    "employee": set(),
 }
 
-PEOPLE_ADMIN_ROLES = {"admin", "hr", "general_manager"}
+ACCOUNT_ROLES = {"admin", "hr", "manager", "employee"}
+PEOPLE_ADMIN_ROLES = {"admin", "hr"}
 
 DOCUMENT_TYPES = {
     "passport", "identity", "residency", "visa", "work_permit", "contract", "job_offer",
@@ -1725,6 +1726,8 @@ def initialize_database(db_path: Path) -> None:
             db.executescript(schema)
             goal_columns_before_v51 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goals)")}
             backfill_v50_goals = "progress_status" not in goal_columns_before_v51
+            payroll_columns_before_v58 = {row["name"] for row in db.execute("PRAGMA table_info(payroll_items)")}
+            backfill_v58_payroll_deductions = "base_deductions_cents" not in payroll_columns_before_v58
             migrations = {
                 "organization": {
                     "general_manager_employee_id": "INTEGER",
@@ -1733,6 +1736,11 @@ def initialize_database(db_path: Path) -> None:
                     "visual_identity_surface": "TEXT NOT NULL DEFAULT 'both'",
                     "visual_identity_interval_seconds": "INTEGER NOT NULL DEFAULT 20",
                     "visual_identity_overlay": "INTEGER NOT NULL DEFAULT 58",
+                    "late_deduction_enabled": "INTEGER NOT NULL DEFAULT 0",
+                    "late_warning_minutes": "INTEGER NOT NULL DEFAULT 40",
+                    "late_threshold_minutes": "INTEGER NOT NULL DEFAULT 60",
+                    "late_deduction_unit_minutes": "INTEGER NOT NULL DEFAULT 60",
+                    "late_penalty_days_per_unit": "INTEGER NOT NULL DEFAULT 1",
                     "card_template": "TEXT NOT NULL DEFAULT 'portrait_orbit'",
                     "card_primary_color": "TEXT NOT NULL DEFAULT '#123d34'",
                     "card_accent_color": "TEXT NOT NULL DEFAULT '#c6a15b'",
@@ -1767,6 +1775,7 @@ def initialize_database(db_path: Path) -> None:
                     "basic_salary": "REAL NOT NULL DEFAULT 0", "housing_allowance": "REAL NOT NULL DEFAULT 0",
                     "transport_allowance": "REAL NOT NULL DEFAULT 0", "profession_allowance": "REAL NOT NULL DEFAULT 0",
                     "other_allowance": "REAL NOT NULL DEFAULT 0", "manual_allowances_json": "TEXT NOT NULL DEFAULT '[]'",
+                    "rest_days_override": "TEXT",
                     "termination_date": "TEXT", "termination_type": "TEXT NOT NULL DEFAULT ''",
                     "termination_reason": "TEXT NOT NULL DEFAULT ''", "termination_notes": "TEXT NOT NULL DEFAULT ''",
                     "notice_end_on": "TEXT", "final_settlement_status": "TEXT NOT NULL DEFAULT 'pending'",
@@ -1857,6 +1866,10 @@ def initialize_database(db_path: Path) -> None:
                 },
                 "notifications": {"available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT"},
                 "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
+                "payroll_items": {
+                    "bonus_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "base_deductions_cents": "INTEGER NOT NULL DEFAULT 0",
+                },
             }
             for table, columns in migrations.items():
                 existing_columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -1923,6 +1936,10 @@ def initialize_database(db_path: Path) -> None:
             db.execute("UPDATE organization SET visual_identity_surface='both' WHERE visual_identity_surface NOT IN ('login','dashboard','both')")
             db.execute("UPDATE organization SET visual_identity_interval_seconds=20 WHERE visual_identity_interval_seconds NOT BETWEEN 5 AND 300")
             db.execute("UPDATE organization SET visual_identity_overlay=58 WHERE visual_identity_overlay NOT BETWEEN 20 AND 90")
+            db.execute("UPDATE organization SET late_warning_minutes=40 WHERE late_warning_minutes NOT BETWEEN 1 AND 10080")
+            db.execute("UPDATE organization SET late_threshold_minutes=60 WHERE late_threshold_minutes NOT BETWEEN 1 AND 10080")
+            db.execute("UPDATE organization SET late_deduction_unit_minutes=60 WHERE late_deduction_unit_minutes NOT BETWEEN 1 AND 1440")
+            db.execute("UPDATE organization SET late_penalty_days_per_unit=1 WHERE late_penalty_days_per_unit NOT BETWEEN 1 AND 30")
             db.execute("UPDATE employees SET marital_status='unspecified' WHERE marital_status NOT IN ('unspecified','single','married','divorced','widowed','separated')")
             # Older profiles stored one gross salary value only. Preserve that
             # value as the basic salary so the new detailed breakdown remains
@@ -1933,6 +1950,24 @@ def initialize_database(db_path: Path) -> None:
                 "AND COALESCE(profession_allowance,0)=0 AND COALESCE(other_allowance,0)=0"
             )
             db.execute("UPDATE employees SET manual_allowances_json='[]' WHERE manual_allowances_json IS NULL OR TRIM(manual_allowances_json)=''")
+            if backfill_v58_payroll_deductions:
+                db.execute("UPDATE payroll_items SET base_deductions_cents=deductions_cents WHERE base_deductions_cents=0 AND deductions_cents>0")
+            # V5.8 exposes exactly four access classifications.  The old
+            # general-manager account value remains a structural title only.
+            # Preserve the former title assignment before normalizing the
+            # legacy account role, otherwise an upgraded organization can
+            # lose the general manager displayed in its organization chart.
+            db.execute(
+                """UPDATE organization
+                      SET general_manager_employee_id=(
+                          SELECT employee_id FROM users
+                           WHERE role='general_manager' AND active=1 AND employee_id IS NOT NULL
+                           ORDER BY is_super_admin DESC,id LIMIT 1
+                      )
+                    WHERE id=1 AND general_manager_employee_id IS NULL
+                      AND EXISTS(SELECT 1 FROM users WHERE role='general_manager' AND active=1 AND employee_id IS NOT NULL)"""
+            )
+            db.execute("UPDATE users SET role='manager',updated_at=COALESCE(updated_at,?) WHERE role='general_manager'", (now_iso(),))
             db.execute("UPDATE salary_certificates SET request_status='issued' WHERE request_status IS NULL OR request_status NOT IN ('requested','approved','rejected','issued')")
             db.execute(
                 """UPDATE leave_requests
@@ -2127,6 +2162,10 @@ def initialize_database(db_path: Path) -> None:
                 manager_emp = employee_ids["EMP-1002"]
                 hr_emp = employee_ids["EMP-1003"]
                 regular_emp = employee_ids["EMP-1024"]
+                db.execute(
+                    "UPDATE organization SET general_manager_employee_id=COALESCE(general_manager_employee_id,?) WHERE id=1",
+                    (gm_emp,),
+                )
                 db.execute("UPDATE employees SET manager_id=? WHERE id IN (?,?)", (gm_emp, manager_emp, hr_emp))
                 db.execute("UPDATE employees SET manager_id=? WHERE id=?", (manager_emp, regular_emp))
                 db.execute("UPDATE departments SET manager_employee_id=? WHERE id=?", (gm_emp, gm_dept))
@@ -2138,7 +2177,7 @@ def initialize_database(db_path: Path) -> None:
                 seed_user(db, "hr@demo.ae", "HR@12345", "ليلى الحمادي", "hr", hr_emp)
                 seed_user(db, "employee@demo.ae", "Emp@12345", "أحمد الراشدي", "employee", regular_emp)
                 seed_user(db, "manager@demo.ae", "Manager@12345", "مريم الهاشمي", "manager", manager_emp)
-                seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "general_manager", gm_emp)
+                seed_user(db, "gm@demo.ae", "GM@12345", "خالد المنصوري", "manager", gm_emp)
                 shift_id = db.execute("SELECT id FROM shifts WHERE name='الدوام الإداري'").fetchone()[0]
                 for emp_id in employee_ids.values():
                     exists = db.execute("SELECT 1 FROM employee_shift_assignments WHERE employee_id=?", (emp_id,)).fetchone()
@@ -2156,6 +2195,8 @@ def initialize_database(db_path: Path) -> None:
                 ("study", "إجازة دراسية", 10, 7, 1, 1, 0),
                 ("unpaid", "إجازة بدون راتب", 0, 7, 0, 0, 0),
                 ("work_permission", "ترخيص خلال ساعات العمل (حتى ساعتين)", 0, 0, 0, 1, 2),
+                ("weather_emergency", "استئذان ظروف جوية قهرية", 0, 0, 0, 1, 0),
+                ("force_majeure", "استئذان حالات طوارئ وقوة قاهرة", 0, 0, 0, 1, 0),
             ]
             for values in leave_seed:
                 db.execute("INSERT OR IGNORE INTO leave_types(code,name,annual_entitlement,min_notice_days,requires_attachment,paid,max_hours) VALUES(?,?,?,?,?,?,?)", values)
@@ -2219,44 +2260,30 @@ def is_system_admin(user: dict[str, Any] | sqlite3.Row | None) -> bool:
 
 
 def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str) -> bool:
-    if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
+    if user.get("role") == "admin" and bool(user.get("active", True)):
         return True
-    if is_configured_general_manager(db, user):
-        return True
+    base = ROLE_PERMISSIONS.get(str(user["role"]), set())
     override = db.execute("SELECT granted FROM user_permissions WHERE user_id=? AND permission=?", (user["id"], permission)).fetchone()
     if override is not None:
-        return bool(override["granted"])
-    base = ROLE_PERMISSIONS.get(str(user["role"]), set())
-    # Backward compatibility: before v60 the chart was exposed through
-    # employee.view. Existing accounts that were granted that permission
-    # explicitly must not lose access when the dedicated organization.view
-    # permission is introduced. An explicit deny of organization.view still
-    # wins because it was handled above.
-    if permission == "organization.view":
-        legacy_override = db.execute("SELECT granted FROM user_permissions WHERE user_id=? AND permission='employee.view'", (user["id"],)).fetchone()
-        if legacy_override is not None:
-            return bool(legacy_override["granted"])
-        if "employee.view" in base or "*" in base:
-            return True
+        # Explicit denial may narrow a category, but a grant cannot promote an
+        # employee, direct manager, or HR head beyond that category's ceiling.
+        return bool(override["granted"]) and ("*" in base or permission in base)
     return "*" in base or permission in base
 
 
 def effective_permissions(db: sqlite3.Connection, user: dict[str, Any]) -> tuple[list[str], dict[str, str]]:
-    if bool(user.get("is_super_admin")) and user.get("role") == "admin" and bool(user.get("active", True)):
+    if user.get("role") == "admin" and bool(user.get("active", True)):
         values = sorted(ALL_PERMISSIONS | {"*"})
         return values, {permission: "protected_super_admin" for permission in values}
-    if is_configured_general_manager(db, user):
-        values = sorted(ALL_PERMISSIONS | {"*"})
-        return values, {permission: "configured_general_manager" for permission in values}
     base = ROLE_PERMISSIONS.get(str(user.get("role")), set())
     granted = set(ALL_PERMISSIONS if "*" in base else base)
     reasons = {permission: f"role:{user.get('role')}" for permission in granted}
     for item in db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=?", (user["id"],)):
-        if bool(item["granted"]):
+        if bool(item["granted"]) and ("*" in base or item["permission"] in base):
             granted.add(item["permission"]); reasons[item["permission"]] = "explicit_grant"
         else:
             granted.discard(item["permission"]); reasons[item["permission"]] = "explicit_deny"
-    if "organization.view" not in granted and "organization.view" not in {
+    if "organization.view" in base and "organization.view" not in granted and "organization.view" not in {
         row["permission"] for row in db.execute("SELECT permission FROM user_permissions WHERE user_id=? AND permission='organization.view'", (user["id"],))
     } and "employee.view" in granted:
         granted.add("organization.view"); reasons["organization.view"] = "legacy_employee_view"
@@ -2492,6 +2519,20 @@ def serialize_org(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+PUBLIC_ORGANIZATION_FIELDS = {
+    "display_name", "legal_name", "sector", "emirate", "address", "phone", "email", "website",
+    "timezone", "currency", "primary_color", "accent_color", "logo_data", "stamp_data",
+    "card_template", "card_primary_color", "card_accent_color", "card_back_instructions",
+    "card_contact_phone", "card_contact_email", "visual_identity",
+}
+
+
+def public_organization_projection(data: dict[str, Any]) -> dict[str, Any]:
+    projected = {key: value for key, value in data.items() if key in PUBLIC_ORGANIZATION_FIELDS}
+    projected["stamp_data"] = None
+    return projected
+
+
 def visual_identity_slide_payload(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     data["active"] = bool(data.get("active"))
@@ -2632,7 +2673,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
                e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
                e.passport_expires_on,e.emirates_id_expires_on,
-               e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,{salary}{salary_components},e.photo_data,e.active,
+               e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,e.rest_days_override,{salary}{salary_components},e.photo_data,e.active,
                e.termination_date,e.termination_type,e.termination_reason,e.termination_notes,e.notice_end_on,
                e.final_settlement_status,e.final_settlement_amount,e.terminated_at,
                (SELECT COUNT(*) FROM employee_service_history sh WHERE sh.employee_id=e.id) AS service_period_count{sensitive}{emergency_count},
@@ -2692,6 +2733,8 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
     data = dict(row)
     include_sensitive = bool(data.pop("_include_sensitive", False))
     data["active"] = bool(data["active"])
+    if "rest_days_override" in data:
+        data["rest_days_override"] = parse_json_text(data.get("rest_days_override"), []) if data.get("rest_days_override") else []
     data["employment_status"] = "active" if data["active"] else "terminated"
     data.update(expiry_compliance(
         (data.get("contract_end_on"), "عقد العمل"),
@@ -2987,6 +3030,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/payroll/runs", self.api_payroll_runs_get),
                     ("POST", r"/api/payroll/runs", self.api_payroll_runs_post),
                     ("GET", r"/api/payroll/runs/(\d+)", self.api_payroll_run_get),
+                    ("POST", r"/api/payroll/runs/(\d+)/adjustments", self.api_payroll_adjustment_post),
+                    ("DELETE", r"/api/payroll/adjustments/(\d+)", self.api_payroll_adjustment_delete),
                     ("POST", r"/api/payroll/runs/(\d+)/transition", self.api_payroll_transition),
                     ("GET", r"/api/payroll/runs/(\d+)/export\.csv", self.api_payroll_csv),
                     ("GET", r"/api/me/payslips", self.api_my_payslips),
@@ -3603,7 +3648,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
             validate_password_strength(password)
             role = str(data.get("role") or "employee")
-            if role not in ROLE_PERMISSIONS or (role == "admin" and not is_system_admin(actor)):
+            if role not in ACCOUNT_ROLES or (role == "admin" and not is_system_admin(actor)):
                 raise APIError(422, "الدور المحدد غير صالح لإنشاء الحساب.", "validation_error", {"field": "role"})
             stamp = now_iso(); digest, salt = password_record(password)
             try:
@@ -3614,9 +3659,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                         (email, employee["full_name"], role, digest, salt, employee_id, stamp, stamp),
                     )
-                    if role == "general_manager":
-                        self.db.execute("UPDATE organization SET general_manager_employee_id=?,updated_at=? WHERE id=1", (employee_id, stamp))
-                        audit(self.db, actor["id"], "organization.general_manager_assign", "employee", employee_id, {"source": "account_provision"})
                     audit(self.db, actor["id"], "security.user_create", "user", cursor.lastrowid, {"employee_id": employee_id, "email": email, "role": role, "source": "employee_profile"})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "تعذر إنشاء الحساب لأن البريد أو الموظف مرتبط بحساب آخر.", "duplicate_account") from exc
@@ -3639,7 +3681,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             actor = self.require_permission("security.manage_users"); target = self.admin_target(user_id); data = self.read_json(); updates: dict[str, Any] = {}
             if "active" in data: updates["active"] = 1 if bool(data["active"]) else 0
             if "role" in data:
-                if data["role"] not in ROLE_PERMISSIONS: raise APIError(422, "الدور غير صالح.", "validation_error")
+                if data["role"] not in ACCOUNT_ROLES: raise APIError(422, "الدور غير صالح.", "validation_error")
                 updates["role"] = data["role"]
             if not updates: raise APIError(422, "لا توجد تغييرات.", "validation_error")
             self.guard_admin_continuity(actor, target, updates); before = {k: target[k] for k in updates}; updates["updated_at"] = now_iso()
@@ -3655,14 +3697,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_user_permissions_patch(self, user_id: int) -> None:
             actor = self.require_permission("security.manage_permissions"); target = self.admin_target(user_id); data = self.read_json()
-            if bool(target["is_super_admin"]): raise APIError(409, "صلاحيات المدير الأعلى المحمي ثابتة وكاملة.", "protected_super_admin")
-            if is_configured_general_manager(self.db, target): raise APIError(409, "صلاحيات المدير العام المعين ثابتة وكاملة.", "protected_general_manager")
+            if target["role"] == "admin" or bool(target["is_super_admin"]): raise APIError(409, "صلاحيات مدير النظام ثابتة وكاملة ومحمية.", "protected_super_admin")
             raw = data.get("overrides")
             if not isinstance(raw, list) or len(raw) > len(ALL_PERMISSIONS): raise APIError(422, "قائمة الصلاحيات غير صالحة.", "validation_error")
             normalized: dict[str, bool] = {}
+            ceiling = ROLE_PERMISSIONS.get(str(target["role"]), set())
             for item in raw:
                 if not isinstance(item, dict) or item.get("permission") not in ALL_PERMISSIONS or not isinstance(item.get("granted"), bool):
                     raise APIError(422, "تحتوي القائمة على صلاحية غير صالحة.", "validation_error")
+                if item["granted"] and "*" not in ceiling and item["permission"] not in ceiling:
+                    raise APIError(422, "لا يمكن منح صلاحية تتجاوز تصنيف هذا الحساب.", "role_permission_ceiling", {"permission": item["permission"], "role": target["role"]})
                 normalized[item["permission"]] = item["granted"]
             critical = {"security.manage_permissions", "security.manage_users"}
             if actor["id"] == user_id and any(permission in critical and not granted for permission, granted in normalized.items()):
@@ -3918,7 +3962,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             attendance_rows = self.db.execute("SELECT a.* FROM attendance a JOIN employees e ON e.id=a.employee_id"+(" WHERE "+" AND ".join(conditions+["e.active=1","a.work_date=?","a.check_in_at IS NOT NULL"])), (*params,date_to.isoformat())).fetchall()
             for row in attendance_rows:
                 shift = self.shift_for_employee(int(row["employee_id"]), date_to)
-                if shift and self.attendance_metrics(row, shift).get("late_minutes",0)>0: late += 1
+                relief = self.attendance_relief_for_day(int(row["employee_id"]), date_to)
+                if shift and self.attendance_metrics(
+                    row, shift,
+                    approved_permission_minutes=relief["permission_minutes"],
+                    emergency_excused=relief["emergency_excused"],
+                ).get("late_minutes", 0) > 0:
+                    late += 1
             attendance_context = self.executive_attendance_context(active_rows, date_to, {int(row["employee_id"]) for row in attendance_rows})
             absent = attendance_context["absent"]
             scope_join = (" AND "+" AND ".join(c.replace("e.","e.") for c in conditions)) if conditions else ""
@@ -3998,6 +4048,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_departments(self) -> None:
             user = self.current_user(True); assert user is not None
+            if not (self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "organization.view") or has_permission(self.db, user, "department.manage")):
+                raise APIError(403, "دليل الأقسام متاح للموارد البشرية ومدير النظام فقط.", "forbidden")
             rows = self.db.execute("SELECT d.*,e.full_name AS manager_name,b.name AS branch_name,(SELECT COUNT(*) FROM employees x WHERE x.department_id=d.id AND x.active=1) AS employee_count FROM departments d LEFT JOIN employees e ON e.id=d.manager_employee_id LEFT JOIN branches b ON b.id=d.branch_id ORDER BY d.name").fetchall()
             privileged = self.has_privileged_people_access(user, "employee.view")
             items = []
@@ -4153,7 +4205,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, {"view":view,"filters":{"branch_id":branch_filter,"department_id":department_filter,"q":self.query.get("q","")},"departments": departments, "employees": flat, "general_manager": general_manager, "employee_count": int(self.db.execute("SELECT COUNT(*) FROM employees WHERE active=1").fetchone()[0]), "source":"employees.manager_id+departments"})
 
         def api_job_grades_get(self) -> None:
-            self.current_user(True)
+            self.require_permission("reference.manage")
             rows = self.db.execute("SELECT *,min_salary_cents/100.0 AS min_salary,max_salary_cents/100.0 AS max_salary FROM job_grades ORDER BY code").fetchall()
             self.send_json(200, {"items": [normalize_job_grade(r) for r in rows]})
 
@@ -4211,7 +4263,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200,{"ok":True})
 
         def api_job_titles_get(self) -> None:
-            self.current_user(True); rows=self.db.execute("SELECT jt.*,d.name AS department_name FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id ORDER BY jt.name").fetchall(); self.send_json(200,{"items":[dict(r)|{"active":bool(r["active"])} for r in rows]})
+            self.require_permission("reference.manage"); rows=self.db.execute("SELECT jt.*,d.name AS department_name FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id ORDER BY jt.name").fetchall(); self.send_json(200,{"items":[dict(r)|{"active":bool(r["active"])} for r in rows]})
 
         def api_job_titles_post(self) -> None:
             user=self.require_permission("reference.manage"); data=self.read_json(); stamp=now_iso(); name=require_text(data,"name",180); department_id=as_int(data["department_id"],"department_id",1) if data.get("department_id") else None
@@ -4253,8 +4305,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             row = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
             organization = serialize_org(row)
             organization["visual_identity"] = visual_identity_payload(self.db, row, admin=False)
-            if user is None:
-                organization["stamp_data"] = None
+            if user is None or not has_permission(self.db, user, "org.manage"):
+                organization = public_organization_projection(organization)
             self.send_json(200, {"organization": organization})
 
         def api_visual_identity_admin_get(self) -> None:
@@ -4427,6 +4479,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     updates[key] = validate_data_url(data[key], "الشعار" if key == "logo_data" else "الختم")
                 else:
                     updates[key] = optional_text(data, key, 1200 if key == "card_back_instructions" else 500)
+            if "late_deduction_enabled" in data:
+                if not isinstance(data["late_deduction_enabled"], bool):
+                    raise APIError(422, "حالة الخصم المباشر يجب أن تكون قيمة منطقية.", "validation_error", {"field": "late_deduction_enabled"})
+                updates["late_deduction_enabled"] = 1 if data["late_deduction_enabled"] else 0
+            for key, minimum, maximum in (
+                ("late_warning_minutes", 1, 10080),
+                ("late_threshold_minutes", 1, 10080),
+                ("late_deduction_unit_minutes", 1, 1440),
+                ("late_penalty_days_per_unit", 1, 30),
+            ):
+                if key in data:
+                    updates[key] = as_int(data[key], key, minimum, maximum)
             if "general_manager_employee_id" in data:
                 raw_gm = data.get("general_manager_employee_id")
                 if raw_gm in (None, ""):
@@ -4447,6 +4511,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "قالب البطاقة غير صالح.", "validation_error", {"field": "card_template"})
             if "card_contact_email" in updates and updates["card_contact_email"] and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", updates["card_contact_email"]):
                 raise APIError(422, "بريد التواصل الخاص بالبطاقة غير صالح.", "validation_error", {"field": "card_contact_email"})
+            warning_minutes = int(updates.get("late_warning_minutes", self.db.execute("SELECT late_warning_minutes FROM organization WHERE id=1").fetchone()[0]))
+            threshold_minutes = int(updates.get("late_threshold_minutes", self.db.execute("SELECT late_threshold_minutes FROM organization WHERE id=1").fetchone()[0]))
+            if warning_minutes >= threshold_minutes:
+                raise APIError(422, "يجب أن يبدأ تنبيه التأخير قبل حد الخصم الشهري.", "validation_error", {"field": "late_warning_minutes"})
             current_org = self.db.execute("SELECT card_primary_color,card_accent_color,general_manager_employee_id FROM organization WHERE id=1").fetchone()
             effective_primary = updates.get("card_primary_color", current_org["card_primary_color"])
             effective_accent = updates.get("card_accent_color", current_org["card_accent_color"])
@@ -4535,6 +4603,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_branches_get(self) -> None:
             user = self.current_user(True); assert user is not None
+            if not (has_permission(self.db, user, "branch.view") or has_permission(self.db, user, "branch.manage")):
+                raise APIError(403, "بيانات الفروع والمواقع متاحة للموارد البشرية ومدير النظام فقط.", "forbidden")
             rows = self.db.execute(
                 """SELECT b.*,e.full_name AS manager_name,
                           (SELECT COUNT(*) FROM employees x WHERE x.branch_id=b.id AND x.active=1) AS employee_count
@@ -4551,6 +4621,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_branch_get(self, branch_id: int) -> None:
             user = self.current_user(True); assert user is not None
+            if not (has_permission(self.db, user, "branch.view") or has_permission(self.db, user, "branch.manage")):
+                raise APIError(403, "لا تملك صلاحية عرض بيانات المواقع.", "forbidden")
             data = self.serialize_branch(self.branch_row(branch_id))
             if not self.has_privileged_people_access(user, "employee.view"):
                 data = {key: data.get(key) for key in ("id", "name", "address", "latitude", "longitude", "radius_m", "license_expires_on", "license_days_remaining", "license_status", "active")}
@@ -4723,10 +4795,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 (employee_id, end.isoformat(), start.isoformat()),
             ).fetchall()
             assignments: list[dict[str, Any]] = []
+            rest_override_row = self.db.execute("SELECT rest_days_override FROM employees WHERE id=?", (employee_id,)).fetchone()
+            rest_override = parse_json_text(rest_override_row["rest_days_override"], []) if rest_override_row and rest_override_row["rest_days_override"] else None
             for row in assignment_rows:
                 item = dict(row)
                 item["working_days"] = parse_json_text(item["working_days"], [])
                 item["rest_days"] = parse_json_text(item["rest_days"], [])
+                if rest_override is not None:
+                    item["rest_days"] = rest_override
+                    item["working_days"] = [day for day in range(7) if day not in rest_override]
+                    item["rest_days_source"] = "employee_override"
                 assignments.append(item)
 
             def shift_on(day: date) -> dict[str, Any] | None:
@@ -4739,7 +4817,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchall()
             attendance_by_day = {row["work_date"]: row for row in attendance_rows}
             approved_leaves = self.db.execute(
-                """SELECT lr.id,lr.start_date,lr.end_date,lr.days,lr.reason,lr.status,
+                """SELECT lr.id,lr.start_date,lr.end_date,lr.days,lr.hours,lr.reason,lr.status,
                           lt.code AS leave_type_code,lt.name AS leave_type_name
                      FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
                     WHERE lr.employee_id=? AND lr.status='approved' AND lr.start_date<=? AND lr.end_date>=?
@@ -4748,6 +4826,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchall()
 
             leave_dates: set[str] = set()
+            emergency_dates: set[str] = set()
+            permission_minutes_by_date: dict[str, int] = {}
             leave_items: list[dict[str, Any]] = []
             for row in approved_leaves:
                 overlap_start = max(start, parse_date(row["start_date"]))
@@ -4755,12 +4835,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 overlap_days = (overlap_end - overlap_start).days + 1
                 cursor = overlap_start
                 while cursor <= overlap_end:
-                    leave_dates.add(cursor.isoformat())
+                    iso = cursor.isoformat()
+                    if row["leave_type_code"] == "work_permission":
+                        permission_minutes_by_date[iso] = permission_minutes_by_date.get(iso, 0) + int(round(float(row["hours"] or 0) * 60))
+                    else:
+                        leave_dates.add(iso)
+                        if row["leave_type_code"] in EMERGENCY_LEAVE_CODES:
+                            emergency_dates.add(iso)
                     cursor += timedelta(days=1)
                 leave_items.append({
                     "id": row["id"], "leave_type_code": row["leave_type_code"], "leave_type_name": row["leave_type_name"],
                     "start_date": row["start_date"], "end_date": row["end_date"], "days_in_period": overlap_days,
-                    "reason": row["reason"], "status": row["status"],
+                    "hours": float(row["hours"] or 0), "reason": row["reason"], "status": row["status"],
                 })
 
             attendance_items: list[dict[str, Any]] = []
@@ -4769,6 +4855,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             no_shift_days = 0
             net_minutes = 0
             late_minutes = 0
+            raw_late_minutes = 0
+            excused_late_minutes = 0
             completed_days = 0
             open_days = 0
             cursor = start
@@ -4787,18 +4875,27 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ):
                     absence_dates.append(iso)
                 if attendance is not None:
-                    metrics = self.attendance_metrics(attendance, shift)
+                    metrics = self.attendance_metrics(
+                        attendance,
+                        shift,
+                        approved_permission_minutes=permission_minutes_by_date.get(iso, 0),
+                        emergency_excused=iso in emergency_dates,
+                    )
                     is_completed = bool(attendance["check_in_at"] and attendance["check_out_at"])
                     is_open = bool(attendance["check_in_at"] and not attendance["check_out_at"])
                     if is_completed:
                         completed_days += 1
                         net_minutes += int(metrics["net_minutes"])
                         late_minutes += int(metrics["late_minutes"])
+                        raw_late_minutes += int(metrics["raw_late_minutes"])
+                        excused_late_minutes += int(metrics["excused_late_minutes"])
                     elif is_open:
                         open_days += 1
                     attendance_items.append({
                         "id": attendance["id"], "work_date": iso, "check_in_at": attendance["check_in_at"],
                         "check_out_at": attendance["check_out_at"], "net_minutes": int(metrics["net_minutes"]),
+                        "raw_late_minutes": int(metrics["raw_late_minutes"]),
+                        "excused_late_minutes": int(metrics["excused_late_minutes"]),
                         "late_minutes": int(metrics["late_minutes"]), "day_status": metrics["day_status"],
                         "shift_name": shift["name"] if shift else None,
                     })
@@ -4895,9 +4992,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 },
                 "summary": {
                     "net_work_minutes": net_minutes, "attendance_completed_days": completed_days,
-                    "attendance_open_days": open_days, "late_minutes": late_minutes,
+                    "attendance_open_days": open_days, "raw_late_minutes": raw_late_minutes,
+                    "excused_late_minutes": excused_late_minutes, "late_minutes": late_minutes,
                     "absence_days": len(absence_dates), "weekly_rest_days": len(weekly_rest_dates),
-                    "approved_leave_days": sum(int(item["days_in_period"]) for item in leave_items),
+                    "approved_leave_days": sum(int(item["days_in_period"]) for item in leave_items if item["leave_type_code"] != "work_permission"),
                     "approved_overtime_minutes": total_overtime,
                     "violation_count": sum(item["action_type"] == "violation" for item in actions),
                     "undertaking_count": sum(item["action_type"] == "undertaking" for item in actions),
@@ -5179,6 +5277,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for key in ("department_id", "branch_id", "manager_id", "approval_employee_id"):
                 if key in data:
                     result[key] = as_int(data[key], key, 1) if data[key] not in (None, "") else None
+            if "rest_days_override" in data:
+                raw_rest_days = data.get("rest_days_override")
+                if raw_rest_days in (None, "", []):
+                    result["rest_days_override"] = None
+                elif not isinstance(raw_rest_days, list) or not raw_rest_days or len(raw_rest_days) > 3 or any(not isinstance(day, int) or day < 0 or day > 6 for day in raw_rest_days):
+                    raise APIError(422, "أيام الراحة الخاصة بالموظف يجب أن تكون من يوم إلى ثلاثة أيام صحيحة.", "validation_error", {"field": "rest_days_override"})
+                else:
+                    result["rest_days_override"] = json_text(sorted(set(raw_rest_days)))
             if "job_title_id" in data:
                 result["job_title_id"] = as_int(data["job_title_id"], "job_title_id", 1) if data["job_title_id"] not in (None, "") else None
                 if result["job_title_id"]:
@@ -5226,7 +5332,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     raise APIError(422, "الحالة الاجتماعية غير صالحة.", "validation_error", {"field": "marital_status"})
                 result["marital_status"] = marital_status
             salary_component_input = any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
-            if salary_component_input or not partial:
+            # A legacy create payload may still provide only ``salary``.  Do
+            # not initialize the detailed components to zero before that
+            # value is promoted to ``basic_salary`` below.
+            initialize_salary_components = salary_component_input or (not partial and "salary" not in data)
+            if initialize_salary_components:
                 for key in SALARY_COMPONENT_FIELDS:
                     if key in data or not partial:
                         result[key] = as_float(data.get(key, 0), key, 0, 100_000_000)
@@ -5240,7 +5350,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 result["salary"] = as_float(data["salary"], "salary", 0, 100_000_000)
             elif not partial:
                 result["salary"] = 0
-            if salary_component_input or not partial:
+            if initialize_salary_components:
                 manual = normalize_manual_allowances(result.get("manual_allowances_json", []))
                 total = sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS) + sum(item["amount"] for item in manual)
                 result["salary"] = round(total, 2)
@@ -5384,7 +5494,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         if len(password) < 8:
                             raise APIError(422, "كلمة المرور يجب أن تكون 8 أحرف على الأقل.", "weak_password")
                         role = str(data.get("role", "employee"))
-                        if role not in ROLE_PERMISSIONS:
+                        if role not in ACCOUNT_ROLES or (role == "admin" and not is_system_admin(user)):
                             raise APIError(422, "الدور غير صالح.", "validation_error")
                         digest, salt = password_record(password)
                         account_cursor = self.db.execute(
@@ -5392,9 +5502,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             (email, values["full_name"], role, digest, salt, employee_id, stamp, stamp),
                         )
                         account_info = {"id": int(account_cursor.lastrowid), "email": email, "role": role}
-                        if role == "general_manager":
-                            self.db.execute("UPDATE organization SET general_manager_employee_id=?,updated_at=? WHERE id=1", (employee_id, stamp))
-                            audit(self.db, user["id"], "organization.general_manager_assign", "employee", employee_id, {"source": "employee_create"})
                     for leave in self.db.execute("SELECT id,code,annual_entitlement FROM leave_types WHERE active=1"):
                         # Annual paid leave is earned from service, never granted
                         # as an opening balance when a profile is created.
@@ -5569,15 +5676,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if institution_role is not None:
                         next_general_manager = employee_id if institution_role == "general_manager" else None
                         self.db.execute("UPDATE organization SET general_manager_employee_id=?,updated_at=? WHERE id=1", (next_general_manager, stamp))
-                        if institution_role == "general_manager":
-                            # A designated general manager receives the wildcard
-                            # role and any old explicit overrides are cleared so
-                            # the authority is genuinely complete.
-                            self.db.execute("UPDATE users SET role='employee',updated_at=? WHERE employee_id=? AND role='general_manager'", (stamp, employee_id))
-                            self.db.execute("UPDATE users SET role='general_manager',updated_at=? WHERE employee_id=? AND active=1", (stamp, employee_id))
-                            self.db.execute("DELETE FROM user_permissions WHERE user_id IN (SELECT id FROM users WHERE employee_id=? AND role='general_manager')", (employee_id,))
-                        else:
-                            self.db.execute("UPDATE users SET role='employee',updated_at=? WHERE employee_id=? AND role='general_manager'", (stamp, employee_id))
                         audit(self.db, user["id"], "organization.general_manager_assign" if institution_role == "general_manager" else "organization.general_manager_clear", "employee", employee_id, {"previous_employee_id": previous_general_manager, "next_employee_id": next_general_manager})
                     if reporting_line_changed:
                         self.sync_manager_assignment_workflows(
@@ -6017,8 +6115,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if employee is None:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             organization = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
-            org_data = serialize_org(organization)
-            org_data.pop("stamp_data", None)
+            org_data = public_organization_projection(serialize_org(organization))
             contracts=self.db.execute("SELECT * FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC",(employee_id,)).fetchall()
             today=local_now().date(); employee_data=normalize_employee(employee); assert employee_data is not None
             def contract_date(row: sqlite3.Row, key: str) -> date | None:
@@ -6095,7 +6192,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             gross_cents = money_cents(salary_breakdown_from_row(employee)["total"], "salary")
             payroll_month = local_now().strftime("%Y-%m")
             current_payroll = self.db.execute(
-                """SELECT i.basic_cents,i.allowances_cents,i.deductions_cents,i.advance_cents,i.net_cents
+                """SELECT i.basic_cents,i.allowances_cents,i.bonus_cents,i.deductions_cents,i.advance_cents,i.net_cents
                      FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id
                     WHERE i.employee_id=? AND r.payroll_month=? AND r.status IN ('approved','paid')
                     ORDER BY r.id DESC LIMIT 1""",
@@ -6104,7 +6201,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if current_payroll:
                 salary_snapshot = {
                     "month": payroll_month,
-                    "gross": cents_value(int(current_payroll["basic_cents"]) + int(current_payroll["allowances_cents"])),
+                    "gross": cents_value(int(current_payroll["basic_cents"]) + int(current_payroll["allowances_cents"]) + int(current_payroll["bonus_cents"])),
                     "advance": cents_value(current_payroll["advance_cents"]),
                     "net": cents_value(current_payroll["net_cents"]),
                 }
@@ -6130,7 +6227,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 (user["id"], now_iso()),
             ).fetchone()[0]
             self.send_json(200, {
-                "employee": normalize_employee(employee), "organization": serialize_org(org), "salary": salary_snapshot,
+                "employee": normalize_employee(employee), "organization": public_organization_projection(serialize_org(org)), "salary": salary_snapshot,
                 "leave_balances": balances, "attendance_today": row_dict(attendance),
                 "overtime_requests": [dict(r) for r in overtime], "leave_requests": [self.leave_request_payload(r, user) for r in leaves],
                 "evaluation": row_dict(evaluation), "notifications_unread": unread,
@@ -6139,8 +6236,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         # Attendance and work shifts
         def shift_for_employee(self, employee_id: int, work_date: date) -> dict[str, Any] | None:
             row = self.db.execute(
-                """SELECT s.*,a.effective_from,a.effective_to
+                """SELECT s.*,a.effective_from,a.effective_to,e.rest_days_override
                    FROM employee_shift_assignments a JOIN shifts s ON s.id=a.shift_id
+                   JOIN employees e ON e.id=a.employee_id
                    WHERE a.employee_id=? AND a.effective_from<=?
                      AND (a.effective_to IS NULL OR a.effective_to>=?) AND s.active=1
                    ORDER BY a.effective_from DESC,a.id DESC LIMIT 1""",
@@ -6151,12 +6249,48 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             result = dict(row)
             result["working_days"] = parse_json_text(result["working_days"], [])
             result["rest_days"] = parse_json_text(result["rest_days"], [])
+            employee_rest_days = parse_json_text(result.get("rest_days_override"), []) if result.get("rest_days_override") else []
+            if employee_rest_days:
+                result["rest_days"] = employee_rest_days
+                result["working_days"] = [day for day in range(7) if day not in employee_rest_days]
+                result["rest_days_source"] = "employee_override"
+            else:
+                result["rest_days_source"] = "shift"
+            result.pop("rest_days_override", None)
             result["active"] = bool(result["active"])
             return result
 
-        def attendance_metrics(self, row: sqlite3.Row, shift: dict[str, Any] | None, approved_overtime: int = 0) -> dict[str, Any]:
+        def attendance_relief_for_day(self, employee_id: int, work_date: date) -> dict[str, Any]:
+            rows = self.db.execute(
+                """SELECT lt.code,lr.hours
+                     FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                    WHERE lr.employee_id=? AND lr.status='approved'
+                      AND lr.start_date<=? AND lr.end_date>=?""",
+                (employee_id, work_date.isoformat(), work_date.isoformat()),
+            ).fetchall()
+            permission_minutes = sum(int(round(float(row["hours"] or 0) * 60)) for row in rows if row["code"] == "work_permission")
+            return {
+                "permission_minutes": permission_minutes,
+                "emergency_excused": any(row["code"] in EMERGENCY_LEAVE_CODES for row in rows),
+                "full_day_leave": any(row["code"] != "work_permission" for row in rows),
+            }
+
+        def attendance_metrics(
+            self,
+            row: sqlite3.Row | dict[str, Any],
+            shift: dict[str, Any] | None,
+            approved_overtime: int = 0,
+            approved_permission_minutes: int = 0,
+            emergency_excused: bool = False,
+        ) -> dict[str, Any]:
             result = dict(row)
-            result.update({"shift": shift, "required_minutes": 0, "late_minutes": 0, "early_minutes": 0, "gross_minutes": 0, "net_minutes": 0, "approved_overtime_minutes": approved_overtime, "day_status": "working_day"})
+            result.update({
+                "shift": shift, "required_minutes": 0, "late_minutes": 0, "raw_late_minutes": 0,
+                "excused_late_minutes": 0, "early_minutes": 0, "gross_minutes": 0,
+                "raw_net_minutes": 0, "net_minutes": 0, "permission_minutes": max(0, int(approved_permission_minutes)),
+                "permission_credit_minutes": 0, "emergency_excused": bool(emergency_excused),
+                "approved_overtime_minutes": approved_overtime, "day_status": "working_day",
+            })
             work_day = date.fromisoformat(row["work_date"])
             if shift is None:
                 result["day_status"] = "no_shift"
@@ -6170,6 +6304,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 gross = max(0, int((check_out - check_in).total_seconds() // 60))
                 result["gross_minutes"] = gross
                 result["net_minutes"] = max(0, gross - (int(shift["break_minutes"]) if shift else 0))
+                result["raw_net_minutes"] = result["net_minutes"]
             elif check_in:
                 result["day_status"] = "open"
             elif result["day_status"] == "working_day":
@@ -6177,13 +6312,77 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if shift and check_in and work_day.weekday() not in shift["rest_days"]:
                 expected_start = datetime.combine(work_day, parse_clock(shift["start_time"], "start_time"), UAE_TZ)
                 grace_end = expected_start + timedelta(minutes=int(shift["grace_minutes"]))
-                result["late_minutes"] = max(0, int((check_in - grace_end).total_seconds() // 60))
+                result["raw_late_minutes"] = max(0, int((check_in - grace_end).total_seconds() // 60))
                 if check_out:
                     expected_end = datetime.combine(work_day, parse_clock(shift["end_time"], "end_time"), UAE_TZ)
                     if expected_end <= expected_start:
                         expected_end += timedelta(days=1)
                     result["early_minutes"] = max(0, int((expected_end - check_out).total_seconds() // 60))
+            if result["raw_late_minutes"]:
+                result["excused_late_minutes"] = result["raw_late_minutes"] if emergency_excused else min(result["raw_late_minutes"], result["permission_minutes"])
+                result["late_minutes"] = max(0, result["raw_late_minutes"] - result["excused_late_minutes"])
+            if result["required_minutes"] and result["raw_net_minutes"] and result["permission_minutes"]:
+                result["permission_credit_minutes"] = min(result["permission_minutes"], max(0, result["required_minutes"] - result["raw_net_minutes"]))
+                result["net_minutes"] = result["raw_net_minutes"] + result["permission_credit_minutes"]
             return result
+
+        def monthly_lateness_summary(self, employee_id: int, payroll_month: str) -> dict[str, int]:
+            try:
+                month_start = date.fromisoformat(payroll_month + "-01")
+            except ValueError as exc:
+                raise APIError(422, "الشهر يجب أن يكون YYYY-MM.", "validation_error") from exc
+            month_end = add_calendar_months(month_start, 1) - timedelta(days=1)
+            raw_total = excused_total = unexcused_total = 0
+            rows = self.db.execute(
+                "SELECT * FROM attendance WHERE employee_id=? AND work_date BETWEEN ? AND ? AND check_in_at IS NOT NULL",
+                (employee_id, month_start.isoformat(), month_end.isoformat()),
+            ).fetchall()
+            for row in rows:
+                work_date = date.fromisoformat(row["work_date"])
+                relief = self.attendance_relief_for_day(employee_id, work_date)
+                metrics = self.attendance_metrics(
+                    row, self.shift_for_employee(employee_id, work_date),
+                    approved_permission_minutes=relief["permission_minutes"],
+                    emergency_excused=relief["emergency_excused"],
+                )
+                raw_total += int(metrics["raw_late_minutes"])
+                excused_total += int(metrics["excused_late_minutes"])
+                unexcused_total += int(metrics["late_minutes"])
+            return {"raw_minutes": raw_total, "excused_minutes": excused_total, "unexcused_minutes": unexcused_total}
+
+        def ensure_lateness_warning(self, employee_id: int, actor_user_id: int) -> None:
+            policy = self.db.execute(
+                """SELECT late_deduction_enabled,late_warning_minutes,late_threshold_minutes,
+                          late_deduction_unit_minutes,late_penalty_days_per_unit
+                     FROM organization WHERE id=1"""
+            ).fetchone()
+            if not policy or not bool(policy["late_deduction_enabled"]):
+                return
+            payroll_month = local_now().strftime("%Y-%m")
+            summary = self.monthly_lateness_summary(employee_id, payroll_month)
+            warning_at = int(policy["late_warning_minutes"])
+            threshold = int(policy["late_threshold_minutes"])
+            if summary["unexcused_minutes"] < warning_at:
+                return
+            alert_type = "threshold" if summary["unexcused_minutes"] >= threshold else "warning"
+            marker = self.db.execute(
+                "INSERT OR IGNORE INTO lateness_alerts(employee_id,alert_month,alert_type,late_minutes,created_at) VALUES(?,?,?,?,?)",
+                (employee_id, payroll_month, alert_type, summary["unexcused_minutes"], now_iso()),
+            )
+            if marker.rowcount != 1:
+                return
+            account = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (employee_id,)).fetchone()
+            if not account:
+                return
+            body = (
+                f"بلغ تأخرك بدون إذن خلال {payroll_month} عدد {summary['unexcused_minutes']} دقيقة. "
+                f"عند تجاوز السماح الشهري المحدد بـ {threshold} دقيقة، سيُخصم من الراتب مباشرة "
+                f"عن كل {int(policy['late_deduction_unit_minutes'])} دقيقة إضافية ما يعادل "
+                f"{int(policy['late_penalty_days_per_unit'])} يوم عمل."
+            )
+            notification_id = create_internal_notification(self.db, actor_user_id, [int(account["id"])], "تنبيه التأخير الشهري بدون إذن", body)
+            self.db.execute("UPDATE lateness_alerts SET notification_id=? WHERE id=?", (notification_id, marker.lastrowid))
+            audit(self.db, actor_user_id, "attendance.lateness_warning", "employee", employee_id, {"month": payroll_month, **summary, "alert_type": alert_type})
 
         def api_attendance_punch(self) -> None:
             user = self.current_user(True)
@@ -6239,7 +6438,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             saved = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, work_date)).fetchone()
             shift = self.shift_for_employee(employee_id, date.fromisoformat(work_date))
             overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee_id, work_date)).fetchone()[0]
-            self.send_json(200, {"attendance": self.attendance_metrics(saved, shift, overtime), "distance_m": round(distance, 1)})
+            relief = self.attendance_relief_for_day(employee_id, date.fromisoformat(work_date))
+            with self.db:
+                self.ensure_lateness_warning(employee_id, int(user["id"]))
+            self.send_json(200, {"attendance": self.attendance_metrics(saved, shift, overtime, relief["permission_minutes"], relief["emergency_excused"]), "distance_m": round(distance, 1), "monthly_lateness": self.monthly_lateness_summary(employee_id, work_date[:7])})
 
         def api_attendance_daily(self) -> None:
             user = self.current_user(True)
@@ -6289,7 +6491,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 source.update({"employee_no": employee["employee_no"], "full_name": employee["full_name"], "branch_name": employee["branch_name"]})
                 shift = self.shift_for_employee(employee["id"], date.fromisoformat(work_date))
                 overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee["id"], work_date)).fetchone()[0]
-                metrics = self.attendance_metrics(source, shift, overtime)
+                relief = self.attendance_relief_for_day(int(employee["id"]), date.fromisoformat(work_date))
+                metrics = self.attendance_metrics(source, shift, overtime, relief["permission_minutes"], relief["emergency_excused"])
                 if response_scope == "team_attendance":
                     items.append({
                         "id": employee["id"], "employee_no": employee["employee_no"],
@@ -6363,6 +6566,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             attendance_by_key: dict[tuple[int, str], sqlite3.Row] = {}
             overtime_by_key: dict[tuple[int, str], int] = {}
             approved_leave_days: set[tuple[int, str]] = set()
+            emergency_leave_days: set[tuple[int, str]] = set()
+            approved_permission_minutes: dict[tuple[int, str], int] = {}
             if employee_ids:
                 placeholders = ",".join("?" for _ in employee_ids)
                 for row in self.db.execute(
@@ -6376,19 +6581,29 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ).fetchall():
                     overtime_by_key[(int(row["employee_id"]), row["work_date"])] = int(row["minutes"] or 0)
                 leave_rows = self.db.execute(
-                    f"SELECT employee_id,start_date,end_date FROM leave_requests WHERE employee_id IN ({placeholders}) AND status='approved' AND start_date<=? AND end_date>=?",
+                    f"""SELECT lr.employee_id,lr.start_date,lr.end_date,lr.hours,lt.code
+                           FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                          WHERE lr.employee_id IN ({placeholders}) AND lr.status='approved'
+                            AND lr.start_date<=? AND lr.end_date>=?""",
                     (*employee_ids, date_to.isoformat(), date_from.isoformat()),
                 ).fetchall()
                 for leave in leave_rows:
                     cursor = max(date_from, date.fromisoformat(leave["start_date"]))
                     leave_end = min(date_to, date.fromisoformat(leave["end_date"]))
                     while cursor <= leave_end:
-                        approved_leave_days.add((int(leave["employee_id"]), cursor.isoformat()))
+                        key = (int(leave["employee_id"]), cursor.isoformat())
+                        if leave["code"] == "work_permission":
+                            approved_permission_minutes[key] = approved_permission_minutes.get(key, 0) + int(round(float(leave["hours"] or 0) * 60))
+                        else:
+                            approved_leave_days.add(key)
+                            if leave["code"] in EMERGENCY_LEAVE_CODES:
+                                emergency_leave_days.add(key)
                         cursor += timedelta(days=1)
 
             items: list[dict[str, Any]] = []
             summary = {
                 "work_days": 0, "net_work_minutes": 0, "late_minutes": 0,
+                "raw_late_minutes": 0, "excused_late_minutes": 0,
                 "absence_days": 0, "weekly_rest_days": 0, "leave_days": 0,
                 "approved_overtime_minutes": 0, "attendance_records": 0,
                 "expected_employee_days": 0, "present_days": 0, "open_days": 0, "late_days": 0,
@@ -6423,7 +6638,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         continue
                     shift = self.shift_for_employee(employee_id, cursor)
                     approved_overtime = overtime_by_key.get((employee_id, work_date), 0)
-                    metrics = self.attendance_metrics(source, shift, approved_overtime)
+                    key = (employee_id, work_date)
+                    metrics = self.attendance_metrics(
+                        source, shift, approved_overtime,
+                        approved_permission_minutes.get(key, 0),
+                        key in emergency_leave_days,
+                    )
                     has_leave = (employee_id, work_date) in approved_leave_days
                     if has_leave and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent"}:
                         metrics["day_status"] = "approved_leave"
@@ -6443,6 +6663,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         summary["attendance_records"] += 1
                     summary["net_work_minutes"] += int(metrics["net_minutes"])
                     summary["late_minutes"] += int(metrics["late_minutes"])
+                    summary["raw_late_minutes"] += int(metrics["raw_late_minutes"])
+                    summary["excused_late_minutes"] += int(metrics["excused_late_minutes"])
                     summary["approved_overtime_minutes"] += int(metrics["approved_overtime_minutes"])
                     if metrics["required_minutes"]:
                         summary["work_days"] += 1
@@ -6497,13 +6719,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 rows: list[list[Any]] = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "تسجيل الدخول", "تسجيل الخروج"]]
                 rows.extend([[item["work_date"], item["full_name"], item["employee_no"], item.get("check_in_at") or "", item.get("check_out_at") or ""] for item in payload["items"]])
             else:
-                rows = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "المناوبة", "الدخول", "الخروج", "صافي الدقائق", "دقائق التأخير", "الإضافي المعتمد", "الموقع بالمتر", "الحالة"]]
+                rows = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "المناوبة", "الدخول", "الخروج", "صافي الدقائق", "التأخير الخام", "التأخير المعوض", "التأخير غير المعوض", "الإضافي المعتمد", "الموقع بالمتر", "الحالة"]]
                 rows.extend([
                     [
                         item["work_date"], item["full_name"], item["employee_no"], item.get("department_name") or "",
                         item.get("branch_name") or "", (item.get("shift") or {}).get("name") or "", item.get("check_in_at") or "",
-                        item.get("check_out_at") or "", item.get("net_minutes") or 0, item.get("late_minutes") or 0,
-                        item.get("approved_overtime_minutes") or 0, item.get("check_in_distance_m") if item.get("check_in_distance_m") is not None else "",
+                        item.get("check_out_at") or "", item.get("net_minutes") or 0, item.get("raw_late_minutes") or 0,
+                        item.get("excused_late_minutes") or 0, item.get("late_minutes") or 0, item.get("approved_overtime_minutes") or 0,
+                        item.get("check_in_distance_m") if item.get("check_in_distance_m") is not None else "",
                         item.get("day_status") or "",
                     ]
                     for item in payload["items"]
@@ -6546,12 +6769,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return result
 
         def api_shifts_get(self) -> None:
-            user = self.current_user(True); assert user is not None
+            user = self.require_permission("shift.view")
             rows = self.db.execute("SELECT s.*,(SELECT COUNT(*) FROM employee_shift_assignments a WHERE a.shift_id=s.id AND (a.effective_to IS NULL OR a.effective_to>=date('now'))) AS assigned_count FROM shifts s ORDER BY s.active DESC,s.name").fetchall()
             assignment_sql = \
                 """SELECT a.id,a.employee_id,e.employee_no,e.full_name AS employee_name,
                           a.shift_id,s.name AS shift_name,a.effective_from,a.effective_to,
-                          s.working_days,s.rest_days,a.created_at
+                          s.working_days,s.rest_days,e.rest_days_override,a.created_at
                    FROM employee_shift_assignments a JOIN employees e ON e.id=a.employee_id
                    JOIN shifts s ON s.id=a.shift_id
                 """
@@ -6566,6 +6789,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 item = dict(row)
                 item["working_days"] = parse_json_text(item["working_days"], [])
                 item["rest_days"] = parse_json_text(item["rest_days"], [])
+                employee_rest_days = parse_json_text(item.get("rest_days_override"), []) if item.get("rest_days_override") else []
+                if employee_rest_days:
+                    item["rest_days"] = employee_rest_days
+                    item["rest_days_source"] = "employee_override"
+                else:
+                    item["rest_days_source"] = "shift"
+                item.pop("rest_days_override", None)
                 assignments.append(item)
             self.send_json(200, {"items": [self.serialize_shift(r) for r in rows], "assignments": assignments})
 
@@ -7019,6 +7249,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True)
             assert user is not None
             target_id = as_int(self.query["employee_id"], "employee_id", 1) if self.query.get("employee_id") else user.get("employee_id")
+            if target_id and int(target_id) != int(user.get("employee_id") or 0) and not self.has_privileged_people_access(user, "leave.view"):
+                raise APIError(403, "لا يمكنك عرض استخدام الاستئذان لموظف آخر.", "forbidden")
             target_gender = None
             if target_id:
                 employee = self.db.execute("SELECT gender FROM employees WHERE id=?", (target_id,)).fetchone()
@@ -7027,7 +7259,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             rows = self.db.execute("SELECT * FROM leave_types " + ("" if include_inactive else "WHERE active=1 ") + "ORDER BY id").fetchall()
             if target_id and target_gender != "female":
                 rows = [row for row in rows if row["code"] != "maternity"]
-            self.send_json(200, {"items": [self.leave_type_payload(r) for r in rows], "can_manage": is_system_admin(user)})
+            permission_usage = None
+            if target_id:
+                month = local_now().strftime("%Y-%m")
+                usage = self.db.execute(
+                    """SELECT COUNT(*) AS request_count,COALESCE(SUM(lr.hours),0) AS used_hours
+                         FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                        WHERE lr.employee_id=? AND lt.code='work_permission'
+                          AND lr.status IN ('submitted','approved') AND substr(lr.start_date,1,7)=?""",
+                    (target_id, month),
+                ).fetchone()
+                permission_usage = {
+                    "month": month, "request_count": int(usage["request_count"] or 0),
+                    "used_hours": round(float(usage["used_hours"] or 0), 2),
+                    "max_requests": WORK_PERMISSION_MAX_REQUESTS,
+                    "max_hours_per_request": WORK_PERMISSION_MAX_HOURS_PER_REQUEST,
+                    "max_monthly_hours": WORK_PERMISSION_MAX_MONTHLY_HOURS,
+                }
+            self.send_json(200, {"items": [self.leave_type_payload(r) for r in rows], "can_manage": is_system_admin(user), "work_permission_policy": {"max_requests": WORK_PERMISSION_MAX_REQUESTS, "max_hours_per_request": WORK_PERMISSION_MAX_HOURS_PER_REQUEST, "max_monthly_hours": WORK_PERMISSION_MAX_MONTHLY_HOURS}, "work_permission_usage": permission_usage})
 
         def api_leave_balances(self) -> None:
             user = self.current_user(True)
@@ -7215,10 +7464,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 duration_minutes = int((datetime.combine(start, end_clock) - datetime.combine(start, start_clock)).total_seconds() / 60)
                 if duration_minutes <= 0:
                     raise APIError(422, "وقت نهاية الترخيص يجب أن يكون بعد وقت البداية.", "permission_time_order")
-                max_hours = float(leave_type["max_hours"] or 2)
+                max_hours = min(float(leave_type["max_hours"] or WORK_PERMISSION_MAX_HOURS_PER_REQUEST), WORK_PERMISSION_MAX_HOURS_PER_REQUEST)
                 hours = round(duration_minutes / 60, 2)
                 if hours > max_hours:
-                    raise APIError(422, f"لا يجوز أن يتجاوز الترخيص {max_hours:g} ساعتين في الطلب الواحد.", "permission_max_hours", {"max_hours": max_hours})
+                    raise APIError(422, f"لا يجوز أن يتجاوز الاستئذان {max_hours:g} ساعة في اليوم.", "permission_max_hours", {"max_hours": max_hours})
+                month = start.strftime("%Y-%m")
+                usage = self.db.execute(
+                    """SELECT COUNT(*) AS request_count,COALESCE(SUM(lr.hours),0) AS used_hours
+                         FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                        WHERE lr.employee_id=? AND lt.code='work_permission'
+                          AND lr.status IN ('submitted','approved') AND substr(lr.start_date,1,7)=?""",
+                    (employee_id, month),
+                ).fetchone()
+                request_count = int(usage["request_count"] or 0)
+                used_hours = float(usage["used_hours"] or 0)
+                if request_count >= WORK_PERMISSION_MAX_REQUESTS:
+                    raise APIError(422, "استنفدت الحد الشهري للاستئذان: مرتان فقط في الشهر.", "permission_monthly_request_limit", {"max_requests": WORK_PERMISSION_MAX_REQUESTS, "request_count": request_count})
+                if used_hours + hours > WORK_PERMISSION_MAX_MONTHLY_HOURS + 0.000001:
+                    raise APIError(422, "مجموع ساعات الاستئذان لا يجوز أن يتجاوز ٤ ساعات شهرياً.", "permission_monthly_hours_limit", {"max_hours": WORK_PERMISSION_MAX_MONTHLY_HOURS, "used_hours": round(used_hours, 2), "requested_hours": hours})
                 start_time_value = start_clock.strftime("%H:%M")
                 end_time_value = end_clock.strftime("%H:%M")
                 days = round(duration_minutes / 480, 4)
@@ -7834,13 +8097,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             seen = {employee_id}
             current = self.db.execute("SELECT manager_id FROM employees WHERE id=?", (employee_id,)).fetchone()
             manager_id = current["manager_id"] if current else None
+            configured = self.db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()
+            configured_gm_id = int(configured["general_manager_employee_id"]) if configured and configured["general_manager_employee_id"] else None
             found_gm = False
             while manager_id and manager_id not in seen and len(chain) < 20:
                 seen.add(manager_id)
                 account = self.db.execute("SELECT role,active FROM users WHERE employee_id=?", (manager_id,)).fetchone()
                 if account and bool(account["active"]):
                     chain.append(int(manager_id))
-                    if account["role"] == "general_manager":
+                    if configured_gm_id and int(manager_id) == configured_gm_id:
                         found_gm = True
                         break
                 next_row = self.db.execute("SELECT manager_id FROM employees WHERE id=?", (manager_id,)).fetchone()
@@ -9001,12 +9266,30 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "installment_count": len(rows),
             }
 
+        def recalculate_payroll_item(self, item_id: int) -> None:
+            item = self.db.execute("SELECT * FROM payroll_items WHERE id=?", (item_id,)).fetchone()
+            if not item:
+                raise APIError(404, "عنصر مسير الراتب غير موجود.", "not_found")
+            totals = self.db.execute(
+                """SELECT COALESCE(SUM(CASE WHEN kind='bonus' THEN amount_cents ELSE 0 END),0) AS bonus,
+                          COALESCE(SUM(CASE WHEN kind IN ('deduction','violation','lateness') THEN amount_cents ELSE 0 END),0) AS deductions
+                     FROM payroll_adjustments WHERE payroll_item_id=?""",
+                (item_id,),
+            ).fetchone()
+            bonus = int(totals["bonus"] or 0)
+            deductions = int(item["base_deductions_cents"] or 0) + int(totals["deductions"] or 0)
+            net = max(0, int(item["basic_cents"]) + int(item["allowances_cents"]) + bonus - deductions - int(item["advance_cents"]))
+            self.db.execute("UPDATE payroll_items SET bonus_cents=?,deductions_cents=?,net_cents=? WHERE id=?", (bonus, deductions, net, item_id))
+
         def payroll_item_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             item = dict(row)
-            for key in ("basic_cents", "allowances_cents", "deductions_cents", "advance_cents", "net_cents"):
+            for key in ("basic_cents", "allowances_cents", "bonus_cents", "base_deductions_cents", "deductions_cents", "advance_cents", "net_cents"):
                 item[key.removesuffix("_cents")] = cents_value(item[key])
-            gross_cents = int(item["basic_cents"]) + int(item["allowances_cents"])
+            contract_gross_cents = int(item["basic_cents"]) + int(item["allowances_cents"])
+            gross_cents = contract_gross_cents + int(item["bonus_cents"])
             total_deductions_cents = int(item["deductions_cents"]) + int(item["advance_cents"])
+            item["contract_gross_cents"] = contract_gross_cents
+            item["contract_gross"] = cents_value(contract_gross_cents)
             item["gross_cents"] = gross_cents
             item["gross"] = cents_value(gross_cents)
             item["total_deductions_cents"] = total_deductions_cents
@@ -9017,6 +9300,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             item["advance_remaining_cents"] = summary["remaining_cents"]
             item["advance_remaining"] = cents_value(summary["remaining_cents"])
             item["advance_next_due_month"] = summary["next_due_month"]
+            if item.get("id"):
+                adjustments = self.db.execute("SELECT * FROM payroll_adjustments WHERE payroll_item_id=? ORDER BY id", (item["id"],)).fetchall()
+                item["adjustments"] = [dict(value) | {"amount": cents_value(value["amount_cents"]), "system_generated": bool(value["system_generated"])} for value in adjustments]
             return item
 
         def payroll_payload(self, run_id: int) -> dict[str, Any]:
@@ -9024,14 +9310,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
             rows=self.db.execute("SELECT * FROM payroll_items WHERE run_id=? ORDER BY employee_name",(run_id,)).fetchall()
             items=[]
-            totals={"basic_cents":0,"allowances_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
+            totals={"basic_cents":0,"allowances_cents":0,"bonus_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
             for row in rows:
                 item=self.payroll_item_payload(row)
                 for key in totals: totals[key]+=int(item[key])
                 items.append(item)
             result=dict(run)|{"items":items,"employee_count":len(items)}
             for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
-            result["gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
+            result["contract_gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
+            result["contract_gross"] = cents_value(result["contract_gross_cents"])
+            result["gross_cents"] = result["contract_gross_cents"] + totals["bonus_cents"]
             result["gross"] = cents_value(result["gross_cents"])
             result["total_deductions_cents"] = totals["deductions_cents"] + totals["advance_cents"]
             result["total_deductions"] = cents_value(result["total_deductions_cents"])
@@ -9048,9 +9336,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user=self.require_permission("payroll.manage"); data=self.read_json(); month=str(data.get("payroll_month",data.get("month","")))
             if not self.has_privileged_people_access(user,"employee.view"): raise APIError(403,"إدارة المسيرات متاحة للإدارة المخولة فقط.","forbidden")
             if not re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])",month): raise APIError(422,"الشهر يجب أن يكون YYYY-MM.","validation_error")
-            allowances=money_cents(data.get("allowances",0),"allowances"); deductions=money_cents(data.get("deductions",0),"deductions"); stamp=now_iso()
+            allowances=money_cents(data.get("allowances",0),"allowances")
+            bonus=money_cents(data.get("bonus",0),"bonus")
+            deductions=money_cents(data.get("deductions",0),"deductions")
+            bonus_reason=optional_text(data,"bonus_reason",500)
+            deduction_reason=optional_text(data,"deduction_reason",500)
+            if bonus and not bonus_reason:
+                raise APIError(422,"سبب البونص مطلوب.","validation_error",{"field":"bonus_reason"})
+            if deductions and not deduction_reason:
+                raise APIError(422,"سبب الخصم مطلوب.","validation_error",{"field":"deduction_reason"})
+            stamp=now_iso()
             if self.db.execute("SELECT 1 FROM payroll_runs WHERE payroll_month=?",(month,)).fetchone(): raise APIError(409,"يوجد مسير لهذا الشهر.","duplicate_payroll_run")
             employees=self.db.execute(employee_query(True)+" WHERE e.active=1 ORDER BY e.full_name").fetchall()
+            policy=self.db.execute("SELECT late_deduction_enabled,late_threshold_minutes,late_deduction_unit_minutes,late_penalty_days_per_unit FROM organization WHERE id=1").fetchone()
             with self.db:
                 cur=self.db.execute("INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES(?,?,?,?)",(month,user["id"],stamp,stamp)); run_id=int(cur.lastrowid)
                 for employee in employees:
@@ -9058,15 +9356,92 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     employee_allowances=money_cents(salary_breakdown_from_row(employee)["allowances_total"],"allowances")
                     installment=self.db.execute("SELECT COALESCE(SUM(ai.amount_cents),0) FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id WHERE a.employee_id=? AND a.status='approved' AND ai.due_month=? AND ai.status='scheduled'",(employee["id"],month)).fetchone()[0]
                     total_allowances=employee_allowances+allowances
-                    net=max(0,basic+total_allowances-deductions-int(installment))
-                    self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,total_allowances,deductions,int(installment),net))
-                audit(self.db,user["id"],"payroll.create","payroll_run",run_id,{"month":month,"employees":len(employees)})
+                    item_cur=self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,bonus_cents,base_deductions_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,0,0,0,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,total_allowances,int(installment),max(0,basic+total_allowances-int(installment))))
+                    item_id=int(item_cur.lastrowid)
+                    if bonus:
+                        self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,'bonus',?,?,?,0,?)",(run_id,item_id,employee["id"],bonus,bonus_reason,user["id"],stamp))
+                    if deductions:
+                        self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,'deduction',?,?,?,0,?)",(run_id,item_id,employee["id"],deductions,deduction_reason,user["id"],stamp))
+                    if policy and bool(policy["late_deduction_enabled"]):
+                        late=self.monthly_lateness_summary(int(employee["id"]),month)["unexcused_minutes"]
+                        threshold=int(policy["late_threshold_minutes"])
+                        if late>threshold:
+                            units=math.ceil((late-threshold)/int(policy["late_deduction_unit_minutes"]))
+                            penalty_days=units*int(policy["late_penalty_days_per_unit"])
+                            contract_gross = basic + total_allowances
+                            penalty=min(contract_gross,round((contract_gross/30)*penalty_days))
+                            if penalty>0:
+                                reason=f"خصم تأخير تلقائي: {late} دقيقة بدون إذن، بعد سماح {threshold} دقيقة، {penalty_days} يوم من الأجر التعاقدي"
+                                self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,'lateness',?,?,?,1,?)",(run_id,item_id,employee["id"],penalty,reason,user["id"],stamp))
+                    self.recalculate_payroll_item(item_id)
+                audit(self.db,user["id"],"payroll.create","payroll_run",run_id,{"month":month,"employees":len(employees),"bonus_cents":bonus,"deduction_cents":deductions,"lateness_policy_enabled":bool(policy and policy["late_deduction_enabled"])})
             self.send_json(201,{"run":self.payroll_payload(run_id)})
 
         def api_payroll_run_get(self, run_id: int) -> None:
             user=self.require_permission("salary.view")
             if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"مسيرات الرواتب متاحة للإدارة المخولة فقط.","forbidden")
             self.send_json(200,{"run":self.payroll_payload(run_id)})
+
+        def api_payroll_adjustment_post(self, run_id: int) -> None:
+            user=self.require_permission("payroll.manage")
+            if not self.has_privileged_people_access(user,"employee.view"):
+                raise APIError(403,"إدارة تعديلات المسير متاحة للموارد البشرية ومدير النظام فقط.","forbidden")
+            run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
+            if not run:
+                raise APIError(404,"مسير الرواتب غير موجود.","not_found")
+            if run["status"]!="draft":
+                raise APIError(409,"لا يمكن تعديل البنود بعد إرسال المسير للمراجعة.","payroll_locked")
+            data=self.read_json(); kind=str(data.get("kind") or "").strip().lower()
+            if kind not in {"bonus","deduction","violation"}:
+                raise APIError(422,"نوع التعديل يجب أن يكون بونص أو خصماً أو مخالفة.","validation_error",{"field":"kind"})
+            amount=money_cents(data.get("amount"),"amount")
+            if amount<=0:
+                raise APIError(422,"قيمة التعديل يجب أن تكون أكبر من صفر.","validation_error",{"field":"amount"})
+            reason=require_text(data,"reason",500)
+            scope=str(data.get("scope") or "employee")
+            if scope=="all":
+                items=self.db.execute("SELECT id,employee_id FROM payroll_items WHERE run_id=? ORDER BY id",(run_id,)).fetchall()
+            elif scope=="employees":
+                raw_ids=data.get("employee_ids")
+                if not isinstance(raw_ids,list) or not raw_ids or len(raw_ids)>10000:
+                    raise APIError(422,"قائمة الموظفين غير صالحة.","validation_error",{"field":"employee_ids"})
+                try: employee_ids=sorted({int(value) for value in raw_ids})
+                except (TypeError,ValueError) as exc: raise APIError(422,"قائمة الموظفين غير صالحة.","validation_error",{"field":"employee_ids"}) from exc
+                placeholders=",".join("?" for _ in employee_ids)
+                items=self.db.execute(f"SELECT id,employee_id FROM payroll_items WHERE run_id=? AND employee_id IN ({placeholders})",(run_id,*employee_ids)).fetchall()
+                if len(items)!=len(employee_ids):
+                    raise APIError(422,"بعض الموظفين غير موجودين في هذا المسير.","validation_error",{"field":"employee_ids"})
+            else:
+                employee_id=as_int(data.get("employee_id"),"employee_id",1)
+                item=self.db.execute("SELECT id,employee_id FROM payroll_items WHERE run_id=? AND employee_id=?",(run_id,employee_id)).fetchone()
+                if not item:
+                    raise APIError(404,"الموظف غير موجود في هذا المسير.","not_found")
+                items=[item]
+            stamp=now_iso(); adjustment_ids=[]
+            with self.db:
+                for item in items:
+                    cursor=self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,?,?,?,?,0,?)",(run_id,item["id"],item["employee_id"],kind,amount,reason,user["id"],stamp))
+                    adjustment_ids.append(int(cursor.lastrowid)); self.recalculate_payroll_item(int(item["id"]))
+                self.db.execute("UPDATE payroll_runs SET updated_at=? WHERE id=?",(stamp,run_id))
+                audit(self.db,user["id"],"payroll.adjustment_add","payroll_run",run_id,{"kind":kind,"amount_cents":amount,"reason":reason,"scope":scope,"employee_count":len(items),"adjustment_ids":adjustment_ids})
+            self.send_json(201,{"run":self.payroll_payload(run_id),"adjustment_count":len(adjustment_ids)})
+
+        def api_payroll_adjustment_delete(self, adjustment_id: int) -> None:
+            user=self.require_permission("payroll.manage")
+            row=self.db.execute("""SELECT a.*,r.status FROM payroll_adjustments a
+                                  JOIN payroll_runs r ON r.id=a.run_id WHERE a.id=?""",(adjustment_id,)).fetchone()
+            if not row:
+                raise APIError(404,"بند التعديل غير موجود.","not_found")
+            if row["status"]!="draft":
+                raise APIError(409,"لا يمكن تعديل البنود بعد إرسال المسير للمراجعة.","payroll_locked")
+            if bool(row["system_generated"]):
+                raise APIError(409,"البند المحسوب آلياً من سياسة التأخير لا يُحذف يدوياً؛ صحح الحضور أو السياسة ثم أعد إنشاء المسير.","system_adjustment_protected")
+            with self.db:
+                self.db.execute("DELETE FROM payroll_adjustments WHERE id=?",(adjustment_id,))
+                self.recalculate_payroll_item(int(row["payroll_item_id"]))
+                self.db.execute("UPDATE payroll_runs SET updated_at=? WHERE id=?",(now_iso(),row["run_id"]))
+                audit(self.db,user["id"],"payroll.adjustment_delete","payroll_adjustment",adjustment_id,{"run_id":row["run_id"],"kind":row["kind"],"amount_cents":row["amount_cents"],"reason":row["reason"]})
+            self.send_json(200,{"run":self.payroll_payload(int(row["run_id"]))})
 
         def api_payroll_transition(self, run_id: int) -> None:
             data=self.read_json(); target=str(data.get("status",data.get("action",""))); row=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
@@ -9091,8 +9466,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user=self.require_permission("salary.view")
             if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"تصدير المسيرات متاح للإدارة المخولة فقط.","forbidden")
             run=self.payroll_payload(run_id)
-            rows=[["الشهر",run["payroll_month"],"الحالة",run["status"]],["الرقم الوظيفي","الموظف","المسمى","الدرجة","الأساسي","البدلات","الاستقطاعات","قسط السلفة","الصافي"]]
-            rows += [[i["employee_no"],i["employee_name"],i["job_title"],i["job_grade"],f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["deductions"]:.2f}',f'{i["advance"]:.2f}',f'{i["net"]:.2f}'] for i in run["items"]]
+            rows=[["الشهر",run["payroll_month"],"الحالة",run["status"]],["الرقم الوظيفي","الموظف","المسمى","الدرجة","الأساسي","البدلات","البونص","الراتب الإجمالي","الاستقطاعات","قسط السلفة","أسباب التعديلات","الصافي"]]
+            rows += [[i["employee_no"],i["employee_name"],i["job_title"],i["job_grade"],f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["bonus"]:.2f}',f'{i["gross"]:.2f}',f'{i["deductions"]:.2f}',f'{i["advance"]:.2f}'," | ".join(f"{a['kind']}: {a['reason']} ({a['amount']:.2f})" for a in i.get("adjustments",[])),f'{i["net"]:.2f}'] for i in run["items"]]
             self.send_csv(f'payroll-{run["payroll_month"]}.csv',rows)
 
         def api_my_payslips(self) -> None:

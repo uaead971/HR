@@ -23,6 +23,11 @@ CREATE TABLE IF NOT EXISTS organization (
   visual_identity_surface TEXT NOT NULL DEFAULT 'both' CHECK (visual_identity_surface IN ('login','dashboard','both')),
   visual_identity_interval_seconds INTEGER NOT NULL DEFAULT 20 CHECK (visual_identity_interval_seconds BETWEEN 5 AND 300),
   visual_identity_overlay INTEGER NOT NULL DEFAULT 58 CHECK (visual_identity_overlay BETWEEN 20 AND 90),
+  late_deduction_enabled INTEGER NOT NULL DEFAULT 0 CHECK (late_deduction_enabled IN (0,1)),
+  late_warning_minutes INTEGER NOT NULL DEFAULT 40 CHECK (late_warning_minutes BETWEEN 1 AND 10080),
+  late_threshold_minutes INTEGER NOT NULL DEFAULT 60 CHECK (late_threshold_minutes BETWEEN 1 AND 10080),
+  late_deduction_unit_minutes INTEGER NOT NULL DEFAULT 60 CHECK (late_deduction_unit_minutes BETWEEN 1 AND 1440),
+  late_penalty_days_per_unit INTEGER NOT NULL DEFAULT 1 CHECK (late_penalty_days_per_unit BETWEEN 1 AND 30),
   card_template TEXT NOT NULL DEFAULT 'portrait_orbit' CHECK (card_template IN ('portrait_orbit','executive_horizontal','minimal_vertical')),
   card_primary_color TEXT NOT NULL DEFAULT '#123d34',
   card_accent_color TEXT NOT NULL DEFAULT '#c6a15b',
@@ -154,6 +159,7 @@ CREATE TABLE IF NOT EXISTS employees (
   profession_allowance REAL NOT NULL DEFAULT 0 CHECK (profession_allowance >= 0),
   other_allowance REAL NOT NULL DEFAULT 0 CHECK (other_allowance >= 0),
   manual_allowances_json TEXT NOT NULL DEFAULT '[]',
+  rest_days_override TEXT,
   photo_data TEXT,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
   termination_date TEXT,
@@ -218,7 +224,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','hr','general_manager','manager','employee')),
+  role TEXT NOT NULL CHECK (role IN ('admin','hr','manager','employee')),
   password_hash TEXT NOT NULL,
   password_salt TEXT NOT NULL,
   employee_id INTEGER UNIQUE,
@@ -665,6 +671,19 @@ CREATE TABLE IF NOT EXISTS notification_recipients (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS lateness_alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  alert_month TEXT NOT NULL,
+  alert_type TEXT NOT NULL CHECK (alert_type IN ('warning','threshold')),
+  late_minutes INTEGER NOT NULL,
+  notification_id INTEGER,
+  created_at TEXT NOT NULL,
+  UNIQUE(employee_id, alert_month, alert_type),
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS document_expiry_alerts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   document_id INTEGER NOT NULL,
@@ -844,6 +863,8 @@ CREATE TABLE IF NOT EXISTS payroll_items (
   job_grade TEXT NOT NULL DEFAULT '',
   basic_cents INTEGER NOT NULL,
   allowances_cents INTEGER NOT NULL DEFAULT 0,
+  bonus_cents INTEGER NOT NULL DEFAULT 0,
+  base_deductions_cents INTEGER NOT NULL DEFAULT 0,
   deductions_cents INTEGER NOT NULL DEFAULT 0,
   advance_cents INTEGER NOT NULL DEFAULT 0,
   net_cents INTEGER NOT NULL,
@@ -851,6 +872,25 @@ CREATE TABLE IF NOT EXISTS payroll_items (
   FOREIGN KEY (run_id) REFERENCES payroll_runs(id) ON DELETE CASCADE,
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE RESTRICT
 );
+
+CREATE TABLE IF NOT EXISTS payroll_adjustments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  payroll_item_id INTEGER NOT NULL,
+  employee_id INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('bonus','deduction','violation','lateness')),
+  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+  reason TEXT NOT NULL,
+  created_by INTEGER,
+  system_generated INTEGER NOT NULL DEFAULT 0 CHECK (system_generated IN (0,1)),
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES payroll_runs(id) ON DELETE CASCADE,
+  FOREIGN KEY (payroll_item_id) REFERENCES payroll_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE RESTRICT,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_payroll_adjustments_item ON payroll_adjustments(payroll_item_id,id);
 
 CREATE TABLE IF NOT EXISTS advances (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

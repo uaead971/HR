@@ -98,8 +98,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         public = APIClient(self.base_url)
         health = public.request("GET", "/api/health")
         self.assertTrue(health["ok"])
-        self.assertEqual(hr_server.APP_VERSION, "5.7.0")
-        self.assertEqual(health["version"], "5.7.0")
+        self.assertEqual(hr_server.APP_VERSION, "5.8.0")
+        self.assertEqual(health["version"], "5.8.0")
         org = public.request("GET", "/api/org")["organization"]
         self.assertTrue(org["display_name"])
         public.request("GET", "/api/auth/me", expected=401)
@@ -157,8 +157,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("alertMessage('لا يملك حسابك صلاحية فتح هذه الوحدة.'", app)
         self.assertIn('integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="', index)
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
 
     def test_52_v54_visual_identity_crud_publish_rbac_audit_restart_and_frontend_contract(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -259,7 +259,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("استوديو العلامة المؤسسية", i18n)
         self.assertIn("Organization brand studio", i18n)
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.7.0', index)
+            self.assertIn(f'{asset}?v=5.8.0', index)
 
     def test_53_v54_migrates_v532_visual_identity_without_changing_tenant_data(self):
         with tempfile.TemporaryDirectory(prefix="hr-v54-migration-") as folder:
@@ -485,7 +485,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 (manager_id, "employee_report.view"),
             )
             permissions.commit()
-        manager.request("POST", f"/api/employees/{employee_id}/comprehensive-report", {"date_from": period_start.isoformat(), "date_to": period_end.isoformat()})
+        manager.request(
+            "POST", f"/api/employees/{employee_id}/comprehensive-report",
+            {"date_from": period_start.isoformat(), "date_to": period_end.isoformat()}, expected=403,
+        )
         manager.request(
             "POST", f"/api/employees/{employee_id}/comprehensive-report/export",
             {"format": "print_pdf", "date_from": period_start.isoformat(), "date_to": period_end.isoformat()}, expected=403,
@@ -578,7 +581,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.7.0', index)
+            self.assertIn(f'{asset}?v=5.8.0', index)
         for token in ("--mineral-950:#071b22", "--mineral-900:#0b2530", "--emerald-700:#0e6655", "--bronze-500:#c99545", "--parchment-100:#f4f2ec"):
             self.assertIn(token, styles)
         for symbol in ("dashboard", "home", "users", "org", "map", "clock", "calendar", "shift", "overtime", "wallet", "certificate", "loan", "target", "recruitment", "onboarding", "learning", "benefits", "offboarding", "bell", "mail", "report", "shield", "settings", "search", "menu", "print", "edit", "archive", "download"):
@@ -611,7 +614,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.7.0', index)
+            self.assertIn(f'{asset}?v=5.8.0', index)
         self.assertIn('.sidebar-collapsed .sidebar,.sidebar-collapsed .sidebar.open{width:min(310px,88vw)}', styles)
         self.assertIn('.sidebar-collapsed .sidebar a>span,', styles)
         self.assertIn('.sidebar-collapsed .sidebar .nav-label,', styles)
@@ -643,7 +646,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.7.0', index)
+            self.assertIn(f'{asset}?v=5.8.0', index)
         self.assertIn("function metricValue(value)", app)
         self.assertIn("<small>${esc(tr(m[0]))}</small>", app)
         self.assertIn("<span>${esc(tr(m[2]))}</span>", app)
@@ -676,9 +679,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         app = (root / "app.js").read_text(encoding="utf-8")
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('i18n.js?v=5.7.0', index)
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('i18n.js?v=5.8.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
         self.assertGreaterEqual(index.count('data-locale="ar"'), 2)
         self.assertGreaterEqual(index.count('data-locale="en"'), 2)
         self.assertIn("khaisha.ui.locale", index + i18n)
@@ -775,7 +778,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("if(requested&&!requestedAllowed)history.replaceState", app)
         index = (root / "index.html").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.7.0', index)
+            self.assertIn(f'{asset}?v=5.8.0', index)
 
         required_performance_resources = (
             "الفترة من", "متبقٍ {days} يوم", "مسودة الموظف", "أهداف الموظف",
@@ -849,8 +852,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             r"api\(`/api/evaluations/\$\{state\.evaluation\.id\}/submit`,"
             r"\{method:'POST'\}\)",
         )
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
 
     def test_42_v512_dossier_observer_and_mobile_weight_badge_contract(self):
         root = Path(__file__).parents[1]
@@ -875,8 +878,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("flex:0 0 auto", weight_rule.group(1))
         self.assertIn("min-width:max-content", weight_rule.group(1))
         self.assertIn("@media(max-width:440px)", styles)
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
 
     def test_keep_alive_connection_refreshes_authentication_each_request(self):
         """Anonymous -> login -> authenticated -> logout must work on one TCP connection."""
@@ -1170,7 +1173,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
     def test_08_payroll_approval_employee_payslip_and_csv(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         month = f"{date.today().year}-{date.today().month:02d}"
-        run = hr.request("POST", "/api/payroll/runs", {"payroll_month": month, "allowances": 100, "deductions": 25}, expected=201)["run"]
+        run = hr.request(
+            "POST", "/api/payroll/runs",
+            {"payroll_month": month, "allowances": 100, "deductions": 25, "deduction_reason": "خصم اختبار موثق"},
+            expected=201,
+        )["run"]
         self.assertGreater(run["net"], 0)
         run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})["run"]
         run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"})["run"]
@@ -1691,8 +1698,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         sources = {name: (root / name).read_text(encoding="utf-8") for name in ("index.html", "app.js", "styles.css", "server.py", "schema.sql")}
         index, app, styles = sources["index.html"], sources["app.js"], sources["styles.css"]
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
         for template in ("portrait_orbit", "executive_horizontal", "minimal_vertical"):
             self.assertIn(f'data-card-template-choice="{template}"', index)
             self.assertIn(f"template-{template}", styles)
@@ -1743,11 +1750,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         protected = next(x for x in users if x["email"] == "admin@demo.ae")
         self.assertTrue(protected["is_super_admin"])
         employee.request("GET", "/api/dashboard", expected=403)
-        granted = admin.request("PATCH", f"/api/admin/users/{employee_user['id']}/permissions", {"overrides": [{"permission": "dashboard.view", "granted": True}]})["user"]
-        self.assertIn("dashboard.view", granted["permissions"])
-        self.assertEqual(granted["permission_reasons"]["dashboard.view"], "explicit_grant")
-        dashboard = employee.request("GET", "/api/dashboard")
-        self.assertIn("employees_active", dashboard["metrics"])
+        admin.request(
+            "PATCH", f"/api/admin/users/{employee_user['id']}/permissions",
+            {"overrides": [{"permission": "dashboard.view", "granted": True}]}, expected=422,
+        )
         denied = admin.request("PATCH", f"/api/admin/users/{employee_user['id']}/permissions", {"overrides": [{"permission": "dashboard.view", "granted": False}]})["user"]
         self.assertNotIn("dashboard.view", denied["permissions"])
         self.assertEqual(denied["permission_reasons"]["dashboard.view"], "explicit_deny")
@@ -1876,8 +1882,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("enforceDynamicPermissions($('#modalBody'))", app)
         employee = self.client("employee@demo.ae", "Emp@12345")
         permissions = employee.request("GET", "/api/auth/me")["permissions"]
-        self.assertIn("branch.view", permissions)
+        self.assertNotIn("branch.view", permissions)
         self.assertNotIn("branch.manage", permissions)
+        employee.request("GET", "/api/branches", expected=403)
         employee.request("DELETE", "/api/branches/1", expected=403)
 
     def test_28_v461_dashboard_absence_is_shift_leave_rest_and_time_aware(self):
@@ -1933,8 +1940,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('class="org-fit-stage"', app)
         self.assertIn(".org-fit-stage.fitted{overflow:hidden}", styles)
         self.assertIn("MutationObserver", app)
-        self.assertIn("styles.css?v=5.7.0", index)
-        self.assertIn("app.js?v=5.7.0", index)
+        self.assertIn("styles.css?v=5.8.0", index)
+        self.assertIn("app.js?v=5.8.0", index)
         self.assertIn('rel="icon" href="favicon.svg"', index)
 
     def test_30_v47_salary_certificate_serial_barcode_integrity_and_verification(self):
@@ -1953,8 +1960,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
         employee.request("POST", "/api/salary-certificates/verify", {"code": certificate["verification_code"]}, expected=403)
 
-        # A permission grant is authoritative even when the account keeps the
-        # employee role; verification must not be hard-coded to HR/admin roles.
+        # A hand-edited legacy grant must not exceed the employee role ceiling.
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
             employee_user_id = db.execute("SELECT id FROM users WHERE email=?", ("employee@demo.ae",)).fetchone()[0]
             db.execute(
@@ -1963,9 +1969,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             )
             db.commit()
         try:
-            self.assertEqual(employee.request("GET", "/api/salary-certificates/history")["items"][0]["id"], certificate["id"])
-            employee_verified = employee.request("POST", "/api/salary-certificates/verify", {"code": certificate["verification_code"]})
-            self.assertTrue(employee_verified["valid"])
+            employee.request("GET", "/api/salary-certificates/history", expected=403)
+            employee.request("POST", "/api/salary-certificates/verify", {"code": certificate["verification_code"]}, expected=403)
         finally:
             with contextlib.closing(sqlite3.connect(self.db_path)) as db:
                 db.execute("DELETE FROM user_permissions WHERE user_id=? AND permission=?", (employee_user_id, "salary_certificate.verify"))
@@ -1975,7 +1980,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertTrue(verified["valid"])
         self.assertEqual(verified["status"], "valid")
         self.assertEqual(verified["certificate"]["employee"]["id"], employee_id)
-        self.assertEqual(verified["certificate"]["verification_count"], 2)
+        self.assertEqual(verified["certificate"]["verification_count"], 1)
         self.assertTrue(verified["issuer"]["name"])
 
         missing = hr.request("POST", "/api/salary-certificates/verify", {"code": "VRF-2099-FFFF-FFFF-FFFF"})
@@ -2070,13 +2075,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         ):
             employee.request("GET", path, expected=403)
 
-        team = manager.request("GET", "/api/employees")
-        self.assertEqual(team["scope"], "team_identity_only")
-        report = next(row for row in team["items"] if row["id"] == employee_id)
-        self.assertEqual(set(report), {"id", "employee_no", "full_name"})
-        minimal_profile = manager.request("GET", f"/api/employees/{employee_id}")
-        self.assertEqual(minimal_profile["scope"], "team_identity_only")
-        self.assertEqual(set(minimal_profile["employee"]), {"id", "employee_no", "full_name"})
+        manager_directory = manager.request("GET", "/api/employees")
+        self.assertEqual(manager_directory["scope"], "self")
+        self.assertEqual([row["id"] for row in manager_directory["items"]], [manager_id])
+        manager.request("GET", f"/api/employees/{employee_id}", expected=403)
         for path in (
             f"/api/employees/{employee_id}/documents",
             f"/api/employees/{employee_id}/actions",
@@ -2152,7 +2154,6 @@ class HRAPIEndToEndTests(unittest.TestCase):
         index = (root / "index.html").read_text(encoding="utf-8")
         app = (root / "app.js").read_text(encoding="utf-8")
         self.assertIn('data-permission-any="employee.view,employee.team"', index)
-        self.assertIn("team_identity_only", app)
         self.assertIn("team_attendance", app)
         self.assertIn("اعتماد نهائي", app)
 
@@ -2398,8 +2399,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server = (root / "server.py").read_text(encoding="utf-8")
         schema = (root / "schema.sql").read_text(encoding="utf-8")
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
         for marker in ("evaluationWorkflowRibbon", "evaluationPrivacyGate", "myEvaluationHistory", "managerEvaluationForm", "hrApproveForm", "evaluationGrievanceForm"):
             self.assertIn(marker, index + app)
         for endpoint in ("manager-review", "hr-review", "/grievance", "evaluation-grievances"):
@@ -2811,8 +2812,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("@media(max-width:440px)", styles)
         self.assertIn("overflow-x:hidden", styles)
         self.assertIn("evaluation.cycle.manage", app + schema + (root / "server.py").read_text(encoding="utf-8"))
-        self.assertIn('styles.css?v=5.7.0', index)
-        self.assertIn('app.js?v=5.7.0', index)
+        self.assertIn('styles.css?v=5.8.0', index)
+        self.assertIn('app.js?v=5.8.0', index)
 
 
     def test_57_v56_profile_fields_age_privacy_permissions_and_emergency_contacts(self):
@@ -2865,11 +2866,14 @@ class HRAPIEndToEndTests(unittest.TestCase):
         admin.request("PATCH", f"/api/employees/{target['id']}", {"birth_date": (date.today() + timedelta(days=1)).isoformat()}, expected=422)
         admin.request("PATCH", f"/api/employees/{target['id']}", {"birth_date": "2000-01-01", "passport_expires_on": "1999-12-31"}, expected=422)
 
-        admin.request("PATCH", f"/api/admin/users/{employee_user['id']}/permissions", {"overrides": [{"permission": "employee.profile.edit", "granted": True}]})
-        employee.request("PATCH", f"/api/employees/{target['id']}", {"place_of_birth": "دبي"})
+        admin.request(
+            "PATCH", f"/api/admin/users/{employee_user['id']}/permissions",
+            {"overrides": [{"permission": "employee.profile.edit", "granted": True}]}, expected=422,
+        )
+        employee.request("PATCH", f"/api/employees/{target['id']}", {"place_of_birth": "دبي"}, expected=403)
         explicitly_scoped = employee.request("GET", "/api/employees")
-        self.assertEqual(explicitly_scoped["scope"], "all")
-        self.assertNotIn("passport_no", next(item for item in explicitly_scoped["items"] if item["id"] == target["id"]))
+        self.assertEqual(explicitly_scoped["scope"], "self")
+        self.assertNotIn(target["id"], {item["id"] for item in explicitly_scoped["items"]})
         admin.request("PATCH", f"/api/admin/users/{employee_user['id']}/permissions", {"overrides": [{"permission": "employee.profile.edit", "granted": False}]})
         employee.request("PATCH", f"/api/employees/{target['id']}", {"place_of_birth": "الشارقة"}, expected=403)
         admin.request("PATCH", f"/api/admin/users/{employee_user['id']}/permissions", {"overrides": []})
@@ -3015,7 +3019,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server_source = (root / "server.py").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.7.0', index)
+            self.assertIn(f'{asset}?v=5.8.0', index)
         for marker in ("employee.profile.edit", "employee.emergency.manage", "employee_emergency_contacts", "api_attendance_range", "invalid_date_range"):
             self.assertIn(marker, server_source + app)
         for marker in ("employeeProfileForm", "emergencyContactForm", "profile-completeness", "attendanceRangeForm", "attendanceSummary", "attendance-table-wrap"):
@@ -3175,9 +3179,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         }, expected=201)["employee"]
         hr.request("PATCH", f"/api/employees/{employee['id']}", {"institution_role": "general_manager"})
         gm = self.client(email, "GmProfile@12345")
-        permissions = gm.request("GET", "/api/auth/me")["permissions"]
-        self.assertIn("*", permissions)
-        admin.request("PATCH", f"/api/admin/users/{gm.request('GET', '/api/auth/me')['user']['id']}/permissions", {"overrides": []}, expected=409)
+        gm_identity = gm.request("GET", "/api/auth/me")
+        self.assertEqual(gm_identity["user"]["role"], "employee")
+        self.assertNotIn("*", gm_identity["permissions"])
+        admin.request("PATCH", f"/api/admin/users/{gm_identity['user']['id']}/permissions", {"overrides": []})
         sent = hr.request("POST", "/api/notifications", {
             "title": "رسالة قابلة للإدارة", "body": "النص الأول", "message_type": "notice",
             "audience_type": "employees", "employee_ids": [employee["id"]],
@@ -3202,14 +3207,13 @@ class HRAPIEndToEndTests(unittest.TestCase):
         account = next(item for item in admin.request("GET", "/api/admin/users")["items"] if item["email"] == email)
         catalog = admin.request("GET", "/api/admin/permissions/catalog")["groups"]
         all_permissions = [permission["key"] for group in catalog for permission in group["permissions"]]
-        updated = admin.request("PATCH", f"/api/admin/users/{account['id']}/permissions", {
+        admin.request("PATCH", f"/api/admin/users/{account['id']}/permissions", {
             "overrides": [{"permission": permission, "granted": True} for permission in all_permissions],
-        })["user"]
-        self.assertIn("organization.view", updated["permissions"])
+        }, expected=422)
         viewer = self.client(email, "OrgViewer@12345")
-        self.assertIn("organization.view", viewer.request("GET", "/api/auth/me")["permissions"])
-        self.assertEqual(viewer.request("GET", "/api/org/grid")["view"], "grid")
-        self.assertEqual(viewer.request("GET", "/api/org/hierarchy?view=hierarchical")["view"], "hierarchical")
+        self.assertNotIn("organization.view", viewer.request("GET", "/api/auth/me")["permissions"])
+        viewer.request("GET", "/api/org/grid", expected=403)
+        viewer.request("GET", "/api/org/hierarchy?view=hierarchical", expected=403)
 
     def test_66_v61_employee_service_archive_and_rehire_preserves_history(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3243,6 +3247,222 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(rehired["hire_date"], "2026-09-01")
         self.assertEqual(len(hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"]), 1)
         self.assertIsNotNone(hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"][0]["rehired_at"])
+
+    def test_67_v58_four_role_ceiling_and_employee_surface_are_strict(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        employee = self.client("employee@demo.ae", "Emp@12345")
+
+        users = admin.request("GET", "/api/admin/users")["items"]
+        self.assertTrue({row["role"] for row in users}.issubset({"admin", "hr", "manager", "employee"}))
+        self.assertEqual(set(manager.request("GET", "/api/auth/me")["permissions"]), {"attendance.team", "leave.team"})
+        self.assertEqual(employee.request("GET", "/api/auth/me")["permissions"], [])
+
+        suffix = uuid.uuid4().hex[:8]
+        admin.request("POST", "/api/employees", {
+            "employee_no": f"ROLE-{suffix}", "full_name": "دور قديم مرفوض",
+            "email": f"legacy-role-{suffix}@demo.ae", "hire_date": "2024-01-01",
+            "create_user": True, "password": "Legacy@12345", "role": "general_manager",
+        }, expected=422)
+        hr.request("POST", "/api/employees", {
+            "employee_no": f"ADMIN-{suffix}", "full_name": "مدير نظام غير مصرح",
+            "email": f"admin-role-{suffix}@demo.ae", "hire_date": "2024-01-01",
+            "create_user": True, "password": "AdminRole@12345", "role": "admin",
+        }, expected=422)
+
+        for path in ("/api/branches", "/api/shifts", "/api/job-grades", "/api/job-titles"):
+            employee.request("GET", path, expected=403)
+        own = employee.request("GET", "/api/employees")
+        self.assertEqual(own["scope"], "self")
+        self.assertEqual(len(own["items"]), 1)
+
+        root = Path(__file__).parents[1]
+        schema = (root / "schema.sql").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        self.assertIn("role IN ('admin','hr','manager','employee')", schema)
+        self.assertIn("const roleLabels={admin:'مدير النظام',hr:'رئيس قسم الموارد البشرية',manager:'مسؤول مباشر',employee:'موظف'}", app)
+        self.assertNotIn('<option value="general_manager">مدير عام</option>', app)
+
+    def test_68_v58_permission_limits_rest_override_and_excused_lateness(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        manager_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
+        branch = hr.request("GET", "/api/branches")["items"][0]
+        shift = next(row for row in hr.request("GET", "/api/shifts")["items"] if row["name"] == "الدوام الإداري")
+        suffix = uuid.uuid4().hex[:8]
+        email = f"permission-{suffix}@demo.ae"
+        created = hr.request("POST", "/api/employees", {
+            "employee_no": f"PERM-{suffix}", "full_name": "موظف استئذان وراحة",
+            "email": email, "hire_date": "2020-01-01", "branch_id": branch["id"],
+            "manager_id": manager_id, "salary": 6000, "create_user": True,
+            "password": "Permission@12345", "role": "employee",
+        }, expected=201)["employee"]
+        hr.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": created["id"], "effective_from": "2020-01-01",
+        }, expected=201)
+        updated = hr.request("PATCH", f"/api/employees/{created['id']}", {"rest_days_override": [0]})["employee"]
+        self.assertEqual(updated["rest_days_override"], [0])
+        assignment = next(
+            row for row in hr.request("GET", "/api/shifts")["assignments"]
+            if row["employee_id"] == created["id"]
+        )
+        self.assertEqual(assignment["rest_days"], [0])
+        self.assertEqual(assignment["rest_days_source"], "employee_override")
+
+        employee = self.client(email, "Permission@12345")
+        leave_types = employee.request("GET", "/api/leaves/types")
+        self.assertEqual(leave_types["work_permission_policy"], {
+            "max_requests": 2, "max_hours_per_request": 2, "max_monthly_hours": 4,
+        })
+        codes = {row["code"] for row in leave_types["items"]}
+        self.assertTrue({"weather_emergency", "force_majeure", "work_permission"}.issubset(codes))
+        permission_type = next(row for row in leave_types["items"] if row["code"] == "work_permission")
+        employee.request("POST", "/api/leaves/requests", {
+            "leave_type_id": permission_type["id"], "start_date": "2098-04-01", "end_date": "2098-04-01",
+            "start_time": "08:00", "end_time": "11:00", "reason": "أكثر من الحد اليومي",
+        }, expected=422)
+        first = employee.request("POST", "/api/leaves/requests", {
+            "leave_type_id": permission_type["id"], "start_date": "2098-04-01", "end_date": "2098-04-01",
+            "start_time": "08:00", "end_time": "10:00", "reason": "الاستئذان الأول",
+        }, expected=201)["request"]
+        employee.request("POST", "/api/leaves/requests", {
+            "leave_type_id": permission_type["id"], "start_date": "2098-04-02", "end_date": "2098-04-02",
+            "start_time": "13:00", "end_time": "15:00", "reason": "الاستئذان الثاني",
+        }, expected=201)
+        employee.request("POST", "/api/leaves/requests", {
+            "leave_type_id": permission_type["id"], "start_date": "2098-04-03", "end_date": "2098-04-03",
+            "start_time": "08:00", "end_time": "09:00", "reason": "طلب ثالث",
+        }, expected=422)
+        manager.request("POST", f"/api/leaves/requests/{first['id']}/decision", {"action": "approve"})
+        approved = hr.request("POST", f"/api/leaves/requests/{first['id']}/decision", {"action": "approve"})["request"]
+        self.assertEqual(approved["status"], "approved")
+
+        permission_day = date(2026, 8, 28)
+        emergency_day = date(2026, 8, 27)
+        rest_day = date(2026, 8, 31)
+        stamp = hr_server.now_iso()
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            permission_id = db.execute("SELECT id FROM leave_types WHERE code='work_permission'").fetchone()[0]
+            emergency_id = db.execute("SELECT id FROM leave_types WHERE code='weather_emergency'").fetchone()[0]
+            db.execute(
+                """INSERT INTO attendance(employee_id,work_date,branch_id,check_in_at,check_out_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (created["id"], permission_day.isoformat(), branch["id"], f"{permission_day}T09:10:00+04:00", f"{permission_day}T17:00:00+04:00", stamp, stamp),
+            )
+            db.execute(
+                """INSERT INTO attendance(employee_id,work_date,branch_id,check_in_at,check_out_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (created["id"], emergency_day.isoformat(), branch["id"], f"{emergency_day}T10:00:00+04:00", f"{emergency_day}T17:00:00+04:00", stamp, stamp),
+            )
+            db.execute(
+                """INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,start_time,end_time,hours,reason,status,manager_decision,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,'approved','approved',?,?)""",
+                (created["id"], permission_id, permission_day.isoformat(), permission_day.isoformat(), 0.125, "08:10", "09:10", 1, "استئذان معتمد يعوض التأخير", stamp, stamp),
+            )
+            db.execute(
+                """INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,hours,reason,status,manager_decision,created_at,updated_at)
+                   VALUES(?,?,?,?,?,0,?,'approved','approved',?,?)""",
+                (created["id"], emergency_id, emergency_day.isoformat(), emergency_day.isoformat(), 1, "ظروف جوية قهرية", stamp, stamp),
+            )
+
+        attendance = hr.request(
+            "GET", f"/api/attendance/range?date_from={emergency_day}&date_to={rest_day}&employee_id={created['id']}",
+        )
+        by_day = {row["work_date"]: row for row in attendance["items"]}
+        permission_metrics = by_day[permission_day.isoformat()]
+        self.assertEqual(permission_metrics["raw_late_minutes"], 60)
+        self.assertEqual(permission_metrics["excused_late_minutes"], 60)
+        self.assertEqual(permission_metrics["late_minutes"], 0)
+        self.assertEqual(permission_metrics["permission_credit_minutes"], 60)
+        emergency_metrics = by_day[emergency_day.isoformat()]
+        self.assertGreater(emergency_metrics["raw_late_minutes"], 0)
+        self.assertEqual(emergency_metrics["late_minutes"], 0)
+        self.assertTrue(emergency_metrics["emergency_excused"])
+        self.assertEqual(by_day[rest_day.isoformat()]["day_status"], "weekly_rest")
+
+        app = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        self.assertIn("بحد أقصى مرتان", app)
+        self.assertIn("مجموع ٤ ساعات شهرياً", app)
+        self.assertIn("تُحتسب ضمن الحضور والانصراف وتعوّض التأخير", app)
+
+    def test_69_v58_lateness_warning_auto_deduction_and_payroll_adjustments(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        hr.request("PATCH", "/api/org", {
+            "late_deduction_enabled": True, "late_warning_minutes": 40,
+            "late_threshold_minutes": 60, "late_deduction_unit_minutes": 60,
+            "late_penalty_days_per_unit": 1,
+        })
+        branch = hr.request("GET", "/api/branches")["items"][0]
+        shift = next(row for row in hr.request("GET", "/api/shifts")["items"] if row["name"] == "الدوام الإداري")
+        suffix = uuid.uuid4().hex[:8]
+        email = f"late-payroll-{suffix}@demo.ae"
+        created = hr.request("POST", "/api/employees", {
+            "employee_no": f"LATE-{suffix}", "full_name": "موظف تأخير ورواتب",
+            "email": email, "hire_date": "2020-01-01", "branch_id": branch["id"],
+            "salary": 3000, "create_user": True, "password": "LatePayroll@12345", "role": "employee",
+        }, expected=201)["employee"]
+        hr.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": created["id"], "effective_from": "2020-01-01",
+        }, expected=201)
+        employee = self.client(email, "LatePayroll@12345")
+        warning_time = datetime(2035, 3, 5, 8, 51, tzinfo=ZoneInfo("Asia/Dubai"))
+        with mock.patch.object(hr_server, "local_now", return_value=warning_time):
+            punch = employee.request("POST", "/api/attendance/punch", {
+                "action": "check_in", "latitude": branch["latitude"],
+                "longitude": branch["longitude"], "accuracy": 5,
+            })
+        self.assertEqual(punch["monthly_lateness"]["unexcused_minutes"], 41)
+        warning = next(
+            row for row in employee.request("GET", "/api/notifications/inbox")["items"]
+            if row["title"] == "تنبيه التأخير الشهري بدون إذن"
+        )
+        self.assertIn("60 دقيقة", warning["body"])
+        self.assertIn("الراتب", warning["body"])
+
+        stamp = hr_server.now_iso()
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                """INSERT INTO attendance(employee_id,work_date,branch_id,check_in_at,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?)""",
+                (created["id"], "2035-03-06", branch["id"], "2035-03-06T09:20:00+04:00", stamp, stamp),
+            )
+
+        with mock.patch.object(hr_server, "local_now", return_value=datetime(2035, 3, 31, 18, 0, tzinfo=ZoneInfo("Asia/Dubai"))):
+            lateness_report = hr.request(
+                "GET", f"/api/attendance/range?date_from=2035-03-01&date_to=2035-03-31&employee_id={created['id']}",
+            )
+        self.assertEqual(lateness_report["summary"]["raw_late_minutes"], 111)
+        self.assertEqual(lateness_report["summary"]["late_minutes"], 111)
+
+        run = hr.request("POST", "/api/payroll/runs", {"payroll_month": "2035-03"}, expected=201)["run"]
+        target = next(row for row in run["items"] if row["employee_id"] == created["id"])
+        lateness = next(row for row in target["adjustments"] if row["kind"] == "lateness")
+        self.assertTrue(lateness["system_generated"])
+        self.assertEqual(lateness["amount"], 100)
+        self.assertEqual(target["deductions"], 100)
+        self.assertEqual(target["net"], 2900)
+
+        run = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "bonus", "amount": 150, "reason": "مكافأة إنجاز", "employee_id": created["id"],
+        }, expected=201)["run"]
+        target = next(row for row in run["items"] if row["employee_id"] == created["id"])
+        self.assertEqual(target["bonus"], 150)
+        self.assertEqual(target["gross"], 3150)
+        run = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "deduction", "amount": 25, "reason": "خصم جماعي موثق", "scope": "all",
+        }, expected=201)["run"]
+        target = next(row for row in run["items"] if row["employee_id"] == created["id"])
+        self.assertEqual(target["deductions"], 125)
+        bonus = next(row for row in target["adjustments"] if row["kind"] == "bonus")
+        hr.request("DELETE", f"/api/payroll/adjustments/{lateness['id']}", expected=409)
+        run = hr.request("DELETE", f"/api/payroll/adjustments/{bonus['id']}")["run"]
+        target = next(row for row in run["items"] if row["employee_id"] == created["id"])
+        self.assertEqual(target["bonus"], 0)
+        hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})
+        hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "violation", "amount": 50, "reason": "مخالفة بعد الإقفال", "employee_id": created["id"],
+        }, expected=409)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@
   <title>خيشة - Khaisha | الموارد البشرية</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
-  <link rel="stylesheet" href="styles.css?v=5.7.0&build=20260825">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20260831">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -326,6 +326,11 @@
       <section class="page" id="settings">
         <div class="page-head"><div><span class="eyebrow">تهيئة النظام</span><h1>هوية المؤسسة والوثائق</h1><p>الاسم والشعار والختم ينعكسون فوراً على الواجهة والبطاقة وشهادة الراتب.</p></div></div>
         <div class="content-grid wide-side"><form class="card" id="organizationForm"><div class="section-head"><div><h2>بيانات المؤسسة</h2><p>تخزن الإعدادات في قاعدة البيانات.</p></div><span class="status">مفعلة</span></div><div class="form-grid"><label>اسم العرض<input name="display_name" required></label><label>الاسم القانوني<input name="legal_name" required></label><label>البريد<input name="email" type="email"></label><label>الهاتف<input name="phone"></label><label class="span-2">العنوان<input name="address"></label><label class="span-2">المدير العام للمؤسسة<select name="general_manager_employee_id" id="generalManagerEmployeeSelect"><option value="">غير محدد</option></select><small>يُسند إليه الإشراف النهائي على رؤساء الأقسام والموظفين غير المرتبطين بمسؤول مباشر.</small></label><label>اللون الأساسي<input name="primary_color" type="color" value="#123f35"></label><label>لون الإبراز<input name="accent_color" type="color" value="#c48a3a"></label></div><div class="upload-grid"><label class="upload-box">شعار المؤسسة<input name="logo" type="file" accept="image/png,image/jpeg,image/webp"><span id="logoUploadState">PNG/JPEG/WebP حتى ١٫٥ م.ب</span></label><label class="upload-box">ختم الشهادات<input name="stamp" type="file" accept="image/png,image/jpeg,image/webp"><span id="stampUploadState">صورة شفافة موصى بها</span></label></div><button class="primary" type="submit">حفظ وتطبيق الهوية</button></form><aside class="card identity-preview"><div class="brand"><span class="brand-mark logo-slot">خ</span><span><b class="org-name">خيشة - Khaisha</b><small>ورقة المراسلات</small></span></div><div class="preview-paper"><b class="org-legal-name">اسم المؤسسة القانوني</b><p>تنعكس الهوية المحفوظة على شهادة الراتب وبطاقة العمل.</p><div class="preview-stamp stamp-slot">الختم</div></div></aside></div>
+        <form class="card lateness-policy-settings" id="latenessPolicyForm" data-permission="payroll.manage">
+          <div class="section-head"><div><span class="eyebrow">سياسة التأخير بدون إذن</span><h2>التنبيه والخصم المباشر</h2><p>يُحسب التأخير الشهري بعد طرح الاستئذانات المعتمدة والظروف الجوية والطوارئ.</p></div><label class="check-row"><input name="late_deduction_enabled" type="checkbox"> تفعيل الخصم المباشر</label></div>
+          <div class="form-grid"><label>إرسال التنبيه بعد (دقيقة)<input name="late_warning_minutes" type="number" min="1" max="10080" value="40" required></label><label>السماح الشهري قبل الخصم (دقيقة)<input name="late_threshold_minutes" type="number" min="1" max="10080" value="60" required></label><label>وحدة التأخير الإضافية (دقيقة)<input name="late_deduction_unit_minutes" type="number" min="1" max="1440" value="60" required><small>تُحسب كل وحدة إضافية بدأت بعد حد السماح.</small></label><label>أيام الأجر المخصومة لكل وحدة<input name="late_penalty_days_per_unit" type="number" min="1" max="30" value="1" required><small>قيمة اليوم = الأجر التعاقدي الشهري ÷ ٣٠.</small></label></div>
+          <div class="security-callout">مثال: عند سماح ٦٠ دقيقة ووحدة ٦٠ دقيقة، أي تجاوز يبدأ وحدة خصم؛ وتظهر تفاصيل الخصم وسببه في مسير الراتب.</div><button class="primary" type="submit">حفظ سياسة التأخير</button>
+        </form>
         <section class="card visual-identity-studio" id="visualIdentityStudio" data-permission="org.manage">
           <div class="visual-studio-head"><div><span class="eyebrow">استوديو العلامة المؤسسية</span><h2>الهوية البصرية وخلفيات المؤسسة</h2><p>خصص شاشة الدخول ولوحة التحكم برسائل وصور تعبر عن ثقافة مؤسستك.</p></div><span class="visual-studio-badge"><svg class="ui-icon" aria-hidden="true"><use href="#icon-image"></use></svg> حتى ٥ شرائح</span></div>
           <div class="visual-studio-layout">
@@ -368,7 +373,7 @@
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
-  <script src="i18n.js?v=5.7.0&build=20260825-grade-scale"></script>
-  <script src="app.js?v=5.7.0&build=20260825-grade-scale"></script>
+  <script src="i18n.js?v=5.8.0&build=20260831-hr-policy"></script>
+  <script src="app.js?v=5.8.0&build=20260831-hr-policy"></script>
 </body>
 </html>
