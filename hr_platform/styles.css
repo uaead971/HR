@@ -149,7 +149,7 @@ td{padding:11px 10px;border-top:1px solid #efeee9;font-size:11px;vertical-align:
 .branch-card.compliance-expired h3{color:var(--red)}
 .branch-card footer{display:flex;justify-content:space-between;gap:8px;align-items:center}
 .map{height:440px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#e8ece7;position:relative}
-.map-fallback{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted)}
+.map-fallback{position:absolute;inset:0;z-index:1000;display:grid;place-items:center;padding:24px;background:#eef2edeb;color:var(--muted);text-align:center;pointer-events:none}
 .geo-readout{margin-top:11px;background:#f4f7f4;border-right:3px solid var(--teal);padding:10px;font-size:10px}
 .leaflet-container{font-family:Tahoma,Arial,sans-serif}
 .shift-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:13px}
@@ -355,7 +355,8 @@ body *{visibility:hidden!important}
 .leaflet-container .leaflet-pane,.leaflet-container .leaflet-control-container{direction:ltr!important}
 .leaflet-container .leaflet-popup-content{direction:rtl;text-align:right}
 .leaflet-container .leaflet-control-attribution{direction:ltr;text-align:left}
-.leaflet-container .map-fallback{display:none!important}
+.leaflet-container .maplibregl-ctrl-attrib{direction:ltr;text-align:left}
+.leaflet-container[data-map-state="ready"] .map-fallback{display:none!important}
 
 .sidebar>.brand .org-name{font-size:14px;line-height:1.35;white-space:normal;overflow:visible;text-overflow:clip;max-width:165px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2}
 
