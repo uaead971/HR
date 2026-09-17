@@ -137,10 +137,12 @@ class HRAPIEndToEndTests(unittest.TestCase):
         launcher = (root / "تشغيل التطبيق.command").read_text(encoding="utf-8")
         readme = (root / "README.md").read_text(encoding="utf-8")
         server_source = (root / "server.py").read_text(encoding="utf-8")
+        headers, _ = APIClient(self.base_url).raw_request("/")
         self.assertIn("http://localhost:${APP_PORT}/", launcher)
         self.assertIn("http://localhost:8765/", readme)
         self.assertIn('browser_host = "localhost"', server_source)
         self.assertIn("HttpOnly; SameSite=Lax", server_source)
+        self.assertEqual(headers.get("Referrer-Policy"), "strict-origin-when-cross-origin")
 
     def test_frontend_map_rtl_and_role_accurate_evaluation_regressions(self):
         root = Path(__file__).parents[1]
@@ -159,6 +161,37 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
         self.assertIn('styles.css?v=5.7.0', index)
         self.assertIn('app.js?v=5.7.0', index)
+
+    def test_openfreemap_vector_map_contract_for_development_and_production(self):
+        root = Path(__file__).parents[1]
+        for frontend in (root, root / "hr_platform"):
+            with self.subTest(frontend=frontend.name):
+                index = (frontend / "index.html").read_text(encoding="utf-8")
+                app = (frontend / "app.js").read_text(encoding="utf-8")
+                styles = (frontend / "styles.css").read_text(encoding="utf-8")
+
+                leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
+                maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
+                bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
+                application_script = index.index("app.js?v=5.7.0&build=20260917-openfreemap")
+                self.assertLess(leaflet_script, maplibre_script)
+                self.assertLess(maplibre_script, bridge_script)
+                self.assertLess(bridge_script, application_script)
+                self.assertIn("maplibre-gl@5.24.0/dist/maplibre-gl.css", index)
+
+                self.assertIn("typeof window.maplibregl!=='undefined'", app)
+                self.assertIn("typeof window.L.maplibreGL==='function'", app)
+                self.assertIn("L.maplibreGL({style:'https://tiles.openfreemap.org/styles/liberty'", app)
+                self.assertIn("attributionControl:{customAttribution:", app)
+                self.assertIn("getMaplibreMap()", app)
+                self.assertIn("vectorMap.once('load',ready)", app)
+                self.assertIn("vectorMap.on('error'", app)
+                self.assertNotIn("tile.openstreetmap.org", app)
+
+                self.assertIn(".leaflet-container{direction:ltr!important", styles)
+                self.assertIn(".leaflet-container .leaflet-popup-content{direction:rtl", styles)
+                self.assertIn(".leaflet-container .leaflet-control-attribution{direction:ltr", styles)
+                self.assertIn('.leaflet-container[data-map-state="ready"] .map-fallback', styles)
 
     def test_52_v54_visual_identity_crud_publish_rbac_audit_restart_and_frontend_contract(self):
         admin = self.client("admin@demo.ae", "Admin@123")
