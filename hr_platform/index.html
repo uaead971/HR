@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261007-production-r2">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261007-production-r4">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -202,6 +202,35 @@
           </form><p class="field-error" id="attendanceRangeError" role="alert" hidden></p>
         </article>
         <div class="attendance-period-summary" id="attendanceSummary" aria-live="polite"></div>
+        <section class="attendance-monthly-workspace" id="attendanceMonthlyWorkspace" aria-label="تقويم الحضور الشهري" aria-busy="false">
+          <article class="attendance-calendar-board">
+            <header class="attendance-calendar-head">
+              <div><span class="eyebrow">المشهد الشهري</span><h2>تقويم الحضور والانصراف</h2><p id="attendanceCalendarContext">يعرض الأعداد وفق النطاق والفلاتر المحددة.</p></div>
+              <div class="attendance-month-controls" role="group" aria-label="التنقل بين الأشهر">
+                <button class="secondary icon-button" type="button" id="attendancePreviousMonth" aria-label="الشهر السابق"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></button>
+                <label for="attendanceMonth">الشهر<input id="attendanceMonth" type="month"></label>
+                <button class="secondary icon-button next" type="button" id="attendanceNextMonth" aria-label="الشهر التالي"><svg class="ui-icon" aria-hidden="true"><use href="#icon-chevron"></use></svg></button>
+              </div>
+            </header>
+            <div class="attendance-calendar-legend" aria-label="دليل ألوان التقويم"><span class="present">حضور</span><span class="absent">غياب</span><span class="late">تأخير</span><span class="authorized">إجازة / ترخيص</span></div>
+            <div class="attendance-calendar-state" id="attendanceCalendarState" role="status" aria-live="polite" hidden></div>
+            <div class="attendance-calendar" id="attendanceCalendar"></div>
+          </article>
+
+          <article class="attendance-report-sheet attendance-daily-report" id="attendanceDailyReport">
+            <header class="attendance-report-head"><div><span class="eyebrow">تفاصيل اليوم</span><h2 id="attendanceDailyTitle">اختر يوماً من التقويم</h2><p id="attendanceDailyContext">اضغط على أي يوم مكتمل لعرض تقريره.</p></div><button class="secondary" type="button" id="printAttendanceDay" data-print-target="attendanceDailyReport" disabled><svg class="ui-icon" aria-hidden="true"><use href="#icon-print"></use></svg><span>طباعة تقرير اليوم</span></button></header>
+            <div class="attendance-daily-kpis" id="attendanceDailyKpis"></div>
+            <div class="table-wrap attendance-daily-table-wrap"><table><caption class="sr-only">تفاصيل الحضور والانصراف لليوم المحدد</caption><thead><tr><th>الموظف</th><th>المناوبة</th><th>الدخول</th><th>الخروج</th><th>صافي الساعات</th><th>التأخير غير المعوّض</th><th>الترخيص المعتمد</th><th>الحالة</th></tr></thead><tbody id="attendanceDailyRows"><tr><td colspan="8"><div class="empty">لم يتم اختيار يوم بعد.</div></td></tr></tbody></table></div>
+          </article>
+
+          <article class="attendance-report-sheet attendance-monthly-report" id="attendanceMonthlyReport">
+            <header class="attendance-report-head"><div><span class="eyebrow">تقرير إداري قابل للطباعة</span><h2>الملخص الشهري لجميع الموظفين</h2><p id="attendanceMonthlyContext">يعكس التقرير النطاق والفلاتر المحددة أعلاه.</p></div><button class="primary" type="button" id="printAttendanceMonth" data-print-target="attendanceMonthlyReport"><svg class="ui-icon" aria-hidden="true"><use href="#icon-print"></use></svg><span>طباعة التقرير الشهري</span></button></header>
+            <div class="attendance-print-identity" aria-hidden="true"><b class="org-name">خيشة - Khaisha</b><span>تقرير الحضور والانصراف الشهري</span><small id="attendanceMonthlyPrintMeta">—</small></div>
+            <div class="table-wrap attendance-monthly-table-wrap"><table><caption class="sr-only">ملخص الحضور الشهري حسب الموظف</caption><thead><tr><th>الموظف</th><th>أيام العمل المتوقعة</th><th>أيام الحضور</th><th>أيام الغياب</th><th>الإجازة المعتمدة</th><th>مرات التأخير</th><th>التأخير غير المعوّض</th><th>الترخيص المعتمد</th><th>صافي ساعات العمل</th></tr></thead><tbody id="attendanceMonthlyRows"><tr><td colspan="9"><div class="empty">جارٍ تحميل التقرير الشهري…</div></td></tr></tbody></table></div>
+            <footer class="attendance-report-note" id="attendanceMonthlyNote"></footer>
+          </article>
+        </section>
+        <article class="attendance-privacy-board" id="attendanceCalendarPrivacy" hidden><svg class="ui-icon" aria-hidden="true"><use href="#icon-shield"></use></svg><div><b>عرض أوقات الفريق يحمي الخصوصية</b><p>يعرض هذا النطاق أوقات الدخول والخروج المسجلة فقط. لا ينشئ النظام تقويماً أو غياباً أو إجازات أو تجميعات شهرية من بيانات غير متاحة لك.</p></div></article>
         <article class="card attendance-ledger" id="attendanceLedger"><div class="section-head"><div><h2>الكشف اليومي</h2><p id="attendancePeriodLabel">—</p></div><div class="attendance-ledger-actions"><span class="status" id="attendanceScopeLabel">—</span><button class="secondary" type="button" data-print-target="attendanceLedger"><svg class="ui-icon" aria-hidden="true"><use href="#icon-print"></use></svg><span>طباعة الكشف</span></button><button class="secondary" type="button" id="exportAttendanceCsv" data-permission="attendance.export"><svg class="ui-icon" aria-hidden="true"><use href="#icon-download"></use></svg><span>تصدير CSV</span></button></div></div><div class="table-wrap attendance-table-wrap"><table><caption class="sr-only">كشف الحضور والانصراف حسب الفترة المحددة</caption><thead id="attendanceHead"><tr><th>التاريخ</th><th>الموظف</th><th>المناوبة</th><th>الدخول</th><th>الخروج</th><th>الصافي</th><th>التأخير</th><th>الإضافي</th><th>الموقع</th><th>الحالة</th></tr></thead><tbody id="attendanceRows"></tbody></table></div></article>
       </section>
 
@@ -376,7 +405,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261007-production-r2"></script>
-  <script src="app.js?v=5.8.0&build=20261007-production-r2"></script>
+  <script src="i18n.js?v=5.8.0&build=20261007-production-r4"></script>
+  <script src="app.js?v=5.8.0&build=20261007-production-r4"></script>
 </body>
 </html>

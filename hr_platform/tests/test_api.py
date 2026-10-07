@@ -173,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r2")
+        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r4")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3668,6 +3668,132 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(checkout["gross_minutes"], 480)
         self.assertEqual(checkout["net_minutes"], 480)
         self.assertTrue(checkout["check_out_at"].startswith("2037-05-05T06:00:00"))
+
+    def test_72_leave_attachment_direct_hr_fallback_and_live_day_status(self):
+        root = Path(__file__).parents[1]
+        index = (root / "index.html").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="attendanceCalendar"', index)
+        self.assertIn('id="attendanceDailyReport"', index)
+        self.assertIn('id="attendanceMonthlyReport"', index)
+        self.assertIn("attachment_data:attachmentData", app)
+        self.assertIn("async function loadAttendanceMonthDataset", app)
+        self.assertNotIn('name="requires_attachment"', app)
+        self.assertIn("المرفق إلزامي تلقائياً للإجازة المرضية والوفاة والوالدية والوضع فقط", app)
+
+        hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute("UPDATE leave_types SET requires_attachment=1 WHERE code='study'")
+        hr_server.initialize_database(self.db_path)
+
+        suffix = uuid.uuid4().hex[:8]
+        email = f"leave-fallback-{suffix}@demo.ae"
+        password = "LeaveFallback@12345"
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"LV-{suffix}", "full_name": "موظف طلب إجازة بلا مدير",
+            "email": email, "hire_date": "2020-01-01", "salary": 5000,
+            "create_user": True, "password": password, "role": "employee",
+        }, expected=201)["employee"]
+        shift = hr.request("POST", "/api/shifts", {
+            "name": f"دوام طلب الإجازة {suffix}", "start_time": "09:00", "end_time": "18:00",
+            "break_minutes": 60, "grace_minutes": 10, "daily_limit_minutes": 480,
+            "working_days": [0, 1, 2, 3, 4, 5, 6], "rest_days": [],
+        }, expected=201)["shift"]
+        hr.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": "2020-01-01",
+        }, expected=201)
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            previous_general_manager = db.execute(
+                "SELECT general_manager_employee_id FROM organization WHERE id=1"
+            ).fetchone()["general_manager_employee_id"]
+            db.execute("UPDATE organization SET general_manager_employee_id=NULL WHERE id=1")
+
+        worker = self.client(email, password)
+        leave_types = worker.request("GET", "/api/leaves/types")["items"]
+        all_leave_types = admin.request("GET", "/api/leaves/types?include_inactive=1")["items"]
+        required_codes = {row["code"] for row in all_leave_types if row["requires_attachment"]}
+        self.assertEqual(required_codes, {"sick", "bereavement", "parental", "maternity"})
+        study = next(row for row in leave_types if row["code"] == "study")
+        self.assertFalse(study["requires_attachment"])
+
+        administrative = admin.request("POST", "/api/leaves/types", {
+            "code": f"administrative_{suffix}", "name": "إجازة إدارية",
+            "annual_entitlement": 0, "min_notice_days": 0, "max_hours": 0,
+            "active": True, "paid": True, "requires_attachment": True,
+        }, expected=201)["leave_type"]
+        self.assertFalse(administrative["requires_attachment"])
+
+        leave_day = date.today() + timedelta(days=120)
+        worker.request("POST", "/api/leaves/requests", {
+            "leave_type_id": study["id"], "start_date": (leave_day + timedelta(days=10)).isoformat(),
+            "end_date": (leave_day + timedelta(days=10)).isoformat(), "reason": "إجازة دراسية بلا مرفق",
+        }, expected=201)
+        worker.request("POST", "/api/leaves/requests", {
+            "leave_type_id": administrative["id"], "start_date": (leave_day + timedelta(days=20)).isoformat(),
+            "end_date": (leave_day + timedelta(days=20)).isoformat(), "reason": "إجازة إدارية بلا مرفق",
+        }, expected=201)
+
+        sick = next(row for row in leave_types if row["code"] == "sick")
+        body = {
+            "leave_type_id": sick["id"], "start_date": leave_day.isoformat(),
+            "end_date": leave_day.isoformat(), "reason": "إجازة مرضية موثقة",
+        }
+        missing = worker.request("POST", "/api/leaves/requests", body, expected=422)
+        self.assertEqual(missing["code"], "attachment_required")
+        created = worker.request("POST", "/api/leaves/requests", {
+            **body, "attachment_data": "data:image/png;base64,iVBORw0KGgo=",
+        }, expected=201)["request"]
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "UPDATE organization SET general_manager_employee_id=? WHERE id=1",
+                (previous_general_manager,),
+            )
+        self.assertEqual(created["workflow_stage"], "pending_hr")
+        self.assertEqual(created["manager_decision"], "approved")
+        self.assertIsNone(created["manager_employee_id"])
+        approved = hr.request("POST", f"/api/leaves/requests/{created['id']}/decision", {
+            "action": "approve",
+        })["request"]
+        self.assertEqual(approved["status"], "approved")
+
+        daily = hr.request("GET", f"/api/attendance/daily?date={leave_day.isoformat()}&employee_id={employee['id']}")
+        self.assertEqual(daily["items"][0]["day_status"], "approved_leave")
+        fixed_now = datetime.combine(date.today(), datetime.min.time(), ZoneInfo("Asia/Dubai")).replace(hour=10)
+        with mock.patch.object(hr_server, "local_now", return_value=fixed_now):
+            live = hr.request(
+                "GET",
+                f"/api/attendance/range?date_from={date.today().isoformat()}&date_to={date.today().isoformat()}&employee_id={employee['id']}",
+            )
+        self.assertEqual(live["items"][0]["day_status"], "not_due_yet")
+        self.assertEqual(live["summary"]["absence_days"], 0)
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            audit_row = db.execute(
+                "SELECT details FROM audit_log WHERE action='leave.submit' AND entity_id=?",
+                (str(created["id"]),),
+            ).fetchone()
+        self.assertIsNotNone(audit_row)
+        self.assertIn('"direct_to_hr":true', audit_row["details"])
+        self.assertIn('"manager_bypass_reason":"direct_manager_missing"', audit_row["details"])
+
+        termination_day = date.today() - timedelta(days=2)
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "UPDATE employees SET active=0,termination_date=? WHERE id=?",
+                (termination_day.isoformat(), employee["id"]),
+            )
+        historical = hr.request(
+            "GET",
+            "/api/attendance/range?"
+            f"date_from={(termination_day - timedelta(days=1)).isoformat()}&"
+            f"date_to={(termination_day + timedelta(days=1)).isoformat()}&employee_id={employee['id']}",
+        )
+        self.assertEqual(
+            {row["work_date"] for row in historical["items"]},
+            {(termination_day - timedelta(days=1)).isoformat(), termination_day.isoformat()},
+        )
 
 
 if __name__ == "__main__":
