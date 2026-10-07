@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 # Keep an explicit revision marker so each application source sync invalidates
 # the image layer that copies the web application into the runtime image.
-ARG BUILD_REV=2026-10-07-v58-hr-payroll-audit-v2
+ARG BUILD_REV=2026-10-07-v58-attendance-calendar-r3
 RUN echo "Building Khaisha HR revision ${BUILD_REV}"
 COPY hr_platform/ /app/
 COPY start.sh /app/start.sh

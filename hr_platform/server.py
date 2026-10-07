@@ -6355,7 +6355,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             elif check_in:
                 result["day_status"] = "open"
             elif result["day_status"] == "working_day":
-                result["day_status"] = "absent"
+                expected_end = None
+                if shift:
+                    expected_start = datetime.combine(work_day, parse_clock(shift["start_time"], "start_time"), UAE_TZ)
+                    expected_end = datetime.combine(work_day, parse_clock(shift["end_time"], "end_time"), UAE_TZ)
+                    if expected_end <= expected_start:
+                        expected_end += timedelta(days=1)
+                # Do not report a worker as absent while their scheduled day
+                # is still in progress (including overnight shifts).
+                result["day_status"] = "not_due_yet" if expected_end and local_now() < expected_end else "absent"
             if shift and check_in and work_day.weekday() not in shift["rest_days"]:
                 expected_start = datetime.combine(work_day, parse_clock(shift["start_time"], "start_time"), UAE_TZ)
                 grace_end = expected_start + timedelta(minutes=int(shift["grace_minutes"]))
@@ -6514,7 +6522,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             work_date = parse_date(self.query.get("date", local_now().date().isoformat())).isoformat()
             employee_filter = self.query.get("employee_id")
             params: list[Any] = []
-            conditions = ["e.active=1"]
+            conditions = ["(e.hire_date IS NULL OR e.hire_date<=?)", "(e.termination_date IS NULL OR e.termination_date>=?)"]
+            params.extend([work_date, work_date])
             broad_scope = self.has_privileged_people_access(user, "attendance.view")
             team_scope = bool(not broad_scope and has_permission(self.db, user, "attendance.team") and user.get("employee_id"))
             response_scope = "all" if broad_scope else "team_attendance" if team_scope else "self"
@@ -6558,6 +6567,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee["id"], work_date)).fetchone()[0]
                 relief = self.attendance_relief_for_day(int(employee["id"]), date.fromisoformat(work_date))
                 metrics = self.attendance_metrics(source, shift, overtime, relief["permission_minutes"], relief["emergency_excused"])
+                if relief["full_day_leave"] and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent", "not_due_yet"}:
+                    metrics["day_status"] = "approved_leave"
+                    metrics["approved_leave"] = True
                 if response_scope == "team_attendance":
                     items.append({
                         "id": employee["id"], "employee_no": employee["employee_no"],
@@ -6580,8 +6592,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "فترة الحضور لا يمكن أن تتجاوز 367 يوماً.", "validation_error", {"field": "date_from"})
 
             employee_filter = self.query.get("employee_id")
-            params: list[Any] = []
-            conditions = ["e.active=1"]
+            params: list[Any] = [date_to.isoformat(), date_from.isoformat()]
+            conditions = ["(e.hire_date IS NULL OR e.hire_date<=?)", "(e.termination_date IS NULL OR e.termination_date>=?)"]
             broad_scope = self.has_privileged_people_access(user, "attendance.view")
             team_scope = bool(not broad_scope and has_permission(self.db, user, "attendance.team") and user.get("employee_id"))
             response_scope = "all" if broad_scope else "team_attendance" if team_scope else "self"
@@ -6609,7 +6621,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             department_filter = as_int(self.query["department_id"], "department_id", 1) if self.query.get("department_id") else None
             branch_filter = as_int(self.query["branch_id"], "branch_id", 1) if self.query.get("branch_id") else None
             status_filter = str(self.query.get("status", "")).strip()
-            allowed_statuses = {"", "present", "open", "late", "absent", "weekly_rest", "approved_leave", "no_shift"}
+            allowed_statuses = {"", "present", "open", "late", "absent", "weekly_rest", "approved_leave", "not_due_yet", "no_shift"}
             if status_filter not in allowed_statuses:
                 raise APIError(422, "حالة الحضور المطلوبة غير صالحة.", "validation_error", {"field": "status"})
             if response_scope == "team_attendance" and (department_filter or branch_filter or status_filter):
@@ -6624,7 +6636,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 conditions.append("e.branch_id=?")
                 params.append(branch_filter)
             employees = self.db.execute(
-                "SELECT e.id,e.employee_no,e.full_name,e.branch_id,e.department_id,e.hire_date,b.name AS branch_name,d.name AS department_name FROM employees e LEFT JOIN branches b ON b.id=e.branch_id LEFT JOIN departments d ON d.id=e.department_id WHERE "
+                "SELECT e.id,e.employee_no,e.full_name,e.branch_id,e.department_id,e.hire_date,e.termination_date,b.name AS branch_name,d.name AS department_name FROM employees e LEFT JOIN branches b ON b.id=e.branch_id LEFT JOIN departments d ON d.id=e.department_id WHERE "
                 + " AND ".join(conditions) + " ORDER BY e.full_name", params,
             ).fetchall()
             employee_ids = [int(employee["id"]) for employee in employees]
@@ -6669,6 +6681,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             summary = {
                 "work_days": 0, "net_work_minutes": 0, "late_minutes": 0,
                 "raw_late_minutes": 0, "excused_late_minutes": 0,
+                "permission_minutes": 0, "permission_credit_minutes": 0,
                 "absence_days": 0, "weekly_rest_days": 0, "leave_days": 0,
                 "approved_overtime_minutes": 0, "attendance_records": 0,
                 "expected_employee_days": 0, "present_days": 0, "open_days": 0, "late_days": 0,
@@ -6680,6 +6693,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     employee_id = int(employee["id"])
                     attendance = attendance_by_key.get((employee_id, work_date))
                     if employee["hire_date"] and cursor < date.fromisoformat(employee["hire_date"]) and attendance is None:
+                        continue
+                    if employee["termination_date"] and cursor > date.fromisoformat(employee["termination_date"]) and attendance is None:
                         continue
                     if response_scope == "team_attendance" and attendance is None:
                         continue
@@ -6710,7 +6725,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         key in emergency_leave_days,
                     )
                     has_leave = (employee_id, work_date) in approved_leave_days
-                    if has_leave and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent"}:
+                    if has_leave and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent", "not_due_yet"}:
                         metrics["day_status"] = "approved_leave"
                     metrics.update({
                         "employee_no": employee["employee_no"], "full_name": employee["full_name"],
@@ -6730,6 +6745,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     summary["late_minutes"] += int(metrics["late_minutes"])
                     summary["raw_late_minutes"] += int(metrics["raw_late_minutes"])
                     summary["excused_late_minutes"] += int(metrics["excused_late_minutes"])
+                    summary["permission_minutes"] += int(metrics["permission_minutes"])
+                    summary["permission_credit_minutes"] += int(metrics["permission_credit_minutes"])
                     summary["approved_overtime_minutes"] += int(metrics["approved_overtime_minutes"])
                     if metrics["required_minutes"]:
                         summary["work_days"] += 1
@@ -6784,13 +6801,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 rows: list[list[Any]] = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "تسجيل الدخول", "تسجيل الخروج"]]
                 rows.extend([[item["work_date"], item["full_name"], item["employee_no"], item.get("check_in_at") or "", item.get("check_out_at") or ""] for item in payload["items"]])
             else:
-                rows = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "المناوبة", "الدخول", "الخروج", "صافي الدقائق", "التأخير الخام", "التأخير المعوض", "التأخير غير المعوض", "الإضافي المعتمد", "الموقع بالمتر", "الحالة"]]
+                rows = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "المناوبة", "الدخول", "الخروج", "صافي الدقائق", "التأخير الخام", "التأخير المعوض", "التأخير غير المعوض", "الترخيص المعتمد بالدقائق", "رصيد الترخيص المضاف للصافي", "الإضافي المعتمد", "الموقع بالمتر", "الحالة"]]
                 rows.extend([
                     [
                         item["work_date"], item["full_name"], item["employee_no"], item.get("department_name") or "",
                         item.get("branch_name") or "", (item.get("shift") or {}).get("name") or "", item.get("check_in_at") or "",
                         item.get("check_out_at") or "", item.get("net_minutes") or 0, item.get("raw_late_minutes") or 0,
-                        item.get("excused_late_minutes") or 0, item.get("late_minutes") or 0, item.get("approved_overtime_minutes") or 0,
+                        item.get("excused_late_minutes") or 0, item.get("late_minutes") or 0,
+                        item.get("permission_minutes") or 0, item.get("permission_credit_minutes") or 0,
+                        item.get("approved_overtime_minutes") or 0,
                         item.get("check_in_distance_m") if item.get("check_in_distance_m") is not None else "",
                         item.get("day_status") or "",
                     ]
@@ -7580,16 +7599,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             department_head = self.is_department_head(employee_id)
             manager_employee_id = None if department_head else self.direct_manager_employee_id(employee_id)
             manager_user = None
+            manager_bypass_reason = "department_head" if department_head else None
             if not department_head:
                 if manager_employee_id is None:
-                    raise APIError(409, "لا يمكن إرسال الطلب قبل تعيين مسؤول مباشر للموظف.", "direct_manager_required")
-                manager_user = self.db.execute("SELECT * FROM users WHERE employee_id=? AND active=1", (manager_employee_id,)).fetchone()
-                if manager_user is None or not has_permission(self.db, dict(manager_user), "leave.team"):
-                    raise APIError(409, "المسؤول المباشر لا يملك حساباً نشطاً وصلاحية مراجعة إجازات الفريق.", "manager_account_required")
+                    manager_bypass_reason = "direct_manager_missing"
+                else:
+                    manager_user = self.db.execute("SELECT * FROM users WHERE employee_id=? AND active=1", (manager_employee_id,)).fetchone()
+                    if manager_user is None or not has_permission(self.db, dict(manager_user), "leave.team"):
+                        manager_user = None
+                        manager_bypass_reason = "manager_account_or_permission_missing"
+                if manager_user is None:
+                    # A missing organizational assignment must not prevent the
+                    # employee from submitting a legitimate leave request. The
+                    # request is routed directly to an HR approver and the
+                    # configuration gap remains visible in the audit record.
+                    manager_employee_id = None
             assigned_approval_id = int(employee_profile["approval_employee_id"]) if employee_profile and employee_profile["approval_employee_id"] else None
             approval_manager = self.approval_manager_row(assigned_approval_id, "leave.approve") if assigned_approval_id else None
-            if assigned_approval_id and approval_manager is None:
-                raise APIError(409, "مسؤول الاعتماد المحدد غير نشط أو لا يملك صلاحية اعتماد الإجازات.", "approval_manager_required")
+            approval_fallback_reason = "assigned_approver_invalid" if assigned_approval_id and approval_manager is None else None
             approval_employee_id = int(approval_manager["employee_id"]) if approval_manager else None
             hr_recipients = [int(approval_manager["user_id"])] if approval_manager else self.leave_hr_recipient_ids()
             if not hr_recipients:
@@ -7597,15 +7624,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
             stamp = now_iso()
             with self.db:
-                manager_decision = "approved" if department_head else "pending"
+                direct_to_hr = department_head or manager_user is None
+                manager_decision = "approved" if direct_to_hr else "pending"
                 cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,start_time,end_time,hours,reason,attachment_data,status,manager_employee_id,approval_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'submitted',?,?,?, ?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, start_time_value, end_time_value, hours, optional_text(data, "reason", 1000), attachment, manager_employee_id, approval_employee_id, manager_decision, stamp, stamp))
                 request_id = int(cur.lastrowid)
                 create_internal_notification(
-                    self.db, int(user["id"]), hr_recipients if department_head else [int(manager_user["id"])],
-                    "طلب إجازة رئيس قسم بانتظار الموارد البشرية" if department_head else "طلب إجازة بانتظار قرارك",
+                    self.db, int(user["id"]), hr_recipients if direct_to_hr else [int(manager_user["id"])],
+                    "طلب إجازة بانتظار الموارد البشرية" if direct_to_hr else "طلب إجازة بانتظار قرارك",
                     f"قدم {employee['full_name']} ({employee['employee_no']}) طلب {leave_type['name']} من {start.isoformat()} إلى {end.isoformat()}.",
                 )
-                audit(self.db, user["id"], "leave.submit", "leave_request", request_id, {"manager_employee_id": manager_employee_id, "approval_employee_id": approval_employee_id, "department_head_direct_to_hr": department_head})
+                audit(self.db, user["id"], "leave.submit", "leave_request", request_id, {
+                    "manager_employee_id": manager_employee_id,
+                    "approval_employee_id": approval_employee_id,
+                    "direct_to_hr": direct_to_hr,
+                    "manager_bypass_reason": manager_bypass_reason,
+                    "approval_fallback_reason": approval_fallback_reason,
+                })
             row = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,m.full_name AS manager_name,a.full_name AS approval_employee_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees m ON m.id=lr.manager_employee_id LEFT JOIN employees a ON a.id=lr.approval_employee_id WHERE lr.id=?", (request_id,)).fetchone()
             self.send_json(201, {"request": self.leave_request_payload(row, user)})
 
