@@ -70,6 +70,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "employee.emergency.manage": "إدارة جهات اتصال الطوارئ للموظفين",
         "employee.team": "عرض أسماء وأرقام موظفي الفريق فقط", "department.manage": "إدارة الأقسام",
         "employee_document.manage": "إدارة وثائق الموظفين", "employee_action.manage": "إدارة المخالفات والتعهدات",
+        "document_library.manage": "إدارة مكتبة الوثائق المؤسسية",
         "employee_custody.view": "عرض سجل عُهد الموظفين", "employee_custody.manage": "إدارة عُهد الموظفين",
         "employee_custody.print": "طباعة سجلات استلام وتسليم العُهد",
         "employee_report.view": "عرض تقرير الموظف الشامل", "employee_report.export": "طباعة وحفظ تقرير الموظف الشامل PDF",
@@ -122,6 +123,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
         "evaluation.override_manager",
         "employee_document.manage", "employee_action.manage", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.manage", "payroll.approve", "payroll.pay",
+        "document_library.manage",
         "advance.view", "advance.approve", "reference.manage", "lifecycle.view", "lifecycle.manage", "report.view",
         "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
         "employee_report.view", "employee_report.export",
@@ -2093,6 +2095,21 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("DROP TABLE employee_documents")
                 db.execute("ALTER TABLE employee_documents_v44 RENAME TO employee_documents")
             stamp = now_iso()
+            default_document_libraries = (
+                ("company_licenses", "رخص الشركة"),
+                ("company_policies", "قوانين الشركة"),
+                ("violations_penalties", "المخالفات والجزاءات"),
+                ("custody", "العهد"),
+                ("advances_payments", "السلف وإيصالات المدفوعات"),
+                ("other", "أخرى"),
+            )
+            for sort_order, (default_key, name) in enumerate(default_document_libraries, 1):
+                db.execute(
+                    """INSERT OR IGNORE INTO document_library_categories
+                       (name,default_key,active,sort_order,created_by,created_at,updated_at)
+                       VALUES(?,?,1,?,NULL,?,?)""",
+                    (name, default_key, sort_order, stamp, stamp),
+                )
             db.execute(
                 "INSERT OR IGNORE INTO organization(id,display_name,legal_name,sector,emirate,address,phone,email,website,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?)",
                 ("خيشة - Khaisha", "خيشة - Khaisha", "الخدمات المهنية", "دبي", "دبي، الإمارات العربية المتحدة", "+971 4 000 0000", "people@demo.ae", "https://example.ae", stamp),
@@ -2956,6 +2973,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/documents/(\d+)", self.api_document_get),
                     ("PATCH", r"/api/documents/(\d+)", self.api_document_patch),
                     ("DELETE", r"/api/documents/(\d+)", self.api_document_delete),
+                    ("GET", r"/api/document-library/categories", self.api_document_library_categories_get),
+                    ("POST", r"/api/document-library/categories", self.api_document_library_category_post),
+                    ("PATCH", r"/api/document-library/categories/(\d+)", self.api_document_library_category_patch),
+                    ("GET", r"/api/document-library/documents", self.api_document_library_documents_get),
+                    ("POST", r"/api/document-library/documents", self.api_document_library_document_post),
+                    ("GET", r"/api/document-library/documents/(\d+)", self.api_document_library_document_get),
+                    ("PATCH", r"/api/document-library/documents/(\d+)", self.api_document_library_document_patch),
                     ("GET", r"/api/employees/(\d+)/actions", self.api_employee_actions_get),
                     ("POST", r"/api/employees/(\d+)/actions", self.api_employee_actions_post),
                     ("GET", r"/api/employees/(\d+)/custody", self.api_employee_custody_get),
@@ -5887,6 +5911,243 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if self.query.get("status"): documents=[d for d in documents if d["status"]==self.query["status"]]
             alerts=[d for d in documents if d["status"] in {"expiring_soon","expired"}]
             self.send_json(200,{"items":documents,"alerts":alerts,"counts":{"total":len(documents),"expired":sum(d["status"]=="expired" for d in documents),"expiring_soon":sum(d["status"]=="expiring_soon" for d in documents)}})
+
+        def require_document_library(self) -> dict[str, Any]:
+            user = self.require_permission("document_library.manage")
+            if str(user.get("role")) not in PEOPLE_ADMIN_ROLES:
+                raise APIError(403, "مكتبة الوثائق متاحة فقط لمدير النظام ومسؤول الموارد البشرية.", "forbidden")
+            return user
+
+        def serialize_document_library_category(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            item = dict(row)
+            item["active"] = bool(item.get("active"))
+            item["document_count"] = int(item.get("document_count") or 0)
+            return item
+
+        def serialize_document_library_document(self, row: sqlite3.Row | dict[str, Any], include_data: bool = False) -> dict[str, Any]:
+            item = dict(row)
+            item["archived"] = bool(item.get("archived"))
+            item["source"] = "library"
+            item["source_label"] = "مكتبة"
+            if not include_data:
+                item.pop("data_url", None)
+            return item
+
+        def api_document_library_categories_get(self) -> None:
+            self.require_document_library()
+            include_inactive = self.query.get("status") in {"all", "inactive", "archived"}
+            condition = "" if include_inactive else "WHERE c.active=1"
+            rows = self.db.execute(
+                f"""SELECT c.*,(SELECT COUNT(*) FROM document_library_documents d WHERE d.category_id=c.id) document_count
+                      FROM document_library_categories c {condition}
+                     ORDER BY c.active DESC,c.sort_order,c.name"""
+            ).fetchall()
+            self.send_json(200, {"items": [self.serialize_document_library_category(row) for row in rows]})
+
+        def api_document_library_category_post(self) -> None:
+            user = self.require_document_library()
+            data = self.read_json()
+            name = str(data.get("name") or "").strip()
+            if not name:
+                raise APIError(422, "اسم المكتبة مطلوب.", "validation_error", {"field": "name"})
+            if len(name) > 120:
+                raise APIError(422, "اسم المكتبة أطول من الحد المسموح.", "validation_error", {"field": "name"})
+            stamp = now_iso()
+            sort_order = as_int(data.get("sort_order", 1000), "sort_order", 0, 100000)
+            try:
+                with self.db:
+                    result = self.db.execute(
+                        """INSERT INTO document_library_categories(name,default_key,active,sort_order,created_by,created_at,updated_at)
+                           VALUES(?,NULL,1,?,?,?,?)""",
+                        (name, sort_order, user["id"], stamp, stamp),
+                    )
+                    category_id = int(result.lastrowid)
+                    audit(self.db, user["id"], "document_library.category_create", "document_library_category", category_id, {"name": name})
+            except sqlite3.IntegrityError:
+                raise APIError(409, "توجد مكتبة بهذا الاسم بالفعل.", "duplicate_category", {"field": "name"})
+            row = self.db.execute(
+                """SELECT c.*,(SELECT COUNT(*) FROM document_library_documents d WHERE d.category_id=c.id) document_count
+                     FROM document_library_categories c WHERE c.id=?""", (category_id,),
+            ).fetchone()
+            self.send_json(201, {"category": self.serialize_document_library_category(row), "message": "تم إنشاء المكتبة بنجاح."})
+
+        def api_document_library_category_patch(self, category_id: int) -> None:
+            user = self.require_document_library()
+            row = self.db.execute("SELECT * FROM document_library_categories WHERE id=?", (category_id,)).fetchone()
+            if not row:
+                raise APIError(404, "المكتبة غير موجودة.", "not_found")
+            data = self.read_json(); values: dict[str, Any] = {}
+            if "name" in data:
+                name = str(data.get("name") or "").strip()
+                if not name:
+                    raise APIError(422, "اسم المكتبة مطلوب.", "validation_error", {"field": "name"})
+                if len(name) > 120:
+                    raise APIError(422, "اسم المكتبة أطول من الحد المسموح.", "validation_error", {"field": "name"})
+                values["name"] = name
+            if "active" in data:
+                values["active"] = 1 if bool(data["active"]) else 0
+            if "sort_order" in data:
+                values["sort_order"] = as_int(data["sort_order"], "sort_order", 0, 100000)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute("UPDATE document_library_categories SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), category_id))
+                    audit(self.db, user["id"], "document_library.category_update", "document_library_category", category_id, values)
+            except sqlite3.IntegrityError:
+                raise APIError(409, "توجد مكتبة بهذا الاسم بالفعل.", "duplicate_category", {"field": "name"})
+            updated = self.db.execute(
+                """SELECT c.*,(SELECT COUNT(*) FROM document_library_documents d WHERE d.category_id=c.id) document_count
+                     FROM document_library_categories c WHERE c.id=?""", (category_id,),
+            ).fetchone()
+            self.send_json(200, {"category": self.serialize_document_library_category(updated), "message": "تم تحديث المكتبة بنجاح."})
+
+        def api_document_library_documents_get(self) -> None:
+            user = self.require_document_library()
+            query = str(self.query.get("q") or "").strip()[:200]
+            category_value = self.query.get("category_id")
+            category_id = as_int(category_value, "category_id", 1) if category_value else None
+            archived = 1 if self.query.get("status") == "archived" else 0
+            like = f"%{query}%"
+            library_conditions = ["d.archived=?"]
+            library_params: list[Any] = [archived]
+            if category_id:
+                library_conditions.append("d.category_id=?"); library_params.append(category_id)
+            if query:
+                library_conditions.append("(d.title LIKE ? OR d.description LIKE ? OR d.keywords LIKE ? OR d.reference_number LIKE ? OR e.full_name LIKE ? OR e.employee_no LIKE ?)")
+                library_params.extend([like] * 6)
+            library_rows = self.db.execute(
+                """SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no
+                     FROM document_library_documents d
+                     JOIN document_library_categories c ON c.id=d.category_id
+                     LEFT JOIN employees e ON e.id=d.employee_id
+                    WHERE """ + " AND ".join(library_conditions) + " ORDER BY d.created_at DESC,d.id DESC LIMIT 200",
+                library_params,
+            ).fetchall()
+            results = [self.serialize_document_library_document(row) for row in library_rows]
+            if not category_id:
+                employee_conditions = ["d.archived=?"]
+                employee_params: list[Any] = [archived]
+                if query:
+                    employee_conditions.append("(d.title LIKE ? OR d.notes LIKE ? OR d.document_number LIKE ? OR d.issuer LIKE ? OR e.full_name LIKE ? OR e.employee_no LIKE ?)")
+                    employee_params.extend([like] * 6)
+                employee_rows = self.db.execute(
+                    """SELECT d.id,d.employee_id,d.title,d.notes description,'' keywords,d.document_number reference_number,
+                              d.issued_on document_date,d.file_name,d.mime_type,d.archived,d.created_at,d.updated_at,
+                              e.full_name employee_name,e.employee_no,d.document_type
+                         FROM employee_documents d JOIN employees e ON e.id=d.employee_id
+                        WHERE """ + " AND ".join(employee_conditions) + " ORDER BY d.created_at DESC,d.id DESC LIMIT 200",
+                    employee_params,
+                ).fetchall()
+                for raw in employee_rows:
+                    item = dict(raw)
+                    item.update({"source": "employee_file", "source_label": "ملف موظف", "category_id": None, "category_name": DOCUMENT_TYPE_LABELS_AR.get(item.get("document_type"), "وثيقة موظف")})
+                    item["archived"] = bool(item.get("archived")); results.append(item)
+            results.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+            stats = self.db.execute(
+                """SELECT COUNT(*) total_documents,
+                          SUM(CASE WHEN employee_id IS NOT NULL THEN 1 ELSE 0 END) linked_documents,
+                          MAX(created_at) latest_created_at
+                     FROM document_library_documents WHERE archived=0"""
+            ).fetchone()
+            category_count = self.db.execute("SELECT COUNT(*) FROM document_library_categories WHERE active=1").fetchone()[0]
+            with self.db:
+                audit(self.db, user["id"], "document_library.search", "document_library", None, {"query": query, "category_id": category_id, "status": "archived" if archived else "active"})
+            self.send_json(200, {"items": results[:250], "stats": {"total_documents": int(stats["total_documents"] or 0), "linked_documents": int(stats["linked_documents"] or 0), "category_count": int(category_count), "latest_created_at": stats["latest_created_at"]}})
+
+        def validate_document_library_file(self, data: dict[str, Any]) -> tuple[str, str, str]:
+            try:
+                data_url = validate_data_url(data.get("data_url"), "مستند المكتبة", ("image/png", "image/jpeg", "image/webp", "application/pdf"), 2_000_000)
+            except APIError as exc:
+                if exc.details is None:
+                    exc.details = {"field": "file"}
+                elif isinstance(exc.details, dict):
+                    exc.details.setdefault("field", "file")
+                raise
+            if not data_url:
+                raise APIError(422, "اختر ملف المستند.", "validation_error", {"field": "file"})
+            mime_type = data_url[5:data_url.index(";")]
+            file_name = str(data.get("file_name") or "").strip()
+            if not file_name:
+                raise APIError(422, "اسم الملف مطلوب.", "validation_error", {"field": "file"})
+            if len(file_name) > 240:
+                raise APIError(422, "اسم الملف أطول من الحد المسموح.", "validation_error", {"field": "file"})
+            allowed_extensions = {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/webp": {".webp"}, "application/pdf": {".pdf"}}
+            if Path(file_name).suffix.lower() not in allowed_extensions[mime_type]:
+                raise APIError(422, "امتداد الملف لا يطابق نوع محتواه.", "invalid_upload", {"field": "file"})
+            return file_name, mime_type, data_url
+
+        def document_library_metadata(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not partial or "category_id" in data:
+                category_id = as_int(data.get("category_id"), "category_id", 1)
+                category = self.db.execute("SELECT id FROM document_library_categories WHERE id=?" + ("" if partial else " AND active=1"), (category_id,)).fetchone()
+                if not category:
+                    raise APIError(422, "المكتبة المحددة غير موجودة أو مؤرشفة.", "validation_error", {"field": "category_id"})
+                result["category_id"] = category_id
+            if not partial or "title" in data:
+                title = str(data.get("title") or "").strip()
+                if not title:
+                    raise APIError(422, "عنوان المستند مطلوب.", "validation_error", {"field": "title"})
+                if len(title) > 180:
+                    raise APIError(422, "عنوان المستند أطول من الحد المسموح.", "validation_error", {"field": "title"})
+                result["title"] = title
+            for key, limit in (("description", 2000), ("keywords", 1000), ("reference_number", 160)):
+                if not partial or key in data:
+                    result[key] = optional_text(data, key, limit)
+            if not partial or "document_date" in data:
+                result["document_date"] = parse_date(data["document_date"], "document_date").isoformat() if data.get("document_date") else None
+            if not partial or "employee_id" in data:
+                employee_id = as_int(data["employee_id"], "employee_id", 1) if data.get("employee_id") else None
+                if employee_id and not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                    raise APIError(422, "الموظف المرتبط غير موجود.", "validation_error", {"field": "employee_id"})
+                result["employee_id"] = employee_id
+            return result
+
+        def api_document_library_document_post(self) -> None:
+            user = self.require_document_library(); data = self.read_json()
+            metadata = self.document_library_metadata(data)
+            file_name, mime_type, data_url = self.validate_document_library_file(data)
+            stamp = now_iso()
+            with self.db:
+                result = self.db.execute(
+                    """INSERT INTO document_library_documents
+                       (category_id,employee_id,title,description,keywords,reference_number,document_date,file_name,mime_type,data_url,archived,uploaded_by,updated_by,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)""",
+                    (metadata["category_id"], metadata["employee_id"], metadata["title"], metadata["description"], metadata["keywords"], metadata["reference_number"], metadata["document_date"], file_name, mime_type, data_url, user["id"], user["id"], stamp, stamp),
+                )
+                document_id = int(result.lastrowid)
+                audit(self.db, user["id"], "document_library.document_upload", "document_library_document", document_id, {"category_id": metadata["category_id"], "employee_id": metadata["employee_id"], "file_name": file_name})
+            row = self.db.execute("""SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no FROM document_library_documents d JOIN document_library_categories c ON c.id=d.category_id LEFT JOIN employees e ON e.id=d.employee_id WHERE d.id=?""", (document_id,)).fetchone()
+            self.send_json(201, {"document": self.serialize_document_library_document(row), "message": "تم رفع المستند وحفظه في المكتبة بنجاح."})
+
+        def api_document_library_document_get(self, document_id: int) -> None:
+            user = self.require_document_library()
+            row = self.db.execute("""SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no FROM document_library_documents d JOIN document_library_categories c ON c.id=d.category_id LEFT JOIN employees e ON e.id=d.employee_id WHERE d.id=?""", (document_id,)).fetchone()
+            if not row:
+                raise APIError(404, "المستند غير موجود.", "not_found")
+            with self.db:
+                audit(self.db, user["id"], "document_library.document_view", "document_library_document", document_id)
+            self.send_json(200, {"document": self.serialize_document_library_document(row, True)})
+
+        def api_document_library_document_patch(self, document_id: int) -> None:
+            user = self.require_document_library()
+            row = self.db.execute("SELECT * FROM document_library_documents WHERE id=?", (document_id,)).fetchone()
+            if not row:
+                raise APIError(404, "المستند غير موجود.", "not_found")
+            data = self.read_json(); values = self.document_library_metadata(data, partial=True)
+            if "archived" in data:
+                values["archived"] = 1 if bool(data["archived"]) else 0
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_by"] = user["id"]; values["updated_at"] = now_iso()
+            action = "document_library.document_archive" if values.get("archived") == 1 else "document_library.document_update"
+            with self.db:
+                self.db.execute("UPDATE document_library_documents SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), document_id))
+                audit(self.db, user["id"], action, "document_library_document", document_id, {key: value for key, value in values.items() if key not in {"updated_at", "updated_by"}})
+            updated = self.db.execute("""SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no FROM document_library_documents d JOIN document_library_categories c ON c.id=d.category_id LEFT JOIN employees e ON e.id=d.employee_id WHERE d.id=?""", (document_id,)).fetchone()
+            self.send_json(200, {"document": self.serialize_document_library_document(updated), "message": "تم أرشفة المستند بنجاح." if values.get("archived") == 1 else "تم تحديث بيانات المستند بنجاح."})
 
         def serialize_document(self, row: sqlite3.Row | dict[str, Any], include_data: bool=False) -> dict[str, Any]:
             result=dict(row); result["visible_to_employee"]=bool(result["visible_to_employee"]); result["no_expiry"]=bool(result.get("no_expiry")); result["archived"]=bool(result.get("archived"))

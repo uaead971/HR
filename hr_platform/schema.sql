@@ -780,6 +780,45 @@ CREATE TABLE IF NOT EXISTS employee_documents (
   FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE RESTRICT
 );
 
+CREATE TABLE IF NOT EXISTS document_library_categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  default_key TEXT UNIQUE,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS document_library_documents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER NOT NULL,
+  employee_id INTEGER,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  keywords TEXT NOT NULL DEFAULT '',
+  reference_number TEXT NOT NULL DEFAULT '',
+  document_date TEXT,
+  file_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  data_url TEXT NOT NULL,
+  archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+  uploaded_by INTEGER NOT NULL,
+  updated_by INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (category_id) REFERENCES document_library_categories(id) ON DELETE RESTRICT,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL,
+  FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE RESTRICT,
+  FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_library_categories_active ON document_library_categories(active, sort_order, name);
+CREATE INDEX IF NOT EXISTS idx_document_library_documents_category ON document_library_documents(category_id, archived, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_document_library_documents_employee ON document_library_documents(employee_id, archived);
+
 CREATE TABLE IF NOT EXISTS employee_actions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   employee_id INTEGER NOT NULL,

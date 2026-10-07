@@ -173,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r5")
+        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r6")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3831,6 +3831,96 @@ class HRAPIEndToEndTests(unittest.TestCase):
             {row["work_date"] for row in historical["items"]},
             {(termination_day - timedelta(days=1)).isoformat(), termination_day.isoformat()},
         )
+
+    def test_73_document_library_rbac_search_audit_and_employee_edit_regression(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        employee_client = self.client("employee@demo.ae", "Emp@12345")
+
+        me = admin.request("GET", "/api/auth/me")
+        self.assertIn("*", me["permissions"])
+        self.assertIn("employee.profile.edit", me["permissions"])
+        self.assertIn("document_library.manage", me["permissions"])
+
+        suffix = uuid.uuid4().hex[:8]
+        created_employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"DOC-{suffix}", "full_name": f"محمد الوثائق {suffix}",
+            "email": f"documents-{suffix}@demo.ae", "hire_date": "2025-01-01",
+        }, expected=201)["employee"]
+        edited = admin.request("PATCH", f"/api/employees/{created_employee['id']}", {
+            "qualification": "ماجستير إدارة الوثائق",
+        })["employee"]
+        self.assertEqual(edited["qualification"], "ماجستير إدارة الوثائق")
+
+        manager.request("GET", "/api/document-library/categories", expected=403)
+        employee_client.request("GET", "/api/document-library/documents", expected=403)
+        categories = hr.request("GET", "/api/document-library/categories?status=all")["items"]
+        self.assertGreaterEqual(len(categories), 6)
+        missing_name = hr.request("POST", "/api/document-library/categories", {"name": ""}, expected=422)
+        self.assertEqual(missing_name["details"]["field"], "name")
+        category = hr.request("POST", "/api/document-library/categories", {
+            "name": f"عقود موثقة {suffix}",
+        }, expected=201)["category"]
+
+        pdf_data = "data:application/pdf;base64," + __import__("base64").b64encode(b"%PDF-1.4\n%%EOF").decode("ascii")
+        uploaded = hr.request("POST", "/api/document-library/documents", {
+            "category_id": category["id"], "employee_id": created_employee["id"],
+            "title": f"عقد الموظف محمد {suffix}", "description": "عقد موثق من العمل والعمال",
+            "keywords": "عقد موظف موثق", "reference_number": f"MOHRE-{suffix}",
+            "document_date": "2026-09-01", "file_name": f"contract-{suffix}.pdf", "data_url": pdf_data,
+        }, expected=201)["document"]
+        self.assertEqual(uploaded["source"], "library")
+        self.assertEqual(uploaded["employee_no"], created_employee["employee_no"])
+
+        by_name = hr.request("GET", f"/api/document-library/documents?q={suffix}")
+        self.assertIn(uploaded["id"], {item["id"] for item in by_name["items"] if item["source"] == "library"})
+        by_category = hr.request("GET", f"/api/document-library/documents?category_id={category['id']}")
+        self.assertEqual({item["source"] for item in by_category["items"]}, {"library"})
+        viewed = admin.request("GET", f"/api/document-library/documents/{uploaded['id']}")["document"]
+        self.assertEqual(viewed["data_url"], pdf_data)
+        updated = admin.request("PATCH", f"/api/document-library/documents/{uploaded['id']}", {
+            "title": f"عقد الموظف محمد المعدل {suffix}",
+        })["document"]
+        self.assertIn("المعدل", updated["title"])
+        hr.request("PATCH", f"/api/document-library/documents/{uploaded['id']}", {"archived": True})
+        archived = hr.request("GET", f"/api/document-library/documents?status=archived&q={suffix}")["items"]
+        self.assertTrue(any(item["source"] == "library" and item["id"] == uploaded["id"] for item in archived))
+
+        png_data = "data:image/png;base64," + __import__("base64").b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+        employee_document = hr.request("POST", f"/api/employees/{created_employee['id']}/documents", {
+            "document_type": "other", "title": f"إقرار الموظف {suffix}",
+            "file_name": f"statement-{suffix}.png", "data_url": png_data,
+        }, expected=201)["document"]
+        central = hr.request("GET", f"/api/document-library/documents?q={created_employee['employee_no']}")["items"]
+        self.assertTrue(any(item["source"] == "employee_file" and item["id"] == employee_document["id"] for item in central))
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            actions = {row["action"] for row in db.execute("SELECT action FROM audit_log WHERE action LIKE 'document_library.%'")}
+        self.assertTrue({"document_library.category_create", "document_library.document_upload", "document_library.document_view", "document_library.document_update", "document_library.document_archive", "document_library.search"}.issubset(actions))
+
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        schema = (root / "schema.sql").read_text(encoding="utf-8")
+        self.assertIn("queueMicrotask(()=>enhanceEmployeeProfileV56()", app)
+        self.assertIn("data-edit-employee-profile", app)
+        self.assertIn("finally{if(button?.isConnected)setBusy(button,false)}", app)
+        for marker in ("document-library", "documentLibrarySearchForm", "documentLibraryRows"):
+            self.assertIn(marker, index + app)
+        self.assertIn("document_library.manage", app + index + (root / "server.py").read_text(encoding="utf-8"))
+        self.assertIn("document_library_documents", schema)
+        self.assertIn("z-index:140", styles)
+        self.assertIn('id="documentLibraryCategoryForm" novalidate', app)
+        self.assertIn('id="documentLibraryDocumentForm" novalidate', app)
+        for field in ("name", "category_id", "title", "file"):
+            self.assertIn(f'data-library-field-error="{field}"', app)
+        self.assertIn("validateDocumentLibraryForm", app)
+        self.assertIn("alertMessage(firstMessage,true)", app)
+        self.assertIn("data-library-first-upload", app)
+        self.assertIn(".document-library-empty{height:160px;min-height:160px;max-height:180px", styles)
+        self.assertIn(".document-library-empty{position:sticky;inset-inline-start:0;width:min(340px,calc(100vw - 48px));margin-inline-end:auto}", styles)
 
 
 if __name__ == "__main__":

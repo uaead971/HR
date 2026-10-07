@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261007-production-r5">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261007-production-r6">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -48,6 +48,7 @@
     <symbol id="icon-expand" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></symbol>
     <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 21h16"/></symbol>
     <symbol id="icon-archive" viewBox="0 0 24 24"><path d="M4 7h16v14H4zM2 3h20v4H2zM9 11h6"/></symbol>
+    <symbol id="icon-documents" viewBox="0 0 24 24"><path d="M4 4h6l2 2h8v14H4z"/><path d="M8 11h8M8 15h6"/></symbol>
     <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
     <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20ZM12 9v5M12 18h.01"/></symbol>
     <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 20"/></symbol>
@@ -108,6 +109,7 @@
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="benefits" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-benefits"></use></svg></i><span>المزايا</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="offboarding" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-offboarding"></use></svg></i><span>إنهاء الخدمة</span></a>
       <span class="nav-label">الإدارة والامتثال</span>
+        <a href="#document-library" data-page="document-library" data-permission="document_library.manage"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-documents"></use></svg></i><span>مكتبة الوثائق</span></a>
         <a href="#reports" data-page="reports" data-permission="report.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></i><span>التقارير الحية</span></a>
         <a href="#access-control" data-page="access-control" data-permission="security.manage_permissions"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-shield"></use></svg></i><span>المستخدمون والصلاحيات</span></a>
         <a href="#settings" data-page="settings" data-permission-any="org.manage,smtp.manage,reference.manage"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-settings"></use></svg></i><span>إعدادات المؤسسة</span></a>
@@ -334,6 +336,14 @@
         <article class="card"><div class="toolbar"><select id="lifecycleStatus"><option value="">كل الحالات</option><option value="open">مفتوح</option><option value="in_progress">قيد التنفيذ</option><option value="closed">مغلق</option></select><button class="secondary" id="refreshLifecycle">تحديث</button></div><div id="lifecycleList" class="stack"></div></article>
       </section>
 
+      <section class="page document-library-page" id="document-library">
+        <div class="page-head document-library-head"><div><span class="eyebrow">أرشيف مؤسسي محمي</span><h1>مكتبة الوثائق</h1><p>مكتبة مركزية سرية لقرارات وقوانين ومستندات المؤسسة، متاحة لمدير النظام ومسؤول الموارد البشرية فقط.</p></div><div class="button-row"><button class="secondary" id="createDocumentLibrary" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>إنشاء مكتبة</span></button><button class="primary" id="uploadLibraryDocument" type="button"><svg class="ui-icon" aria-hidden="true"><use href="#icon-plus"></use></svg><span>رفع مستند</span></button></div></div>
+        <div class="document-library-metrics" id="documentLibraryMetrics" aria-live="polite"><div class="loading-block">جارٍ تحميل مؤشرات المكتبة…</div></div>
+        <section class="document-library-categories" aria-labelledby="documentLibraryCategoriesTitle"><div class="section-head"><div><h2 id="documentLibraryCategoriesTitle">المكتبات والتصنيفات</h2><p>أنشئ مكتبات حسب الحاجة أو عطّل مكتبة مع بقاء مستنداتها محفوظة.</p></div><button class="text-btn" id="manageDocumentLibraries" type="button">إدارة المكتبات</button></div><div class="library-category-strip loading-block" id="documentLibraryCategories">جارٍ تحميل المكتبات…</div></section>
+        <article class="card document-library-search-card"><form class="document-library-search" id="documentLibrarySearchForm"><label class="library-search-field"><span><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg></span><input name="q" id="documentLibraryQuery" type="search" placeholder="ابحث بعنوان المستند أو اسم الموظف أو رقمه الوظيفي…" autocomplete="off"></label><label>المكتبة<select name="category_id" id="documentLibraryCategoryFilter"><option value="">كل المكتبات وملفات الموظفين</option></select></label><label>الحالة<select name="status" id="documentLibraryStatusFilter"><option value="active">نشط</option><option value="archived">أرشيفي</option></select></label><button class="primary" type="submit">بحث</button></form></article>
+        <article class="card document-library-results"><div class="section-head"><div><span class="eyebrow">بحث موحد</span><h2>المستندات المتاحة</h2><p>تظهر شارة المصدر لتمييز وثيقة المكتبة عن الوثيقة المحفوظة في ملف الموظف.</p></div><span class="status neutral" id="documentLibraryResultCount">—</span></div><div class="table-wrap"><table><thead><tr><th>المستند</th><th>المكتبة / النوع</th><th>الموظف المرتبط</th><th>التاريخ والمرجع</th><th>المصدر</th><th></th></tr></thead><tbody id="documentLibraryRows"><tr><td colspan="6"><div class="loading-block">جارٍ تحميل مستندات المكتبة…</div></td></tr></tbody></table></div></article>
+      </section>
+
       <section class="page" id="reports">
         <div class="page-head"><div><span class="eyebrow">التحليل التشغيلي</span><h1>التقارير الحية</h1><p>مؤشرات مشتقة لحظياً من قاعدة بيانات الموظفين والفروع والحضور والطلبات والرواتب.</p></div><div class="button-row"><a class="secondary report-download" href="/api/reports/summary.csv" download>تصدير CSV</a><button class="primary" id="printReports">طباعة</button></div></div>
         <div class="metric-grid" id="reportMetrics"></div><article class="card"><div class="section-head"><h2>مصادر المؤشرات</h2><span class="status" id="reportAsOf">—</span></div><p class="report-note">كل قيمة أعلاه محسوبة من السجلات الفعلية في لحظة فتح التقرير. لا توجد أرقام ثابتة أو تكاملات وهمية.</p></article>
@@ -397,7 +407,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261007-production-r5"></script>
-  <script src="app.js?v=5.8.0&build=20261007-production-r5"></script>
+  <script src="i18n.js?v=5.8.0&build=20261007-production-r6"></script>
+  <script src="app.js?v=5.8.0&build=20261007-production-r6"></script>
 </body>
 </html>
