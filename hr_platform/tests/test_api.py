@@ -4003,6 +4003,53 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn(alert_id, {item["id"] for item in general_manager.request("GET", "/api/notifications/inbox")["items"]})
         general_manager.request("GET", f"/api/notifications/{alert_id}", expected=403)
 
+    def test_75_system_admin_employee_edit_ignores_unchanged_legacy_approver(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        suffix = uuid.uuid4().hex[:8]
+        target = admin.request("POST", "/api/employees", {
+            "employee_no": f"ADMEDIT-{suffix}", "full_name": f"ملف تعديل المسؤول {suffix}",
+            "email": f"admin-edit-{suffix}@demo.ae", "hire_date": "2025-01-01",
+        }, expected=201)["employee"]
+        regular_employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
+        hr_employee_id = hr.request("GET", "/api/auth/me")["user"]["employee_id"]
+
+        # Simulate an assignment saved by an older version before approver
+        # eligibility was enforced.
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "UPDATE employees SET approval_employee_id=? WHERE id=?",
+                (regular_employee_id, target["id"]),
+            )
+
+        directory = admin.request("GET", "/api/employees")["items"]
+        by_id = {item["id"]: item for item in directory}
+        self.assertFalse(by_id[regular_employee_id]["approval_eligible"])
+        self.assertTrue(by_id[hr_employee_id]["approval_eligible"])
+
+        edited = admin.request("PATCH", f"/api/employees/{target['id']}", {
+            "qualification": "تم التعديل بواسطة مسؤول النظام",
+            "approval_employee_id": regular_employee_id,
+        })["employee"]
+        self.assertEqual(edited["qualification"], "تم التعديل بواسطة مسؤول النظام")
+        self.assertEqual(edited["approval_employee_id"], regular_employee_id)
+
+        cleared = admin.request("PATCH", f"/api/employees/{target['id']}", {
+            "approval_employee_id": None,
+        })["employee"]
+        self.assertIsNone(cleared["approval_employee_id"])
+        invalid_new_assignment = admin.request("PATCH", f"/api/employees/{target['id']}", {
+            "approval_employee_id": regular_employee_id,
+        }, expected=422)
+        self.assertEqual(invalid_new_assignment["code"], "approval_manager_invalid")
+        self.assertEqual(invalid_new_assignment["details"]["field"], "approval_employee_id")
+
+        app = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-original-value="${esc(current)}"', app)
+        self.assertIn("e.approval_eligible||String(e.id)===String(current)", app)
+        self.assertIn("field.dataset.originalValue", app)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -5277,6 +5277,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 status_clause = " WHERE e.active=0" if archive_mode else " WHERE e.active=1"
                 rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + status_clause + " ORDER BY e.full_name").fetchall()
                 payload = [normalize_employee(row) for row in rows]
+                if not archive_mode and has_permission(self.db, user, "employee.profile.edit"):
+                    for employee in payload:
+                        employee["approval_eligible"] = bool(
+                            self.approval_manager_row(int(employee["id"]), "leave.approve")
+                            or self.approval_manager_row(int(employee["id"]), "overtime.approve")
+                        )
                 scope = "archive" if archive_mode else "all"
             elif has_permission(self.db, user, "employee.team") and user.get("employee_id"):
                 rows = self.db.execute(
@@ -5871,17 +5877,29 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "لا تملك صلاحية تعديل الراتب.", "forbidden", {"permission": "salary.view"})
             if values.get("manager_id") == employee_id:
                 raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
-            if values.get("approval_employee_id") == employee_id:
-                raise APIError(422, "لا يمكن أن يكون الموظف مسؤول اعتماد لنفسه.", "validation_error", {"field": "approval_employee_id"})
-            approval_id = values.get("approval_employee_id")
-            if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
-                raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
+            previous_approval_id = int(existing_employee["approval_employee_id"]) if existing_employee["approval_employee_id"] else None
+            approval_assignment_changed = False
+            if "approval_employee_id" in values:
+                approval_id = int(values["approval_employee_id"]) if values["approval_employee_id"] else None
+                approval_assignment_changed = approval_id != previous_approval_id
+                if not approval_assignment_changed:
+                    # Full-profile forms may echo a legacy assignment while an
+                    # administrator edits an unrelated field. It is not a new
+                    # assignment and must not block the authorized update.
+                    values.pop("approval_employee_id")
+                elif approval_id == employee_id:
+                    raise APIError(422, "لا يمكن أن يكون الموظف مسؤول اعتماد لنفسه.", "validation_error", {"field": "approval_employee_id"})
+                elif approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
+                    raise APIError(
+                        422,
+                        "الموظف المحدد لا يملك صلاحية اعتماد الإجازات أو العمل الإضافي، لذلك لا يمكن تعيينه مسؤول اعتماد.",
+                        "approval_manager_invalid",
+                        {"field": "approval_employee_id"},
+                    )
             if not values and languages is None and contract_dates is None and institution_role is None:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
             reporting_line_changed = "manager_id" in data or "department_id" in data
             previous_manager_id = self.direct_manager_employee_id(employee_id) if reporting_line_changed else None
-            approval_assignment_changed = "approval_employee_id" in values
-            previous_approval_id = int(existing_employee["approval_employee_id"]) if existing_employee["approval_employee_id"] else None
             previous_general_manager = self.db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()["general_manager_employee_id"]
             leadership_changed = institution_role is not None and (int(previous_general_manager) if previous_general_manager else None) != (employee_id if institution_role == "general_manager" else None)
             stamp = now_iso()
