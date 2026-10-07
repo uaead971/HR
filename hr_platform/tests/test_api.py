@@ -161,6 +161,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
         self.assertIn('styles.css?v=5.8.0', index)
         self.assertIn('app.js?v=5.8.0', index)
+        self.assertIn('@media(max-width:650px){.login-visual-runtime .visual-runtime-copy{position:absolute;inset:auto 14px 64px', styles)
+        self.assertIn('.visual-runtime-copy:has(h2:empty){display:none}', styles)
 
     def test_openfreemap_vector_map_contract_for_development_and_production(self):
         root = Path(__file__).parents[1]
@@ -171,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261007-production")
+        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r2")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
