@@ -70,6 +70,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "employee.emergency.manage": "إدارة جهات اتصال الطوارئ للموظفين",
         "employee.team": "عرض أسماء وأرقام موظفي الفريق فقط", "department.manage": "إدارة الأقسام",
         "employee_document.manage": "إدارة وثائق الموظفين", "employee_action.manage": "إدارة المخالفات والتعهدات",
+        "document_library.manage": "إدارة مكتبة الوثائق المؤسسية",
         "employee_custody.view": "عرض سجل عُهد الموظفين", "employee_custody.manage": "إدارة عُهد الموظفين",
         "employee_custody.print": "طباعة سجلات استلام وتسليم العُهد",
         "employee_report.view": "عرض تقرير الموظف الشامل", "employee_report.export": "طباعة وحفظ تقرير الموظف الشامل PDF",
@@ -122,6 +123,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
         "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
         "evaluation.override_manager",
         "employee_document.manage", "employee_action.manage", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.manage", "payroll.approve", "payroll.pay",
+        "document_library.manage",
         "advance.view", "advance.approve", "reference.manage", "lifecycle.view", "lifecycle.manage", "report.view",
         "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
         "employee_report.view", "employee_report.export",
@@ -1865,7 +1867,10 @@ def initialize_database(db_path: Path) -> None:
                     "progress_status": "TEXT NOT NULL DEFAULT 'not_completed'",
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
                 },
-                "notifications": {"available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT"},
+                "notifications": {
+                    "available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT",
+                    "notification_scope": "TEXT NOT NULL DEFAULT 'recipient'",
+                },
                 "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
                 "payroll_items": {
                     "bonus_cents": "INTEGER NOT NULL DEFAULT 0",
@@ -1877,6 +1882,16 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # Expiry notifications created by older versions must immediately
+            # inherit the same administrative visibility rules as new alerts.
+            db.execute(
+                """UPDATE notifications SET notification_scope='administrative'
+                   WHERE id IN (
+                     SELECT notification_id FROM document_expiry_alerts WHERE notification_id IS NOT NULL
+                     UNION SELECT notification_id FROM employee_expiry_alerts WHERE notification_id IS NOT NULL
+                     UNION SELECT notification_id FROM branch_expiry_alerts WHERE notification_id IS NOT NULL
+                   )"""
+            )
             db.execute(
                 """CREATE TABLE IF NOT EXISTS employee_service_history (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2093,6 +2108,21 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("DROP TABLE employee_documents")
                 db.execute("ALTER TABLE employee_documents_v44 RENAME TO employee_documents")
             stamp = now_iso()
+            default_document_libraries = (
+                ("company_licenses", "رخص الشركة"),
+                ("company_policies", "قوانين الشركة"),
+                ("violations_penalties", "المخالفات والجزاءات"),
+                ("custody", "العهد"),
+                ("advances_payments", "السلف وإيصالات المدفوعات"),
+                ("other", "أخرى"),
+            )
+            for sort_order, (default_key, name) in enumerate(default_document_libraries, 1):
+                db.execute(
+                    """INSERT OR IGNORE INTO document_library_categories
+                       (name,default_key,active,sort_order,created_by,created_at,updated_at)
+                       VALUES(?,?,1,?,NULL,?,?)""",
+                    (name, default_key, sort_order, stamp, stamp),
+                )
             db.execute(
                 "INSERT OR IGNORE INTO organization(id,display_name,legal_name,sector,emirate,address,phone,email,website,updated_at) VALUES(1,?,?,?,?,?,?,?,?,?)",
                 ("خيشة - Khaisha", "خيشة - Khaisha", "الخدمات المهنية", "دبي", "دبي، الإمارات العربية المتحدة", "+971 4 000 0000", "people@demo.ae", "https://example.ae", stamp),
@@ -2239,6 +2269,7 @@ def initialize_database(db_path: Path) -> None:
             migrate_nonterminal_legacy_evaluations(db)
             refresh_legacy_generated_contracts(db)
             process_evaluation_reminders(db)
+            ensure_birthday_notifications(db)
     finally:
         db.close()
 
@@ -2314,14 +2345,23 @@ def create_internal_notification(
     title: str,
     body: str,
     available_at: str | None = None,
+    *,
+    message_type: str = "notice",
+    notification_scope: str = "recipient",
 ) -> int | None:
     recipients = sorted({int(value) for value in recipient_user_ids if int(value) > 0})
     if not recipients:
         return None
+    if message_type not in {"law", "notice", "congratulation"}:
+        raise ValueError("Unsupported internal notification message type")
+    if notification_scope not in {"recipient", "administrative", "personal"}:
+        raise ValueError("Unsupported internal notification scope")
     stamp = now_iso()
     cursor = db.execute(
-        "INSERT INTO notifications(sender_user_id,title,body,message_type,audience_type,audience_ref,available_at,created_at) VALUES(?,?,?,'notice','employees',?,?,?)",
-        (sender_user_id, title, body, json_text(recipients), available_at, stamp),
+        """INSERT INTO notifications(
+               sender_user_id,title,body,message_type,notification_scope,audience_type,audience_ref,available_at,created_at
+           ) VALUES(?,?,?,?,?,'employees',?,?,?)""",
+        (sender_user_id, title, body, message_type, notification_scope, json_text(recipients), available_at, stamp),
     )
     notification_id = int(cursor.lastrowid)
     db.executemany(
@@ -2337,6 +2377,7 @@ def compliance_notification_recipients(
     include_hr: bool = True,
     include_system_admins: bool = True,
     include_final_approvers: bool = False,
+    include_general_manager: bool = True,
 ) -> list[int]:
     """Resolve the people who must see a compliance/expiry alert.
 
@@ -2354,9 +2395,29 @@ def compliance_notification_recipients(
             recipients.add(int(candidate["id"]))
         if include_hr and role == "hr":
             recipients.add(int(candidate["id"]))
+        if include_general_manager and is_configured_general_manager(db, candidate):
+            recipients.add(int(candidate["id"]))
         if include_final_approvers and has_permission(db, candidate, "leave.approve"):
             recipients.add(int(candidate["id"]))
     return sorted(recipients)
+
+
+def may_view_notification(db: sqlite3.Connection, user: dict[str, Any], notification: sqlite3.Row | dict[str, Any]) -> bool:
+    """Apply live security rules in addition to the stored recipient list."""
+    keys = notification.keys() if hasattr(notification, "keys") else notification
+    scope = str(notification["notification_scope"] if "notification_scope" in keys else "recipient")
+    if scope != "administrative":
+        return True
+    return is_system_admin(user) or str(user.get("role") or "").lower() == "hr" or is_configured_general_manager(db, user)
+
+
+def system_notification_sender(db: sqlite3.Connection) -> int | None:
+    row = db.execute(
+        """SELECT id FROM users WHERE active=1
+           ORDER BY CASE WHEN is_super_admin=1 THEN 0 WHEN role='admin' THEN 1 WHEN role='hr' THEN 2 ELSE 3 END,id
+           LIMIT 1"""
+    ).fetchone()
+    return int(row["id"]) if row else None
 
 
 def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
@@ -2368,7 +2429,7 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
     recipients = compliance_notification_recipients(db, include_hr=True, include_system_admins=True)
     if not recipients:
         return 0
-    sender_id = recipients[0]
+    sender_id = system_notification_sender(db) or recipients[0]
     today = local_now().date()
     expiry_limit = today + timedelta(days=90)
     documents = db.execute(
@@ -2413,7 +2474,9 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
                 f"(متبقٍ {days_remaining} يوماً). هذه المرحلة هي التنبيه رقم "
                 f"{0 if alert_window_days == 90 else 1 if alert_window_days == 30 else 2 if alert_window_days == 14 else 3}، ويرجى اتخاذ الإجراء قبل انتهاء الصلاحية."
             )
-            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            notification_id = create_internal_notification(
+                db, sender_id, recipients, title, body, notification_scope="administrative"
+            )
             db.execute(
                 "UPDATE document_expiry_alerts SET notification_id=? WHERE document_id=? AND expires_on=?",
                 (notification_id, document["id"], document["expires_on"]),
@@ -2452,7 +2515,9 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
                     db.execute("INSERT INTO employee_expiry_alerts(employee_id,document_type,expires_on,alert_window_days,created_at) VALUES(?,?,?,?,?)", (employee["id"], kind, str(expires_on)[:10], alert_window_days, now_iso()))
                 title = {90: "تنبيه: تمهيدي — وثيقة تقترب من الانتهاء", 30: "تنبيه: أول — وثيقة تنتهي خلال شهر", 14: "تنبيه: ثانٍ — وثيقة تنتهي خلال أسبوعين", 7: "تنبيه: ثالث — وثيقة تنتهي خلال أسبوع"}[alert_window_days]
                 body = f"الموظف: {employee['full_name']} ({employee['employee_no']}). الوثيقة: {label}. تاريخ الانتهاء: {str(expires_on)[:10]} (متبقٍ {days_remaining} يوماً). يرجى تحديث بيانات الوثيقة."
-                notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+                notification_id = create_internal_notification(
+                    db, sender_id, recipients, title, body, notification_scope="administrative"
+                )
                 db.execute("UPDATE employee_expiry_alerts SET notification_id=? WHERE employee_id=? AND document_type=? AND expires_on=?", (notification_id, employee["id"], kind, str(expires_on)[:10]))
                 audit(db, sender_id, "notification.employee_expiry", "employee", employee["id"], {"document_type": kind, "expires_on": str(expires_on)[:10], "days_remaining": days_remaining, "alert_window_days": alert_window_days, "notification_id": notification_id})
                 created += 1
@@ -2469,7 +2534,7 @@ def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
     )
     if not recipients:
         return 0
-    sender_id = recipients[0]
+    sender_id = system_notification_sender(db) or recipients[0]
     today = local_now().date()
     expiry_limit = today + timedelta(days=30)
     branches = db.execute(
@@ -2495,7 +2560,9 @@ def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
                 f"الفرع: {branch['name']}. تاريخ انتهاء الرخصة: {branch['license_expires_on']} "
                 f"(متبقٍ {days_remaining} يوماً). يرجى تجديد الرخصة وتحديث تاريخها في ملف الفرع."
             )
-            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            notification_id = create_internal_notification(
+                db, sender_id, recipients, title, body, notification_scope="administrative"
+            )
             db.execute(
                 "UPDATE branch_expiry_alerts SET notification_id=? WHERE branch_id=? AND expires_on=? AND alert_window_days=?",
                 (notification_id, branch["id"], branch["license_expires_on"], alert_window_days),
@@ -2508,6 +2575,100 @@ def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
 def ensure_expiry_notifications(db: sqlite3.Connection) -> int:
     """Run all compliance expiry checks before an inbox/dashboard is read."""
     return ensure_document_expiry_notifications(db) + ensure_branch_license_notifications(db)
+
+
+ARABIC_GREGORIAN_MONTHS = (
+    "", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+)
+
+
+def birthday_message(employee_name: str, company_name: str, celebration_date: date) -> tuple[str, str]:
+    """Return the standard bilingual company birthday greeting."""
+    title = "🎉 تهنئة بيوم ميلادك | Happy Birthday 🎂"
+    arabic_date = f"{celebration_date.day} {ARABIC_GREGORIAN_MONTHS[celebration_date.month]} {celebration_date.year}"
+    english_date = celebration_date.strftime("%B %d, %Y")
+    body = (
+        "🎉 تهنئة بيوم ميلادك 🎂\n"
+        f"تاريخ المناسبة: {arabic_date}\n\n"
+        f"عزيزي الموظف / {employee_name}\n\n"
+        f"يسعدنا في {company_name} أن نهنئك بيوم ميلادك، ونتمنى لك يوماً سعيداً "
+        "وعاماً جديداً مليئاً بالنجاح والصحة والإنجازات الجميلة. ✨🥳\n\n"
+        "مع أطيب التمنيات،\n"
+        f"فريق / {company_name}\n\n"
+        "────────────\n\n"
+        "🎉 Happy Birthday 🎂\n"
+        f"Date: {english_date}\n\n"
+        f"Dear {employee_name},\n\n"
+        f"Everyone at {company_name} wishes you a very happy birthday and a wonderful year ahead "
+        "filled with health, success, and joyful moments. ✨🥳\n\n"
+        "Warmest wishes,\n"
+        f"The {company_name} Team"
+    )
+    return title, body
+
+
+def ensure_birthday_notifications(db: sqlite3.Connection, today: date | None = None) -> int:
+    """Deliver one private birthday greeting per active employee each year."""
+    celebration_date = today or local_now().date()
+    sender_id = system_notification_sender(db)
+    if sender_id is None:
+        return 0
+    org = db.execute("SELECT display_name,legal_name FROM organization WHERE id=1").fetchone()
+    company_name = str((org["display_name"] or org["legal_name"]) if org else "الشركة").strip() or "الشركة"
+    employees = db.execute(
+        """SELECT e.id,e.full_name,e.birth_date,u.id AS user_id
+             FROM employees e JOIN users u ON u.employee_id=e.id
+            WHERE e.active=1 AND u.active=1 AND e.birth_date IS NOT NULL
+            ORDER BY e.id,u.id"""
+    ).fetchall()
+    created = 0
+    for employee in employees:
+        try:
+            born = date.fromisoformat(str(employee["birth_date"])[:10])
+        except ValueError:
+            continue
+        if (born.month, born.day) != (celebration_date.month, celebration_date.day):
+            continue
+        with db:
+            marker = db.execute(
+                """INSERT OR IGNORE INTO birthday_notification_log(
+                       employee_id,birthday_year,sent_on,created_at
+                   ) VALUES(?,?,?,?)""",
+                (employee["id"], celebration_date.year, celebration_date.isoformat(), now_iso()),
+            )
+            if marker.rowcount != 1:
+                continue
+            title, body = birthday_message(str(employee["full_name"]), company_name, celebration_date)
+            notification_id = create_internal_notification(
+                db,
+                sender_id,
+                [int(employee["user_id"])],
+                title,
+                body,
+                message_type="congratulation",
+                notification_scope="personal",
+            )
+            db.execute(
+                """UPDATE birthday_notification_log SET notification_id=?
+                   WHERE employee_id=? AND birthday_year=?""",
+                (notification_id, employee["id"], celebration_date.year),
+            )
+            audit(
+                db,
+                sender_id,
+                "notification.employee_birthday",
+                "employee",
+                employee["id"],
+                {"birthday_year": celebration_date.year, "sent_on": celebration_date.isoformat(), "notification_id": notification_id},
+            )
+            created += 1
+    return created
+
+
+def ensure_scheduled_notifications(db: sqlite3.Connection) -> int:
+    """Run recurring notification jobs before an inbox or dashboard is read."""
+    return ensure_expiry_notifications(db) + ensure_birthday_notifications(db)
 
 
 def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -2956,6 +3117,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/documents/(\d+)", self.api_document_get),
                     ("PATCH", r"/api/documents/(\d+)", self.api_document_patch),
                     ("DELETE", r"/api/documents/(\d+)", self.api_document_delete),
+                    ("GET", r"/api/document-library/categories", self.api_document_library_categories_get),
+                    ("POST", r"/api/document-library/categories", self.api_document_library_category_post),
+                    ("PATCH", r"/api/document-library/categories/(\d+)", self.api_document_library_category_patch),
+                    ("GET", r"/api/document-library/documents", self.api_document_library_documents_get),
+                    ("POST", r"/api/document-library/documents", self.api_document_library_document_post),
+                    ("GET", r"/api/document-library/documents/(\d+)", self.api_document_library_document_get),
+                    ("PATCH", r"/api/document-library/documents/(\d+)", self.api_document_library_document_patch),
                     ("GET", r"/api/employees/(\d+)/actions", self.api_employee_actions_get),
                     ("POST", r"/api/employees/(\d+)/actions", self.api_employee_actions_post),
                     ("GET", r"/api/employees/(\d+)/custody", self.api_employee_custody_get),
@@ -5109,6 +5277,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 status_clause = " WHERE e.active=0" if archive_mode else " WHERE e.active=1"
                 rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + status_clause + " ORDER BY e.full_name").fetchall()
                 payload = [normalize_employee(row) for row in rows]
+                if not archive_mode and has_permission(self.db, user, "employee.profile.edit"):
+                    for employee in payload:
+                        employee["approval_eligible"] = bool(
+                            self.approval_manager_row(int(employee["id"]), "leave.approve")
+                            or self.approval_manager_row(int(employee["id"]), "overtime.approve")
+                        )
                 scope = "archive" if archive_mode else "all"
             elif has_permission(self.db, user, "employee.team") and user.get("employee_id"):
                 rows = self.db.execute(
@@ -5703,17 +5877,29 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "لا تملك صلاحية تعديل الراتب.", "forbidden", {"permission": "salary.view"})
             if values.get("manager_id") == employee_id:
                 raise APIError(422, "لا يمكن أن يكون الموظف مديراً مباشراً لنفسه.", "validation_error")
-            if values.get("approval_employee_id") == employee_id:
-                raise APIError(422, "لا يمكن أن يكون الموظف مسؤول اعتماد لنفسه.", "validation_error", {"field": "approval_employee_id"})
-            approval_id = values.get("approval_employee_id")
-            if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
-                raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
+            previous_approval_id = int(existing_employee["approval_employee_id"]) if existing_employee["approval_employee_id"] else None
+            approval_assignment_changed = False
+            if "approval_employee_id" in values:
+                approval_id = int(values["approval_employee_id"]) if values["approval_employee_id"] else None
+                approval_assignment_changed = approval_id != previous_approval_id
+                if not approval_assignment_changed:
+                    # Full-profile forms may echo a legacy assignment while an
+                    # administrator edits an unrelated field. It is not a new
+                    # assignment and must not block the authorized update.
+                    values.pop("approval_employee_id")
+                elif approval_id == employee_id:
+                    raise APIError(422, "لا يمكن أن يكون الموظف مسؤول اعتماد لنفسه.", "validation_error", {"field": "approval_employee_id"})
+                elif approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
+                    raise APIError(
+                        422,
+                        "الموظف المحدد لا يملك صلاحية اعتماد الإجازات أو العمل الإضافي، لذلك لا يمكن تعيينه مسؤول اعتماد.",
+                        "approval_manager_invalid",
+                        {"field": "approval_employee_id"},
+                    )
             if not values and languages is None and contract_dates is None and institution_role is None:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
             reporting_line_changed = "manager_id" in data or "department_id" in data
             previous_manager_id = self.direct_manager_employee_id(employee_id) if reporting_line_changed else None
-            approval_assignment_changed = "approval_employee_id" in values
-            previous_approval_id = int(existing_employee["approval_employee_id"]) if existing_employee["approval_employee_id"] else None
             previous_general_manager = self.db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()["general_manager_employee_id"]
             leadership_changed = institution_role is not None and (int(previous_general_manager) if previous_general_manager else None) != (employee_id if institution_role == "general_manager" else None)
             stamp = now_iso()
@@ -5887,6 +6073,243 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if self.query.get("status"): documents=[d for d in documents if d["status"]==self.query["status"]]
             alerts=[d for d in documents if d["status"] in {"expiring_soon","expired"}]
             self.send_json(200,{"items":documents,"alerts":alerts,"counts":{"total":len(documents),"expired":sum(d["status"]=="expired" for d in documents),"expiring_soon":sum(d["status"]=="expiring_soon" for d in documents)}})
+
+        def require_document_library(self) -> dict[str, Any]:
+            user = self.require_permission("document_library.manage")
+            if str(user.get("role")) not in PEOPLE_ADMIN_ROLES:
+                raise APIError(403, "مكتبة الوثائق متاحة فقط لمدير النظام ومسؤول الموارد البشرية.", "forbidden")
+            return user
+
+        def serialize_document_library_category(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            item = dict(row)
+            item["active"] = bool(item.get("active"))
+            item["document_count"] = int(item.get("document_count") or 0)
+            return item
+
+        def serialize_document_library_document(self, row: sqlite3.Row | dict[str, Any], include_data: bool = False) -> dict[str, Any]:
+            item = dict(row)
+            item["archived"] = bool(item.get("archived"))
+            item["source"] = "library"
+            item["source_label"] = "مكتبة"
+            if not include_data:
+                item.pop("data_url", None)
+            return item
+
+        def api_document_library_categories_get(self) -> None:
+            self.require_document_library()
+            include_inactive = self.query.get("status") in {"all", "inactive", "archived"}
+            condition = "" if include_inactive else "WHERE c.active=1"
+            rows = self.db.execute(
+                f"""SELECT c.*,(SELECT COUNT(*) FROM document_library_documents d WHERE d.category_id=c.id) document_count
+                      FROM document_library_categories c {condition}
+                     ORDER BY c.active DESC,c.sort_order,c.name"""
+            ).fetchall()
+            self.send_json(200, {"items": [self.serialize_document_library_category(row) for row in rows]})
+
+        def api_document_library_category_post(self) -> None:
+            user = self.require_document_library()
+            data = self.read_json()
+            name = str(data.get("name") or "").strip()
+            if not name:
+                raise APIError(422, "اسم المكتبة مطلوب.", "validation_error", {"field": "name"})
+            if len(name) > 120:
+                raise APIError(422, "اسم المكتبة أطول من الحد المسموح.", "validation_error", {"field": "name"})
+            stamp = now_iso()
+            sort_order = as_int(data.get("sort_order", 1000), "sort_order", 0, 100000)
+            try:
+                with self.db:
+                    result = self.db.execute(
+                        """INSERT INTO document_library_categories(name,default_key,active,sort_order,created_by,created_at,updated_at)
+                           VALUES(?,NULL,1,?,?,?,?)""",
+                        (name, sort_order, user["id"], stamp, stamp),
+                    )
+                    category_id = int(result.lastrowid)
+                    audit(self.db, user["id"], "document_library.category_create", "document_library_category", category_id, {"name": name})
+            except sqlite3.IntegrityError:
+                raise APIError(409, "توجد مكتبة بهذا الاسم بالفعل.", "duplicate_category", {"field": "name"})
+            row = self.db.execute(
+                """SELECT c.*,(SELECT COUNT(*) FROM document_library_documents d WHERE d.category_id=c.id) document_count
+                     FROM document_library_categories c WHERE c.id=?""", (category_id,),
+            ).fetchone()
+            self.send_json(201, {"category": self.serialize_document_library_category(row), "message": "تم إنشاء المكتبة بنجاح."})
+
+        def api_document_library_category_patch(self, category_id: int) -> None:
+            user = self.require_document_library()
+            row = self.db.execute("SELECT * FROM document_library_categories WHERE id=?", (category_id,)).fetchone()
+            if not row:
+                raise APIError(404, "المكتبة غير موجودة.", "not_found")
+            data = self.read_json(); values: dict[str, Any] = {}
+            if "name" in data:
+                name = str(data.get("name") or "").strip()
+                if not name:
+                    raise APIError(422, "اسم المكتبة مطلوب.", "validation_error", {"field": "name"})
+                if len(name) > 120:
+                    raise APIError(422, "اسم المكتبة أطول من الحد المسموح.", "validation_error", {"field": "name"})
+                values["name"] = name
+            if "active" in data:
+                values["active"] = 1 if bool(data["active"]) else 0
+            if "sort_order" in data:
+                values["sort_order"] = as_int(data["sort_order"], "sort_order", 0, 100000)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute("UPDATE document_library_categories SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), category_id))
+                    audit(self.db, user["id"], "document_library.category_update", "document_library_category", category_id, values)
+            except sqlite3.IntegrityError:
+                raise APIError(409, "توجد مكتبة بهذا الاسم بالفعل.", "duplicate_category", {"field": "name"})
+            updated = self.db.execute(
+                """SELECT c.*,(SELECT COUNT(*) FROM document_library_documents d WHERE d.category_id=c.id) document_count
+                     FROM document_library_categories c WHERE c.id=?""", (category_id,),
+            ).fetchone()
+            self.send_json(200, {"category": self.serialize_document_library_category(updated), "message": "تم تحديث المكتبة بنجاح."})
+
+        def api_document_library_documents_get(self) -> None:
+            user = self.require_document_library()
+            query = str(self.query.get("q") or "").strip()[:200]
+            category_value = self.query.get("category_id")
+            category_id = as_int(category_value, "category_id", 1) if category_value else None
+            archived = 1 if self.query.get("status") == "archived" else 0
+            like = f"%{query}%"
+            library_conditions = ["d.archived=?"]
+            library_params: list[Any] = [archived]
+            if category_id:
+                library_conditions.append("d.category_id=?"); library_params.append(category_id)
+            if query:
+                library_conditions.append("(d.title LIKE ? OR d.description LIKE ? OR d.keywords LIKE ? OR d.reference_number LIKE ? OR e.full_name LIKE ? OR e.employee_no LIKE ?)")
+                library_params.extend([like] * 6)
+            library_rows = self.db.execute(
+                """SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no
+                     FROM document_library_documents d
+                     JOIN document_library_categories c ON c.id=d.category_id
+                     LEFT JOIN employees e ON e.id=d.employee_id
+                    WHERE """ + " AND ".join(library_conditions) + " ORDER BY d.created_at DESC,d.id DESC LIMIT 200",
+                library_params,
+            ).fetchall()
+            results = [self.serialize_document_library_document(row) for row in library_rows]
+            if not category_id:
+                employee_conditions = ["d.archived=?"]
+                employee_params: list[Any] = [archived]
+                if query:
+                    employee_conditions.append("(d.title LIKE ? OR d.notes LIKE ? OR d.document_number LIKE ? OR d.issuer LIKE ? OR e.full_name LIKE ? OR e.employee_no LIKE ?)")
+                    employee_params.extend([like] * 6)
+                employee_rows = self.db.execute(
+                    """SELECT d.id,d.employee_id,d.title,d.notes description,'' keywords,d.document_number reference_number,
+                              d.issued_on document_date,d.file_name,d.mime_type,d.archived,d.created_at,d.updated_at,
+                              e.full_name employee_name,e.employee_no,d.document_type
+                         FROM employee_documents d JOIN employees e ON e.id=d.employee_id
+                        WHERE """ + " AND ".join(employee_conditions) + " ORDER BY d.created_at DESC,d.id DESC LIMIT 200",
+                    employee_params,
+                ).fetchall()
+                for raw in employee_rows:
+                    item = dict(raw)
+                    item.update({"source": "employee_file", "source_label": "ملف موظف", "category_id": None, "category_name": DOCUMENT_TYPE_LABELS_AR.get(item.get("document_type"), "وثيقة موظف")})
+                    item["archived"] = bool(item.get("archived")); results.append(item)
+            results.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+            stats = self.db.execute(
+                """SELECT COUNT(*) total_documents,
+                          SUM(CASE WHEN employee_id IS NOT NULL THEN 1 ELSE 0 END) linked_documents,
+                          MAX(created_at) latest_created_at
+                     FROM document_library_documents WHERE archived=0"""
+            ).fetchone()
+            category_count = self.db.execute("SELECT COUNT(*) FROM document_library_categories WHERE active=1").fetchone()[0]
+            with self.db:
+                audit(self.db, user["id"], "document_library.search", "document_library", None, {"query": query, "category_id": category_id, "status": "archived" if archived else "active"})
+            self.send_json(200, {"items": results[:250], "stats": {"total_documents": int(stats["total_documents"] or 0), "linked_documents": int(stats["linked_documents"] or 0), "category_count": int(category_count), "latest_created_at": stats["latest_created_at"]}})
+
+        def validate_document_library_file(self, data: dict[str, Any]) -> tuple[str, str, str]:
+            try:
+                data_url = validate_data_url(data.get("data_url"), "مستند المكتبة", ("image/png", "image/jpeg", "image/webp", "application/pdf"), 2_000_000)
+            except APIError as exc:
+                if exc.details is None:
+                    exc.details = {"field": "file"}
+                elif isinstance(exc.details, dict):
+                    exc.details.setdefault("field", "file")
+                raise
+            if not data_url:
+                raise APIError(422, "اختر ملف المستند.", "validation_error", {"field": "file"})
+            mime_type = data_url[5:data_url.index(";")]
+            file_name = str(data.get("file_name") or "").strip()
+            if not file_name:
+                raise APIError(422, "اسم الملف مطلوب.", "validation_error", {"field": "file"})
+            if len(file_name) > 240:
+                raise APIError(422, "اسم الملف أطول من الحد المسموح.", "validation_error", {"field": "file"})
+            allowed_extensions = {"image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/webp": {".webp"}, "application/pdf": {".pdf"}}
+            if Path(file_name).suffix.lower() not in allowed_extensions[mime_type]:
+                raise APIError(422, "امتداد الملف لا يطابق نوع محتواه.", "invalid_upload", {"field": "file"})
+            return file_name, mime_type, data_url
+
+        def document_library_metadata(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            if not partial or "category_id" in data:
+                category_id = as_int(data.get("category_id"), "category_id", 1)
+                category = self.db.execute("SELECT id FROM document_library_categories WHERE id=?" + ("" if partial else " AND active=1"), (category_id,)).fetchone()
+                if not category:
+                    raise APIError(422, "المكتبة المحددة غير موجودة أو مؤرشفة.", "validation_error", {"field": "category_id"})
+                result["category_id"] = category_id
+            if not partial or "title" in data:
+                title = str(data.get("title") or "").strip()
+                if not title:
+                    raise APIError(422, "عنوان المستند مطلوب.", "validation_error", {"field": "title"})
+                if len(title) > 180:
+                    raise APIError(422, "عنوان المستند أطول من الحد المسموح.", "validation_error", {"field": "title"})
+                result["title"] = title
+            for key, limit in (("description", 2000), ("keywords", 1000), ("reference_number", 160)):
+                if not partial or key in data:
+                    result[key] = optional_text(data, key, limit)
+            if not partial or "document_date" in data:
+                result["document_date"] = parse_date(data["document_date"], "document_date").isoformat() if data.get("document_date") else None
+            if not partial or "employee_id" in data:
+                employee_id = as_int(data["employee_id"], "employee_id", 1) if data.get("employee_id") else None
+                if employee_id and not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+                    raise APIError(422, "الموظف المرتبط غير موجود.", "validation_error", {"field": "employee_id"})
+                result["employee_id"] = employee_id
+            return result
+
+        def api_document_library_document_post(self) -> None:
+            user = self.require_document_library(); data = self.read_json()
+            metadata = self.document_library_metadata(data)
+            file_name, mime_type, data_url = self.validate_document_library_file(data)
+            stamp = now_iso()
+            with self.db:
+                result = self.db.execute(
+                    """INSERT INTO document_library_documents
+                       (category_id,employee_id,title,description,keywords,reference_number,document_date,file_name,mime_type,data_url,archived,uploaded_by,updated_by,created_at,updated_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)""",
+                    (metadata["category_id"], metadata["employee_id"], metadata["title"], metadata["description"], metadata["keywords"], metadata["reference_number"], metadata["document_date"], file_name, mime_type, data_url, user["id"], user["id"], stamp, stamp),
+                )
+                document_id = int(result.lastrowid)
+                audit(self.db, user["id"], "document_library.document_upload", "document_library_document", document_id, {"category_id": metadata["category_id"], "employee_id": metadata["employee_id"], "file_name": file_name})
+            row = self.db.execute("""SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no FROM document_library_documents d JOIN document_library_categories c ON c.id=d.category_id LEFT JOIN employees e ON e.id=d.employee_id WHERE d.id=?""", (document_id,)).fetchone()
+            self.send_json(201, {"document": self.serialize_document_library_document(row), "message": "تم رفع المستند وحفظه في المكتبة بنجاح."})
+
+        def api_document_library_document_get(self, document_id: int) -> None:
+            user = self.require_document_library()
+            row = self.db.execute("""SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no FROM document_library_documents d JOIN document_library_categories c ON c.id=d.category_id LEFT JOIN employees e ON e.id=d.employee_id WHERE d.id=?""", (document_id,)).fetchone()
+            if not row:
+                raise APIError(404, "المستند غير موجود.", "not_found")
+            with self.db:
+                audit(self.db, user["id"], "document_library.document_view", "document_library_document", document_id)
+            self.send_json(200, {"document": self.serialize_document_library_document(row, True)})
+
+        def api_document_library_document_patch(self, document_id: int) -> None:
+            user = self.require_document_library()
+            row = self.db.execute("SELECT * FROM document_library_documents WHERE id=?", (document_id,)).fetchone()
+            if not row:
+                raise APIError(404, "المستند غير موجود.", "not_found")
+            data = self.read_json(); values = self.document_library_metadata(data, partial=True)
+            if "archived" in data:
+                values["archived"] = 1 if bool(data["archived"]) else 0
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_by"] = user["id"]; values["updated_at"] = now_iso()
+            action = "document_library.document_archive" if values.get("archived") == 1 else "document_library.document_update"
+            with self.db:
+                self.db.execute("UPDATE document_library_documents SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), document_id))
+                audit(self.db, user["id"], action, "document_library_document", document_id, {key: value for key, value in values.items() if key not in {"updated_at", "updated_by"}})
+            updated = self.db.execute("""SELECT d.*,c.name category_name,e.full_name employee_name,e.employee_no FROM document_library_documents d JOIN document_library_categories c ON c.id=d.category_id LEFT JOIN employees e ON e.id=d.employee_id WHERE d.id=?""", (document_id,)).fetchone()
+            self.send_json(200, {"document": self.serialize_document_library_document(updated), "message": "تم أرشفة المستند بنجاح." if values.get("archived") == 1 else "تم تحديث بيانات المستند بنجاح."})
 
         def serialize_document(self, row: sqlite3.Row | dict[str, Any], include_data: bool=False) -> dict[str, Any]:
             result=dict(row); result["visible_to_employee"]=bool(result["visible_to_employee"]); result["no_expiry"]=bool(result.get("no_expiry")); result["archived"]=bool(result.get("archived"))
@@ -6237,6 +6660,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_my_dashboard(self) -> None:
             user = self.current_user(True)
             assert user is not None
+            ensure_scheduled_notifications(self.db)
             employee_id = self.own_employee_id()
             employee = self.db.execute(employee_query(True) + " WHERE e.id=?", (employee_id,)).fetchone()
             org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
@@ -6276,13 +6700,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "advance": cents_value(advance_cents),
                     "net": cents_value(max(0, gross_cents - advance_cents)),
                 }
-            unread = self.db.execute(
-                """SELECT COUNT(*) FROM notification_recipients r
+            notification_rows = self.db.execute(
+                """SELECT n.notification_scope,r.read_at FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
                    WHERE r.user_id=? AND r.read_at IS NULL
+                     AND n.hidden_at IS NULL
                      AND (n.available_at IS NULL OR n.available_at<=?)""",
                 (user["id"], now_iso()),
-            ).fetchone()[0]
+            ).fetchall()
+            unread = sum(1 for row in notification_rows if may_view_notification(self.db, user, row))
             self.send_json(200, {
                 "employee": normalize_employee(employee), "organization": public_organization_projection(serialize_org(org)), "salary": salary_snapshot,
                 "leave_balances": balances, "attendance_today": row_dict(attendance),
@@ -9039,9 +9465,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_inbox(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_expiry_notifications(self.db)
+            ensure_scheduled_notifications(self.db)
             rows = self.db.execute(
-                """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
+                """SELECT n.id,n.title,n.body,n.message_type,n.notification_scope,n.audience_type,n.created_at,n.available_at,
                           u.display_name AS sender_name,r.read_at,n.edited_at
                    FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
                    JOIN users u ON u.id=n.sender_user_id
@@ -9049,20 +9475,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                    ORDER BY n.created_at DESC""",
                 (user["id"], now_iso()),
             ).fetchall()
+            rows = [row for row in rows if may_view_notification(self.db, user, row)]
             unread = sum(1 for row in rows if row["read_at"] is None)
             self.send_json(200, {"items": [dict(r) for r in rows], "unread_count": unread})
 
         def api_notification_unread_count(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_expiry_notifications(self.db)
-            count = self.db.execute(
-                """SELECT COUNT(*) FROM notification_recipients r
+            ensure_scheduled_notifications(self.db)
+            rows = self.db.execute(
+                """SELECT n.notification_scope,r.read_at FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
                    WHERE r.user_id=? AND r.read_at IS NULL AND n.hidden_at IS NULL
                      AND (n.available_at IS NULL OR n.available_at<=?)""",
                 (user["id"], now_iso()),
-            ).fetchone()[0]
+            ).fetchall()
+            count = sum(1 for row in rows if may_view_notification(self.db, user, row))
             self.send_json(200, {"unread_count": count})
 
         def api_notification_get(self, notification_id: int) -> None:
@@ -9077,6 +9505,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchone()
             if row is None:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
+            if not may_view_notification(self.db, user, row):
+                raise APIError(403, "هذا إشعار إداري لا تملك صلاحية الاطلاع عليه.", "forbidden")
             privileged = str(user.get("role")) == "admin" or row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
             if row["hidden_at"] and str(user.get("role")) != "admin":
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
@@ -9091,6 +9521,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_read(self, notification_id: int) -> None:
             user = self.current_user(True)
             assert user is not None
+            notification = self.db.execute(
+                """SELECT n.notification_scope,n.hidden_at,n.available_at
+                     FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
+                    WHERE r.notification_id=? AND r.user_id=?""",
+                (notification_id, user["id"]),
+            ).fetchone()
+            if notification is None:
+                raise APIError(404, "الإشعار غير موجود في صندوقك.", "not_found")
+            if not may_view_notification(self.db, user, notification):
+                raise APIError(403, "هذا إشعار إداري لا تملك صلاحية الاطلاع عليه.", "forbidden")
             with self.db:
                 stamp = now_iso()
                 result = self.db.execute(
@@ -9109,16 +9549,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True)
             assert user is not None
             stamp = now_iso()
+            candidates = self.db.execute(
+                """SELECT r.notification_id,n.notification_scope
+                     FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
+                    WHERE r.user_id=? AND r.read_at IS NULL AND n.hidden_at IS NULL
+                      AND (n.available_at IS NULL OR n.available_at<=?)""",
+                (user["id"], stamp),
+            ).fetchall()
+            notification_ids = [int(row["notification_id"]) for row in candidates if may_view_notification(self.db, user, row)]
+            updated = 0
             with self.db:
-                result = self.db.execute(
-                    """UPDATE notification_recipients SET read_at=?
-                       WHERE user_id=? AND read_at IS NULL
-                         AND notification_id IN (
-                           SELECT id FROM notifications WHERE hidden_at IS NULL AND (available_at IS NULL OR available_at<=?)
-                         )""",
-                    (stamp, user["id"], stamp),
-                )
-            self.send_json(200, {"ok": True, "updated": result.rowcount})
+                if notification_ids:
+                    placeholders = ",".join("?" for _ in notification_ids)
+                    result = self.db.execute(
+                        f"""UPDATE notification_recipients SET read_at=?
+                              WHERE user_id=? AND read_at IS NULL AND notification_id IN ({placeholders})""",
+                        (stamp, user["id"], *notification_ids),
+                    )
+                    updated = result.rowcount
+            self.send_json(200, {"ok": True, "updated": updated})
 
         # Salary certificates
         def certificate_payload(self, row: sqlite3.Row) -> dict[str, Any]:

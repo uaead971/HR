@@ -177,6 +177,21 @@
     ,'سلم رواتب الدرجة':'Grade salary scale','أدخل الراتب الأساسي الشهري لكل حرف في هذه الدرجة.':'Enter the monthly base salary for each letter in this grade.','حرف الدرجة':'Grade level','الراتب الأساسي حسب السلم':'Base salary from scale','يُحدد الراتب الأساسي من سلم الدرجة والحرف.':'Base salary is determined by the grade and level.','لا يوجد راتب مسجل لهذا الحرف.':'No salary is registered for this level.','الحرف':'Level','الأولى':'First','الثانية':'Second','الثالثة':'Third','الرابعة':'Fourth','الخامسة':'Fifth','السادسة':'Sixth','السابعة':'Seventh','الثامنة':'Eighth','الراتب الأساسي الشهري':'Monthly base salary'
   });
 
+  Object.assign(english, {
+    'مكتبة الوثائق':'Document Library','أرشيف مؤسسي محمي':'Protected organization archive',
+    'مكتبة مركزية سرية لقرارات وقوانين ومستندات المؤسسة، متاحة لمدير النظام ومسؤول الموارد البشرية فقط.':'A confidential central library for organization decisions, policies, and documents, available only to system administrators and HR.',
+    'إنشاء مكتبة':'Create library','رفع مستند':'Upload document','إجمالي المستندات':'Total documents','عدد المكتبات':'Libraries',
+    'مرتبطة بموظفين':'Linked to employees','آخر إضافة':'Latest addition','المكتبات والتصنيفات':'Libraries and categories','إدارة المكتبات':'Manage libraries',
+    'ابحث بعنوان المستند أو اسم الموظف أو رقمه الوظيفي…':'Search by document title, employee name, or employee number…',
+    'كل المكتبات وملفات الموظفين':'All libraries and employee files','نشط':'Active','أرشيفي':'Archived','بحث موحد':'Unified search','المستندات المتاحة':'Available documents',
+    'المكتبة / النوع':'Library / type','الموظف المرتبط':'Linked employee','التاريخ والمرجع':'Date & reference','المصدر':'Source','عرض / تنزيل':'View / download',
+    'اسم المكتبة':'Library name','مكتبة نشطة ومتاحة للرفع':'Active and available for uploads','يمكن تعطيل المكتبة دون حذف المستندات المحفوظة فيها.':'A library can be disabled without deleting its documents.',
+    'رفع مستند إلى المكتبة':'Upload to library','عنوان المستند':'Document title','رقم مرجعي':'Reference number','تاريخ المستند':'Document date','ربط بموظف (اختياري)':'Link to employee (optional)',
+    'غير مرتبط بموظف':'Not linked to an employee','الوصف وكلمات البحث':'Description and search terms','كلمات إضافية':'Additional keywords','ملف المستند':'Document file','PDF أو PNG أو JPEG أو WebP حتى ٢ م.ب':'PDF, PNG, JPEG, or WebP up to 2 MB',
+    'رفع وحفظ المستند':'Upload and save','تعديل بيانات المستند':'Edit document metadata','تنزيل المستند':'Download document','تم بنجاح':'Completed','تعذر تنفيذ الإجراء':'Action failed','إعادة المحاولة':'Try again','إدارة مكتبة الوثائق المؤسسية':'Manage the organization document library',
+    'اسم المكتبة مطلوب.':'Library name is required.','المكتبة مطلوبة.':'Library is required.','عنوان المستند مطلوب.':'Document title is required.','ملف المستند مطلوب.':'Document file is required.','رفع أول مستند':'Upload first document','لا توجد مستندات تطابق البحث الحالي.':'No documents match the current search.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

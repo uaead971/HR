@@ -173,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r5")
+        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r6")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3831,6 +3831,224 @@ class HRAPIEndToEndTests(unittest.TestCase):
             {row["work_date"] for row in historical["items"]},
             {(termination_day - timedelta(days=1)).isoformat(), termination_day.isoformat()},
         )
+
+    def test_73_document_library_rbac_search_audit_and_employee_edit_regression(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        employee_client = self.client("employee@demo.ae", "Emp@12345")
+
+        me = admin.request("GET", "/api/auth/me")
+        self.assertIn("*", me["permissions"])
+        self.assertIn("employee.profile.edit", me["permissions"])
+        self.assertIn("document_library.manage", me["permissions"])
+
+        suffix = uuid.uuid4().hex[:8]
+        created_employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"DOC-{suffix}", "full_name": f"محمد الوثائق {suffix}",
+            "email": f"documents-{suffix}@demo.ae", "hire_date": "2025-01-01",
+        }, expected=201)["employee"]
+        edited = admin.request("PATCH", f"/api/employees/{created_employee['id']}", {
+            "qualification": "ماجستير إدارة الوثائق",
+        })["employee"]
+        self.assertEqual(edited["qualification"], "ماجستير إدارة الوثائق")
+
+        manager.request("GET", "/api/document-library/categories", expected=403)
+        employee_client.request("GET", "/api/document-library/documents", expected=403)
+        categories = hr.request("GET", "/api/document-library/categories?status=all")["items"]
+        self.assertGreaterEqual(len(categories), 6)
+        missing_name = hr.request("POST", "/api/document-library/categories", {"name": ""}, expected=422)
+        self.assertEqual(missing_name["details"]["field"], "name")
+        category = hr.request("POST", "/api/document-library/categories", {
+            "name": f"عقود موثقة {suffix}",
+        }, expected=201)["category"]
+
+        pdf_data = "data:application/pdf;base64," + __import__("base64").b64encode(b"%PDF-1.4\n%%EOF").decode("ascii")
+        uploaded = hr.request("POST", "/api/document-library/documents", {
+            "category_id": category["id"], "employee_id": created_employee["id"],
+            "title": f"عقد الموظف محمد {suffix}", "description": "عقد موثق من العمل والعمال",
+            "keywords": "عقد موظف موثق", "reference_number": f"MOHRE-{suffix}",
+            "document_date": "2026-09-01", "file_name": f"contract-{suffix}.pdf", "data_url": pdf_data,
+        }, expected=201)["document"]
+        self.assertEqual(uploaded["source"], "library")
+        self.assertEqual(uploaded["employee_no"], created_employee["employee_no"])
+
+        by_name = hr.request("GET", f"/api/document-library/documents?q={suffix}")
+        self.assertIn(uploaded["id"], {item["id"] for item in by_name["items"] if item["source"] == "library"})
+        by_category = hr.request("GET", f"/api/document-library/documents?category_id={category['id']}")
+        self.assertEqual({item["source"] for item in by_category["items"]}, {"library"})
+        viewed = admin.request("GET", f"/api/document-library/documents/{uploaded['id']}")["document"]
+        self.assertEqual(viewed["data_url"], pdf_data)
+        updated = admin.request("PATCH", f"/api/document-library/documents/{uploaded['id']}", {
+            "title": f"عقد الموظف محمد المعدل {suffix}",
+        })["document"]
+        self.assertIn("المعدل", updated["title"])
+        hr.request("PATCH", f"/api/document-library/documents/{uploaded['id']}", {"archived": True})
+        archived = hr.request("GET", f"/api/document-library/documents?status=archived&q={suffix}")["items"]
+        self.assertTrue(any(item["source"] == "library" and item["id"] == uploaded["id"] for item in archived))
+
+        png_data = "data:image/png;base64," + __import__("base64").b64encode(b"\x89PNG\r\n\x1a\n").decode("ascii")
+        employee_document = hr.request("POST", f"/api/employees/{created_employee['id']}/documents", {
+            "document_type": "other", "title": f"إقرار الموظف {suffix}",
+            "file_name": f"statement-{suffix}.png", "data_url": png_data,
+        }, expected=201)["document"]
+        central = hr.request("GET", f"/api/document-library/documents?q={created_employee['employee_no']}")["items"]
+        self.assertTrue(any(item["source"] == "employee_file" and item["id"] == employee_document["id"] for item in central))
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            actions = {row["action"] for row in db.execute("SELECT action FROM audit_log WHERE action LIKE 'document_library.%'")}
+        self.assertTrue({"document_library.category_create", "document_library.document_upload", "document_library.document_view", "document_library.document_update", "document_library.document_archive", "document_library.search"}.issubset(actions))
+
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        schema = (root / "schema.sql").read_text(encoding="utf-8")
+        self.assertIn("queueMicrotask(()=>enhanceEmployeeProfileV56()", app)
+        self.assertIn("data-edit-employee-profile", app)
+        self.assertIn("finally{if(button?.isConnected)setBusy(button,false)}", app)
+        for marker in ("document-library", "documentLibrarySearchForm", "documentLibraryRows"):
+            self.assertIn(marker, index + app)
+        self.assertIn("document_library.manage", app + index + (root / "server.py").read_text(encoding="utf-8"))
+        self.assertIn("document_library_documents", schema)
+        self.assertIn("z-index:140", styles)
+        self.assertIn('id="documentLibraryCategoryForm" novalidate', app)
+        self.assertIn('id="documentLibraryDocumentForm" novalidate', app)
+        for field in ("name", "category_id", "title", "file"):
+            self.assertIn(f'data-library-field-error="{field}"', app)
+        self.assertIn("validateDocumentLibraryForm", app)
+        self.assertIn("alertMessage(firstMessage,true)", app)
+        self.assertIn("data-library-first-upload", app)
+        self.assertIn(".document-library-empty{height:160px;min-height:160px;max-height:180px", styles)
+        self.assertIn(".document-library-empty{position:sticky;inset-inline-start:0;width:min(340px,calc(100vw - 48px));margin-inline-end:auto}", styles)
+
+    def test_74_administrative_notification_privacy_and_bilingual_birthday_greeting(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        regular_employee = self.client("employee@demo.ae", "Emp@12345")
+        suffix = uuid.uuid4().hex[:8]
+        today = date.today()
+
+        birthday_email = f"birthday-{suffix}@demo.ae"
+        birthday_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"BDAY-{suffix}", "full_name": f"موظف عيد الميلاد {suffix}",
+            "email": birthday_email, "birth_date": f"2000-{today.month:02d}-{today.day:02d}",
+            "hire_date": "2024-01-01", "create_user": True,
+            "password": "Birthday@12345", "role": "employee",
+        }, expected=201)["employee"]
+        birthday_user = self.client(birthday_email, "Birthday@12345")
+
+        gm_email = f"notification-gm-{suffix}@demo.ae"
+        gm_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"NTGM-{suffix}", "full_name": f"مدير عام الإشعارات {suffix}",
+            "email": gm_email, "hire_date": "2020-01-01", "create_user": True,
+            "password": "NotifyGM@12345", "role": "employee",
+        }, expected=201)["employee"]
+        hr.request("PATCH", "/api/org", {"general_manager_employee_id": gm_employee["id"]})
+        general_manager = self.client(gm_email, "NotifyGM@12345")
+
+        tiny_png = "data:image/png;base64,iVBORw0KGgo="
+        hr.request("POST", f"/api/employees/{birthday_employee['id']}/documents", {
+            "document_type": "contract", "title": f"عقد إداري خاص {suffix}",
+            "file_name": f"private-contract-{suffix}.png", "data_url": tiny_png,
+            "issued_on": (today - timedelta(days=300)).isoformat(),
+            "expires_on": (today + timedelta(days=14)).isoformat(),
+        }, expected=201)
+
+        hr_inbox = hr.request("GET", "/api/notifications/inbox")["items"]
+        alert = next(
+            item for item in hr_inbox
+            if item["notification_scope"] == "administrative" and birthday_employee["employee_no"] in item["body"]
+        )
+        alert_id = alert["id"]
+        self.assertIn(alert_id, {item["id"] for item in admin.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertIn(alert_id, {item["id"] for item in general_manager.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertNotIn(alert_id, {item["id"] for item in birthday_user.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertNotIn(alert_id, {item["id"] for item in regular_employee.request("GET", "/api/notifications/inbox")["items"]})
+        birthday_user.request("GET", f"/api/notifications/{alert_id}", expected=403)
+
+        birthday_items = birthday_user.request("GET", "/api/notifications/inbox")["items"]
+        greetings = [item for item in birthday_items if item["message_type"] == "congratulation" and item["notification_scope"] == "personal"]
+        self.assertEqual(len([item for item in greetings if suffix in item["body"]]), 1)
+        greeting = next(item for item in greetings if suffix in item["body"])
+        organization_name = hr.request("GET", "/api/org")["organization"]["display_name"]
+        for expected_text in (
+            "🎉 تهنئة بيوم ميلادك", "Happy Birthday 🎂", "عزيزي الموظف /",
+            "Dear ", organization_name, str(today.year),
+        ):
+            self.assertIn(expected_text, greeting["title"] + "\n" + greeting["body"])
+        self.assertNotIn(greeting["id"], {item["id"] for item in regular_employee.request("GET", "/api/notifications/inbox")["items"]})
+
+        # Re-running all scheduled checks must not duplicate the annual greeting.
+        birthday_user.request("GET", "/api/notifications/unread-count")
+        birthday_user.request("GET", "/api/notifications/inbox")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            log_count = db.execute(
+                "SELECT COUNT(*) FROM birthday_notification_log WHERE employee_id=? AND birthday_year=?",
+                (birthday_employee["id"], today.year),
+            ).fetchone()[0]
+            notification_count = db.execute(
+                """SELECT COUNT(*) FROM notifications n
+                     JOIN notification_recipients r ON r.notification_id=n.id
+                     JOIN users u ON u.id=r.user_id
+                    WHERE u.employee_id=? AND n.message_type='congratulation' AND n.notification_scope='personal'""",
+                (birthday_employee["id"],),
+            ).fetchone()[0]
+        self.assertEqual(log_count, 1)
+        self.assertEqual(notification_count, 1)
+
+        # Access is evaluated live: a former general manager keeps no access
+        # merely because an old recipient row still exists.
+        hr.request("PATCH", "/api/org", {"general_manager_employee_id": birthday_employee["id"]})
+        self.assertNotIn(alert_id, {item["id"] for item in general_manager.request("GET", "/api/notifications/inbox")["items"]})
+        general_manager.request("GET", f"/api/notifications/{alert_id}", expected=403)
+
+    def test_75_system_admin_employee_edit_ignores_unchanged_legacy_approver(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        suffix = uuid.uuid4().hex[:8]
+        target = admin.request("POST", "/api/employees", {
+            "employee_no": f"ADMEDIT-{suffix}", "full_name": f"ملف تعديل المسؤول {suffix}",
+            "email": f"admin-edit-{suffix}@demo.ae", "hire_date": "2025-01-01",
+        }, expected=201)["employee"]
+        regular_employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
+        hr_employee_id = hr.request("GET", "/api/auth/me")["user"]["employee_id"]
+
+        # Simulate an assignment saved by an older version before approver
+        # eligibility was enforced.
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "UPDATE employees SET approval_employee_id=? WHERE id=?",
+                (regular_employee_id, target["id"]),
+            )
+
+        directory = admin.request("GET", "/api/employees")["items"]
+        by_id = {item["id"]: item for item in directory}
+        self.assertFalse(by_id[regular_employee_id]["approval_eligible"])
+        self.assertTrue(by_id[hr_employee_id]["approval_eligible"])
+
+        edited = admin.request("PATCH", f"/api/employees/{target['id']}", {
+            "qualification": "تم التعديل بواسطة مسؤول النظام",
+            "approval_employee_id": regular_employee_id,
+        })["employee"]
+        self.assertEqual(edited["qualification"], "تم التعديل بواسطة مسؤول النظام")
+        self.assertEqual(edited["approval_employee_id"], regular_employee_id)
+
+        cleared = admin.request("PATCH", f"/api/employees/{target['id']}", {
+            "approval_employee_id": None,
+        })["employee"]
+        self.assertIsNone(cleared["approval_employee_id"])
+        invalid_new_assignment = admin.request("PATCH", f"/api/employees/{target['id']}", {
+            "approval_employee_id": regular_employee_id,
+        }, expected=422)
+        self.assertEqual(invalid_new_assignment["code"], "approval_manager_invalid")
+        self.assertEqual(invalid_new_assignment["details"]["field"], "approval_employee_id")
+
+        app = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-original-value="${esc(current)}"', app)
+        self.assertIn("e.approval_eligible||String(e.id)===String(current)", app)
+        self.assertIn("field.dataset.originalValue", app)
 
 
 if __name__ == "__main__":
