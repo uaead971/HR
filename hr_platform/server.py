@@ -1867,7 +1867,10 @@ def initialize_database(db_path: Path) -> None:
                     "progress_status": "TEXT NOT NULL DEFAULT 'not_completed'",
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
                 },
-                "notifications": {"available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT"},
+                "notifications": {
+                    "available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT",
+                    "notification_scope": "TEXT NOT NULL DEFAULT 'recipient'",
+                },
                 "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
                 "payroll_items": {
                     "bonus_cents": "INTEGER NOT NULL DEFAULT 0",
@@ -1879,6 +1882,16 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # Expiry notifications created by older versions must immediately
+            # inherit the same administrative visibility rules as new alerts.
+            db.execute(
+                """UPDATE notifications SET notification_scope='administrative'
+                   WHERE id IN (
+                     SELECT notification_id FROM document_expiry_alerts WHERE notification_id IS NOT NULL
+                     UNION SELECT notification_id FROM employee_expiry_alerts WHERE notification_id IS NOT NULL
+                     UNION SELECT notification_id FROM branch_expiry_alerts WHERE notification_id IS NOT NULL
+                   )"""
+            )
             db.execute(
                 """CREATE TABLE IF NOT EXISTS employee_service_history (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2256,6 +2269,7 @@ def initialize_database(db_path: Path) -> None:
             migrate_nonterminal_legacy_evaluations(db)
             refresh_legacy_generated_contracts(db)
             process_evaluation_reminders(db)
+            ensure_birthday_notifications(db)
     finally:
         db.close()
 
@@ -2331,14 +2345,23 @@ def create_internal_notification(
     title: str,
     body: str,
     available_at: str | None = None,
+    *,
+    message_type: str = "notice",
+    notification_scope: str = "recipient",
 ) -> int | None:
     recipients = sorted({int(value) for value in recipient_user_ids if int(value) > 0})
     if not recipients:
         return None
+    if message_type not in {"law", "notice", "congratulation"}:
+        raise ValueError("Unsupported internal notification message type")
+    if notification_scope not in {"recipient", "administrative", "personal"}:
+        raise ValueError("Unsupported internal notification scope")
     stamp = now_iso()
     cursor = db.execute(
-        "INSERT INTO notifications(sender_user_id,title,body,message_type,audience_type,audience_ref,available_at,created_at) VALUES(?,?,?,'notice','employees',?,?,?)",
-        (sender_user_id, title, body, json_text(recipients), available_at, stamp),
+        """INSERT INTO notifications(
+               sender_user_id,title,body,message_type,notification_scope,audience_type,audience_ref,available_at,created_at
+           ) VALUES(?,?,?,?,?,'employees',?,?,?)""",
+        (sender_user_id, title, body, message_type, notification_scope, json_text(recipients), available_at, stamp),
     )
     notification_id = int(cursor.lastrowid)
     db.executemany(
@@ -2354,6 +2377,7 @@ def compliance_notification_recipients(
     include_hr: bool = True,
     include_system_admins: bool = True,
     include_final_approvers: bool = False,
+    include_general_manager: bool = True,
 ) -> list[int]:
     """Resolve the people who must see a compliance/expiry alert.
 
@@ -2371,9 +2395,29 @@ def compliance_notification_recipients(
             recipients.add(int(candidate["id"]))
         if include_hr and role == "hr":
             recipients.add(int(candidate["id"]))
+        if include_general_manager and is_configured_general_manager(db, candidate):
+            recipients.add(int(candidate["id"]))
         if include_final_approvers and has_permission(db, candidate, "leave.approve"):
             recipients.add(int(candidate["id"]))
     return sorted(recipients)
+
+
+def may_view_notification(db: sqlite3.Connection, user: dict[str, Any], notification: sqlite3.Row | dict[str, Any]) -> bool:
+    """Apply live security rules in addition to the stored recipient list."""
+    keys = notification.keys() if hasattr(notification, "keys") else notification
+    scope = str(notification["notification_scope"] if "notification_scope" in keys else "recipient")
+    if scope != "administrative":
+        return True
+    return is_system_admin(user) or str(user.get("role") or "").lower() == "hr" or is_configured_general_manager(db, user)
+
+
+def system_notification_sender(db: sqlite3.Connection) -> int | None:
+    row = db.execute(
+        """SELECT id FROM users WHERE active=1
+           ORDER BY CASE WHEN is_super_admin=1 THEN 0 WHEN role='admin' THEN 1 WHEN role='hr' THEN 2 ELSE 3 END,id
+           LIMIT 1"""
+    ).fetchone()
+    return int(row["id"]) if row else None
 
 
 def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
@@ -2385,7 +2429,7 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
     recipients = compliance_notification_recipients(db, include_hr=True, include_system_admins=True)
     if not recipients:
         return 0
-    sender_id = recipients[0]
+    sender_id = system_notification_sender(db) or recipients[0]
     today = local_now().date()
     expiry_limit = today + timedelta(days=90)
     documents = db.execute(
@@ -2430,7 +2474,9 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
                 f"(متبقٍ {days_remaining} يوماً). هذه المرحلة هي التنبيه رقم "
                 f"{0 if alert_window_days == 90 else 1 if alert_window_days == 30 else 2 if alert_window_days == 14 else 3}، ويرجى اتخاذ الإجراء قبل انتهاء الصلاحية."
             )
-            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            notification_id = create_internal_notification(
+                db, sender_id, recipients, title, body, notification_scope="administrative"
+            )
             db.execute(
                 "UPDATE document_expiry_alerts SET notification_id=? WHERE document_id=? AND expires_on=?",
                 (notification_id, document["id"], document["expires_on"]),
@@ -2469,7 +2515,9 @@ def ensure_document_expiry_notifications(db: sqlite3.Connection) -> int:
                     db.execute("INSERT INTO employee_expiry_alerts(employee_id,document_type,expires_on,alert_window_days,created_at) VALUES(?,?,?,?,?)", (employee["id"], kind, str(expires_on)[:10], alert_window_days, now_iso()))
                 title = {90: "تنبيه: تمهيدي — وثيقة تقترب من الانتهاء", 30: "تنبيه: أول — وثيقة تنتهي خلال شهر", 14: "تنبيه: ثانٍ — وثيقة تنتهي خلال أسبوعين", 7: "تنبيه: ثالث — وثيقة تنتهي خلال أسبوع"}[alert_window_days]
                 body = f"الموظف: {employee['full_name']} ({employee['employee_no']}). الوثيقة: {label}. تاريخ الانتهاء: {str(expires_on)[:10]} (متبقٍ {days_remaining} يوماً). يرجى تحديث بيانات الوثيقة."
-                notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+                notification_id = create_internal_notification(
+                    db, sender_id, recipients, title, body, notification_scope="administrative"
+                )
                 db.execute("UPDATE employee_expiry_alerts SET notification_id=? WHERE employee_id=? AND document_type=? AND expires_on=?", (notification_id, employee["id"], kind, str(expires_on)[:10]))
                 audit(db, sender_id, "notification.employee_expiry", "employee", employee["id"], {"document_type": kind, "expires_on": str(expires_on)[:10], "days_remaining": days_remaining, "alert_window_days": alert_window_days, "notification_id": notification_id})
                 created += 1
@@ -2486,7 +2534,7 @@ def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
     )
     if not recipients:
         return 0
-    sender_id = recipients[0]
+    sender_id = system_notification_sender(db) or recipients[0]
     today = local_now().date()
     expiry_limit = today + timedelta(days=30)
     branches = db.execute(
@@ -2512,7 +2560,9 @@ def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
                 f"الفرع: {branch['name']}. تاريخ انتهاء الرخصة: {branch['license_expires_on']} "
                 f"(متبقٍ {days_remaining} يوماً). يرجى تجديد الرخصة وتحديث تاريخها في ملف الفرع."
             )
-            notification_id = create_internal_notification(db, sender_id, recipients, title, body)
+            notification_id = create_internal_notification(
+                db, sender_id, recipients, title, body, notification_scope="administrative"
+            )
             db.execute(
                 "UPDATE branch_expiry_alerts SET notification_id=? WHERE branch_id=? AND expires_on=? AND alert_window_days=?",
                 (notification_id, branch["id"], branch["license_expires_on"], alert_window_days),
@@ -2525,6 +2575,100 @@ def ensure_branch_license_notifications(db: sqlite3.Connection) -> int:
 def ensure_expiry_notifications(db: sqlite3.Connection) -> int:
     """Run all compliance expiry checks before an inbox/dashboard is read."""
     return ensure_document_expiry_notifications(db) + ensure_branch_license_notifications(db)
+
+
+ARABIC_GREGORIAN_MONTHS = (
+    "", "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+    "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+)
+
+
+def birthday_message(employee_name: str, company_name: str, celebration_date: date) -> tuple[str, str]:
+    """Return the standard bilingual company birthday greeting."""
+    title = "🎉 تهنئة بيوم ميلادك | Happy Birthday 🎂"
+    arabic_date = f"{celebration_date.day} {ARABIC_GREGORIAN_MONTHS[celebration_date.month]} {celebration_date.year}"
+    english_date = celebration_date.strftime("%B %d, %Y")
+    body = (
+        "🎉 تهنئة بيوم ميلادك 🎂\n"
+        f"تاريخ المناسبة: {arabic_date}\n\n"
+        f"عزيزي الموظف / {employee_name}\n\n"
+        f"يسعدنا في {company_name} أن نهنئك بيوم ميلادك، ونتمنى لك يوماً سعيداً "
+        "وعاماً جديداً مليئاً بالنجاح والصحة والإنجازات الجميلة. ✨🥳\n\n"
+        "مع أطيب التمنيات،\n"
+        f"فريق / {company_name}\n\n"
+        "────────────\n\n"
+        "🎉 Happy Birthday 🎂\n"
+        f"Date: {english_date}\n\n"
+        f"Dear {employee_name},\n\n"
+        f"Everyone at {company_name} wishes you a very happy birthday and a wonderful year ahead "
+        "filled with health, success, and joyful moments. ✨🥳\n\n"
+        "Warmest wishes,\n"
+        f"The {company_name} Team"
+    )
+    return title, body
+
+
+def ensure_birthday_notifications(db: sqlite3.Connection, today: date | None = None) -> int:
+    """Deliver one private birthday greeting per active employee each year."""
+    celebration_date = today or local_now().date()
+    sender_id = system_notification_sender(db)
+    if sender_id is None:
+        return 0
+    org = db.execute("SELECT display_name,legal_name FROM organization WHERE id=1").fetchone()
+    company_name = str((org["display_name"] or org["legal_name"]) if org else "الشركة").strip() or "الشركة"
+    employees = db.execute(
+        """SELECT e.id,e.full_name,e.birth_date,u.id AS user_id
+             FROM employees e JOIN users u ON u.employee_id=e.id
+            WHERE e.active=1 AND u.active=1 AND e.birth_date IS NOT NULL
+            ORDER BY e.id,u.id"""
+    ).fetchall()
+    created = 0
+    for employee in employees:
+        try:
+            born = date.fromisoformat(str(employee["birth_date"])[:10])
+        except ValueError:
+            continue
+        if (born.month, born.day) != (celebration_date.month, celebration_date.day):
+            continue
+        with db:
+            marker = db.execute(
+                """INSERT OR IGNORE INTO birthday_notification_log(
+                       employee_id,birthday_year,sent_on,created_at
+                   ) VALUES(?,?,?,?)""",
+                (employee["id"], celebration_date.year, celebration_date.isoformat(), now_iso()),
+            )
+            if marker.rowcount != 1:
+                continue
+            title, body = birthday_message(str(employee["full_name"]), company_name, celebration_date)
+            notification_id = create_internal_notification(
+                db,
+                sender_id,
+                [int(employee["user_id"])],
+                title,
+                body,
+                message_type="congratulation",
+                notification_scope="personal",
+            )
+            db.execute(
+                """UPDATE birthday_notification_log SET notification_id=?
+                   WHERE employee_id=? AND birthday_year=?""",
+                (notification_id, employee["id"], celebration_date.year),
+            )
+            audit(
+                db,
+                sender_id,
+                "notification.employee_birthday",
+                "employee",
+                employee["id"],
+                {"birthday_year": celebration_date.year, "sent_on": celebration_date.isoformat(), "notification_id": notification_id},
+            )
+            created += 1
+    return created
+
+
+def ensure_scheduled_notifications(db: sqlite3.Connection) -> int:
+    """Run recurring notification jobs before an inbox or dashboard is read."""
+    return ensure_expiry_notifications(db) + ensure_birthday_notifications(db)
 
 
 def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -6498,6 +6642,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_my_dashboard(self) -> None:
             user = self.current_user(True)
             assert user is not None
+            ensure_scheduled_notifications(self.db)
             employee_id = self.own_employee_id()
             employee = self.db.execute(employee_query(True) + " WHERE e.id=?", (employee_id,)).fetchone()
             org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
@@ -6537,13 +6682,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "advance": cents_value(advance_cents),
                     "net": cents_value(max(0, gross_cents - advance_cents)),
                 }
-            unread = self.db.execute(
-                """SELECT COUNT(*) FROM notification_recipients r
+            notification_rows = self.db.execute(
+                """SELECT n.notification_scope,r.read_at FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
                    WHERE r.user_id=? AND r.read_at IS NULL
+                     AND n.hidden_at IS NULL
                      AND (n.available_at IS NULL OR n.available_at<=?)""",
                 (user["id"], now_iso()),
-            ).fetchone()[0]
+            ).fetchall()
+            unread = sum(1 for row in notification_rows if may_view_notification(self.db, user, row))
             self.send_json(200, {
                 "employee": normalize_employee(employee), "organization": public_organization_projection(serialize_org(org)), "salary": salary_snapshot,
                 "leave_balances": balances, "attendance_today": row_dict(attendance),
@@ -9300,9 +9447,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_inbox(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_expiry_notifications(self.db)
+            ensure_scheduled_notifications(self.db)
             rows = self.db.execute(
-                """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.created_at,n.available_at,
+                """SELECT n.id,n.title,n.body,n.message_type,n.notification_scope,n.audience_type,n.created_at,n.available_at,
                           u.display_name AS sender_name,r.read_at,n.edited_at
                    FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
                    JOIN users u ON u.id=n.sender_user_id
@@ -9310,20 +9457,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                    ORDER BY n.created_at DESC""",
                 (user["id"], now_iso()),
             ).fetchall()
+            rows = [row for row in rows if may_view_notification(self.db, user, row)]
             unread = sum(1 for row in rows if row["read_at"] is None)
             self.send_json(200, {"items": [dict(r) for r in rows], "unread_count": unread})
 
         def api_notification_unread_count(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            ensure_expiry_notifications(self.db)
-            count = self.db.execute(
-                """SELECT COUNT(*) FROM notification_recipients r
+            ensure_scheduled_notifications(self.db)
+            rows = self.db.execute(
+                """SELECT n.notification_scope,r.read_at FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
                    WHERE r.user_id=? AND r.read_at IS NULL AND n.hidden_at IS NULL
                      AND (n.available_at IS NULL OR n.available_at<=?)""",
                 (user["id"], now_iso()),
-            ).fetchone()[0]
+            ).fetchall()
+            count = sum(1 for row in rows if may_view_notification(self.db, user, row))
             self.send_json(200, {"unread_count": count})
 
         def api_notification_get(self, notification_id: int) -> None:
@@ -9338,6 +9487,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchone()
             if row is None:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
+            if not may_view_notification(self.db, user, row):
+                raise APIError(403, "هذا إشعار إداري لا تملك صلاحية الاطلاع عليه.", "forbidden")
             privileged = str(user.get("role")) == "admin" or row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
             if row["hidden_at"] and str(user.get("role")) != "admin":
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
@@ -9352,6 +9503,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_notification_read(self, notification_id: int) -> None:
             user = self.current_user(True)
             assert user is not None
+            notification = self.db.execute(
+                """SELECT n.notification_scope,n.hidden_at,n.available_at
+                     FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
+                    WHERE r.notification_id=? AND r.user_id=?""",
+                (notification_id, user["id"]),
+            ).fetchone()
+            if notification is None:
+                raise APIError(404, "الإشعار غير موجود في صندوقك.", "not_found")
+            if not may_view_notification(self.db, user, notification):
+                raise APIError(403, "هذا إشعار إداري لا تملك صلاحية الاطلاع عليه.", "forbidden")
             with self.db:
                 stamp = now_iso()
                 result = self.db.execute(
@@ -9370,16 +9531,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True)
             assert user is not None
             stamp = now_iso()
+            candidates = self.db.execute(
+                """SELECT r.notification_id,n.notification_scope
+                     FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
+                    WHERE r.user_id=? AND r.read_at IS NULL AND n.hidden_at IS NULL
+                      AND (n.available_at IS NULL OR n.available_at<=?)""",
+                (user["id"], stamp),
+            ).fetchall()
+            notification_ids = [int(row["notification_id"]) for row in candidates if may_view_notification(self.db, user, row)]
+            updated = 0
             with self.db:
-                result = self.db.execute(
-                    """UPDATE notification_recipients SET read_at=?
-                       WHERE user_id=? AND read_at IS NULL
-                         AND notification_id IN (
-                           SELECT id FROM notifications WHERE hidden_at IS NULL AND (available_at IS NULL OR available_at<=?)
-                         )""",
-                    (stamp, user["id"], stamp),
-                )
-            self.send_json(200, {"ok": True, "updated": result.rowcount})
+                if notification_ids:
+                    placeholders = ",".join("?" for _ in notification_ids)
+                    result = self.db.execute(
+                        f"""UPDATE notification_recipients SET read_at=?
+                              WHERE user_id=? AND read_at IS NULL AND notification_id IN ({placeholders})""",
+                        (stamp, user["id"], *notification_ids),
+                    )
+                    updated = result.rowcount
+            self.send_json(200, {"ok": True, "updated": updated})
 
         # Salary certificates
         def certificate_payload(self, row: sqlite3.Row) -> dict[str, Any]:

@@ -651,6 +651,7 @@ CREATE TABLE IF NOT EXISTS notifications (
   title TEXT NOT NULL,
   body TEXT NOT NULL,
   message_type TEXT NOT NULL CHECK (message_type IN ('law','notice','congratulation')),
+  notification_scope TEXT NOT NULL DEFAULT 'recipient' CHECK (notification_scope IN ('recipient','administrative','personal')),
   audience_type TEXT NOT NULL CHECK (audience_type IN ('all','department','branch','employees')),
   audience_ref TEXT,
   available_at TEXT,
@@ -669,6 +670,18 @@ CREATE TABLE IF NOT EXISTS notification_recipients (
   PRIMARY KEY (notification_id, user_id),
   FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS birthday_notification_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  birthday_year INTEGER NOT NULL,
+  notification_id INTEGER,
+  sent_on TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(employee_id, birthday_year),
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (notification_id) REFERENCES notifications(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS lateness_alerts (

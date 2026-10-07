@@ -3922,6 +3922,87 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".document-library-empty{height:160px;min-height:160px;max-height:180px", styles)
         self.assertIn(".document-library-empty{position:sticky;inset-inline-start:0;width:min(340px,calc(100vw - 48px));margin-inline-end:auto}", styles)
 
+    def test_74_administrative_notification_privacy_and_bilingual_birthday_greeting(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        regular_employee = self.client("employee@demo.ae", "Emp@12345")
+        suffix = uuid.uuid4().hex[:8]
+        today = date.today()
+
+        birthday_email = f"birthday-{suffix}@demo.ae"
+        birthday_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"BDAY-{suffix}", "full_name": f"موظف عيد الميلاد {suffix}",
+            "email": birthday_email, "birth_date": f"2000-{today.month:02d}-{today.day:02d}",
+            "hire_date": "2024-01-01", "create_user": True,
+            "password": "Birthday@12345", "role": "employee",
+        }, expected=201)["employee"]
+        birthday_user = self.client(birthday_email, "Birthday@12345")
+
+        gm_email = f"notification-gm-{suffix}@demo.ae"
+        gm_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"NTGM-{suffix}", "full_name": f"مدير عام الإشعارات {suffix}",
+            "email": gm_email, "hire_date": "2020-01-01", "create_user": True,
+            "password": "NotifyGM@12345", "role": "employee",
+        }, expected=201)["employee"]
+        hr.request("PATCH", "/api/org", {"general_manager_employee_id": gm_employee["id"]})
+        general_manager = self.client(gm_email, "NotifyGM@12345")
+
+        tiny_png = "data:image/png;base64,iVBORw0KGgo="
+        hr.request("POST", f"/api/employees/{birthday_employee['id']}/documents", {
+            "document_type": "contract", "title": f"عقد إداري خاص {suffix}",
+            "file_name": f"private-contract-{suffix}.png", "data_url": tiny_png,
+            "issued_on": (today - timedelta(days=300)).isoformat(),
+            "expires_on": (today + timedelta(days=14)).isoformat(),
+        }, expected=201)
+
+        hr_inbox = hr.request("GET", "/api/notifications/inbox")["items"]
+        alert = next(
+            item for item in hr_inbox
+            if item["notification_scope"] == "administrative" and birthday_employee["employee_no"] in item["body"]
+        )
+        alert_id = alert["id"]
+        self.assertIn(alert_id, {item["id"] for item in admin.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertIn(alert_id, {item["id"] for item in general_manager.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertNotIn(alert_id, {item["id"] for item in birthday_user.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertNotIn(alert_id, {item["id"] for item in regular_employee.request("GET", "/api/notifications/inbox")["items"]})
+        birthday_user.request("GET", f"/api/notifications/{alert_id}", expected=403)
+
+        birthday_items = birthday_user.request("GET", "/api/notifications/inbox")["items"]
+        greetings = [item for item in birthday_items if item["message_type"] == "congratulation" and item["notification_scope"] == "personal"]
+        self.assertEqual(len([item for item in greetings if suffix in item["body"]]), 1)
+        greeting = next(item for item in greetings if suffix in item["body"])
+        organization_name = hr.request("GET", "/api/org")["organization"]["display_name"]
+        for expected_text in (
+            "🎉 تهنئة بيوم ميلادك", "Happy Birthday 🎂", "عزيزي الموظف /",
+            "Dear ", organization_name, str(today.year),
+        ):
+            self.assertIn(expected_text, greeting["title"] + "\n" + greeting["body"])
+        self.assertNotIn(greeting["id"], {item["id"] for item in regular_employee.request("GET", "/api/notifications/inbox")["items"]})
+
+        # Re-running all scheduled checks must not duplicate the annual greeting.
+        birthday_user.request("GET", "/api/notifications/unread-count")
+        birthday_user.request("GET", "/api/notifications/inbox")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            log_count = db.execute(
+                "SELECT COUNT(*) FROM birthday_notification_log WHERE employee_id=? AND birthday_year=?",
+                (birthday_employee["id"], today.year),
+            ).fetchone()[0]
+            notification_count = db.execute(
+                """SELECT COUNT(*) FROM notifications n
+                     JOIN notification_recipients r ON r.notification_id=n.id
+                     JOIN users u ON u.id=r.user_id
+                    WHERE u.employee_id=? AND n.message_type='congratulation' AND n.notification_scope='personal'""",
+                (birthday_employee["id"],),
+            ).fetchone()[0]
+        self.assertEqual(log_count, 1)
+        self.assertEqual(notification_count, 1)
+
+        # Access is evaluated live: a former general manager keeps no access
+        # merely because an old recipient row still exists.
+        hr.request("PATCH", "/api/org", {"general_manager_employee_id": birthday_employee["id"]})
+        self.assertNotIn(alert_id, {item["id"] for item in general_manager.request("GET", "/api/notifications/inbox")["items"]})
+        general_manager.request("GET", f"/api/notifications/{alert_id}", expected=403)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
