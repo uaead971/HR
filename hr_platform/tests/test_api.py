@@ -1172,6 +1172,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
     def test_08_payroll_approval_employee_payslip_and_csv(self):
         hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
         month = f"{date.today().year}-{date.today().month:02d}"
         run = hr.request(
             "POST", "/api/payroll/runs",
@@ -1180,7 +1181,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         )["run"]
         self.assertGreater(run["net"], 0)
         run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})["run"]
-        run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"})["run"]
+        blocked = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"}, expected=409)
+        self.assertEqual(blocked["code"], "payroll_self_approval_forbidden")
+        run = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"})["run"]
         self.assertEqual(run["status"], "approved")
         employee = self.client("employee@demo.ae", "Emp@12345")
         slips = employee.request("GET", "/api/me/payslips")["items"]
@@ -1191,6 +1194,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
     def test_09_advance_exact_cent_schedule_and_permission(self):
         employee = self.client("employee@demo.ae", "Emp@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
         advance = employee.request("POST", "/api/advances", {"amount": 1000, "months": 3, "reason": "احتياج شخصي"}, expected=201)["advance"]
         self.assertEqual([x["amount"] for x in advance["installments"]], [333.33, 333.33, 333.34])
         employee.request("POST", f"/api/advances/{advance['id']}/decision", {"action": "approve"}, expected=403)
@@ -1211,8 +1215,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertEqual(item["advance_label"], "سلفة")
             self.assertEqual(item["total_deductions"], installment["amount"])
             self.assertEqual(item["net"], max(0, item["gross"] - installment["amount"]))
-            for status in ("review", "approved", "paid"):
-                run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": status})["run"]
+            run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})["run"]
+            run = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"})["run"]
+            blocked = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "paid"}, expected=409)
+            self.assertEqual(blocked["code"], "payroll_self_payment_forbidden")
+            run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "paid"})["run"]
             due_runs.append(run)
 
         completed = hr.request("GET", f"/api/advances")["items"]
@@ -1382,11 +1389,32 @@ class HRAPIEndToEndTests(unittest.TestCase):
             {"module": "offboarding", "title": "إنهاء خدمة V4.4", "employee_id": employee["id"], "notes": "اختبار إغلاق البطاقة"},
             expected=201,
         )["case"]
+        blocked = hr.request("PATCH", f"/api/lifecycle/cases/{case['id']}", {"status": "closed"}, expected=409)
+        self.assertEqual(blocked["code"], "termination_workflow_required")
+        direct_status = hr.request("PATCH", f"/api/employees/{employee['id']}", {"active": False}, expected=409)
+        self.assertEqual(direct_status["code"], "employee_status_workflow_required")
+        hr.request("POST", f"/api/employees/{employee['id']}/terminate", {
+            "termination_date": date.today().isoformat(),
+            "termination_type": "end_of_contract",
+            "termination_reason": "اكتمال عقد العمل وإجراء الخروج المعتمد",
+            "final_settlement_status": "paid",
+            "final_settlement_amount": 0,
+        })
         hr.request("PATCH", f"/api/lifecycle/cases/{case['id']}", {"status": "closed"})
         closed = hr.request("GET", f"/api/employees/{employee['id']}/card")["card"]
         self.assertEqual(closed["status"], "closed")
         self.assertFalse(closed["can_print"])
         hr.request("POST", f"/api/employees/{employee['id']}/card/print", {}, expected=409)
+        # Restore this shared fixture through the supported workflow so later
+        # organization and employee-self-service tests keep their baseline.
+        hr.request("POST", f"/api/employees/{employee['id']}/rehire", {
+            "hire_date": employee["hire_date"],
+            "branch_id": employee["branch_id"],
+            "department_id": employee["department_id"],
+            "job_title_id": employee["job_title_id"],
+            "job_grade_id": employee["job_grade_id"],
+            "job_grade_level": employee["job_grade_level"],
+        })
 
     def test_profile_contract_dates_create_and_update_card_window(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3450,7 +3478,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(target["bonus"], 150)
         self.assertEqual(target["gross"], 3150)
         run = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
-            "kind": "deduction", "amount": 25, "reason": "خصم جماعي موثق", "scope": "all",
+            "kind": "deduction", "amount": 25, "reason": "خصم محدد وموثق",
+            "scope": "employees", "employee_ids": [created["id"]],
         }, expected=201)["run"]
         target = next(row for row in run["items"] if row["employee_id"] == created["id"])
         self.assertEqual(target["deductions"], 125)
@@ -3463,6 +3492,149 @@ class HRAPIEndToEndTests(unittest.TestCase):
         hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
             "kind": "violation", "amount": 50, "reason": "مخالفة بعد الإقفال", "employee_id": created["id"],
         }, expected=409)
+
+    def test_70_salary_totals_scales_approved_payroll_and_financial_privacy(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        branch = hr.request("GET", "/api/branches")["items"][0]
+        suffix = uuid.uuid4().hex[:8]
+
+        weak = hr.request("POST", "/api/employees", {
+            "employee_no": f"WEAK-{suffix}", "full_name": "كلمة مرور ضعيفة",
+            "email": f"weak-{suffix}@demo.ae", "salary": 1000,
+            "create_user": True, "password": "Weak12!", "role": "employee",
+        }, expected=422)
+        self.assertEqual(weak["code"], "weak_password")
+
+        grade = hr.request("POST", "/api/job-grades", {
+            "code": f"PAY-{suffix}", "name": "درجة اختبار الرواتب",
+            "level_a_salary": 5500, "level_b_salary": 5000,
+            "level_c_salary": 4500, "level_d_salary": 4000,
+        }, expected=201)["job_grade"]
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"SAL-{suffix}", "full_name": "موظف تدقيق الرواتب",
+            "email": f"salary-audit-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "branch_id": branch["id"], "job_grade_id": grade["id"], "job_grade_level": "B",
+            "basic_salary": 99999, "housing_allowance": 1200,
+            "transport_allowance": 300, "profession_allowance": 0, "other_allowance": 0,
+            "manual_allowances": [{"name": "بدل اتصال", "amount": 250.55}],
+        }, expected=201)["employee"]
+        self.assertEqual(employee["salary_breakdown"]["basic_salary"], 5000)
+        self.assertEqual(employee["salary"], 6750.55)
+
+        future_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"FUT-{suffix}", "full_name": "موظف مستقبلي",
+            "email": f"future-{suffix}@demo.ae", "hire_date": "2050-01-01",
+            "branch_id": branch["id"], "salary": 9999,
+        }, expected=201)["employee"]
+
+        active_employees = hr.request("GET", "/api/employees")["items"]
+        current_employees = [row for row in active_employees if not row.get("hire_date") or row["hire_date"] <= date.today().isoformat()]
+        expected_total = round(sum(round(float(row["salary"]) * 100) for row in current_employees) / 100, 2)
+        dashboard = hr.request("GET", "/api/dashboard")
+        self.assertTrue(dashboard["salary_metrics_visible"])
+        self.assertEqual(dashboard["filters"]["date_from"], date.today().replace(day=1).isoformat())
+        self.assertEqual(dashboard["metrics"]["salary_employee_count"], len(current_employees))
+        self.assertEqual(dashboard["metrics"]["salary_contract_total"], expected_total)
+
+        branch_employees = [row for row in current_employees if row.get("branch_id") == branch["id"]]
+        branch_total = round(sum(round(float(row["salary"]) * 100) for row in branch_employees) / 100, 2)
+        filtered = hr.request("GET", f"/api/dashboard?branch_id={branch['id']}")
+        self.assertEqual(filtered["metrics"]["salary_employee_count"], len(branch_employees))
+        self.assertEqual(filtered["metrics"]["salary_contract_total"], branch_total)
+
+        level_only = hr.request("PATCH", f"/api/employees/{employee['id']}", {"job_grade_level": "C"})["employee"]
+        self.assertEqual(level_only["salary_breakdown"]["basic_salary"], 4500)
+        self.assertEqual(level_only["salary"], 6250.55)
+
+        run = hr.request("POST", "/api/payroll/runs", {"payroll_month": "2044-02"}, expected=201)["run"]
+        self.assertNotIn(future_employee["id"], {row["employee_id"] for row in run["items"]})
+        draft_dashboard = hr.request("GET", "/api/dashboard?date_from=2044-02-01&date_to=2044-02-29")
+        self.assertEqual(draft_dashboard["metrics"]["payroll_runs"], 0)
+        self.assertEqual(draft_dashboard["metrics"]["payroll_net"], 0)
+        target = next(row for row in run["items"] if row["employee_id"] == employee["id"])
+        excessive = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "deduction", "amount": target["gross"] + 1,
+            "reason": "اختبار منع الاستقطاع الزائد", "employee_id": employee["id"],
+        }, expected=422)
+        self.assertEqual(excessive["code"], "payroll_deductions_exceed_gross")
+        unchanged = hr.request("GET", f"/api/payroll/runs/{run['id']}")["run"]
+        unchanged_target = next(row for row in unchanged["items"] if row["employee_id"] == employee["id"])
+        self.assertEqual(unchanged_target["net"], unchanged_target["gross"])
+        self.assertFalse(any(row["reason"] == "اختبار منع الاستقطاع الزائد" for row in unchanged_target["adjustments"]))
+
+        run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})["run"]
+        blocked = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"}, expected=409)
+        self.assertEqual(blocked["code"], "payroll_self_approval_forbidden")
+        run = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"})["run"]
+        approved_dashboard = hr.request("GET", "/api/dashboard?date_from=2044-02-01&date_to=2044-02-29")
+        self.assertEqual(approved_dashboard["metrics"]["payroll_runs"], 1)
+        self.assertEqual(approved_dashboard["metrics"]["payroll_net"], run["net"])
+
+        hr_user = next(row for row in admin.request("GET", "/api/admin/users")["items"] if row["email"] == "hr@demo.ae")
+        original_overrides = hr_user["overrides"]
+        denied_overrides = [row for row in original_overrides if row["permission"] != "salary.view"] + [{"permission": "salary.view", "granted": False}]
+        try:
+            admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": denied_overrides})
+            hidden_dashboard = hr.request("GET", "/api/dashboard")
+            self.assertFalse(hidden_dashboard["salary_metrics_visible"])
+            self.assertIsNone(hidden_dashboard["metrics"]["salary_contract_total"])
+            self.assertIsNone(hidden_dashboard["metrics"]["payroll_net"])
+            hidden_report = hr.request("GET", "/api/reports/summary")["summary"]
+            self.assertFalse(hidden_report["salary_metrics_visible"])
+            self.assertIsNone(hidden_report["salary_contract_total"])
+            _, hidden_csv = hr.raw_request("/api/reports/summary.csv")
+            hidden_csv_text = hidden_csv.decode("utf-8-sig")
+            self.assertNotIn("إجمالي الرواتب", hidden_csv_text)
+            self.assertNotIn("صافي الرواتب", hidden_csv_text)
+        finally:
+            admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": original_overrides})
+
+        report = hr.request("GET", "/api/reports/summary")["summary"]
+        current_employees = [
+            row for row in hr.request("GET", "/api/employees")["items"]
+            if not row.get("hire_date") or row["hire_date"] <= date.today().isoformat()
+        ]
+        current_total = round(sum(round(float(row["salary"]) * 100) for row in current_employees) / 100, 2)
+        self.assertTrue(report["salary_metrics_visible"])
+        self.assertEqual(report["salary_contract_total"], current_total)
+
+    def test_71_overnight_shift_checkout_updates_the_open_workday(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        branch = hr.request("GET", "/api/branches")["items"][0]
+        suffix = uuid.uuid4().hex[:8]
+        password = "NightShift@12345"
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"NIGHT-{suffix}", "full_name": "موظف الوردية الليلية",
+            "email": f"night-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "branch_id": branch["id"], "salary": 5000,
+            "create_user": True, "password": password, "role": "employee",
+        }, expected=201)["employee"]
+        shift = hr.request("POST", "/api/shifts", {
+            "name": f"وردية ليلية {suffix}", "start_time": "22:00", "end_time": "06:00",
+            "break_minutes": 0, "working_days": [0, 1, 2, 3, 4, 5, 6], "rest_days": [],
+            "grace_minutes": 0, "daily_limit_minutes": 480,
+        }, expected=201)["shift"]
+        hr.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": "2037-05-01",
+        }, expected=201)
+        worker = self.client(f"night-{suffix}@demo.ae", password)
+        check_in_time = datetime(2037, 5, 4, 22, 0, tzinfo=ZoneInfo("Asia/Dubai"))
+        with mock.patch.object(hr_server, "local_now", return_value=check_in_time):
+            worker.request("POST", "/api/attendance/punch", {
+                "action": "check_in", "latitude": branch["latitude"],
+                "longitude": branch["longitude"], "accuracy": 5,
+            })
+        check_out_time = datetime(2037, 5, 5, 6, 0, tzinfo=ZoneInfo("Asia/Dubai"))
+        with mock.patch.object(hr_server, "local_now", return_value=check_out_time):
+            checkout = worker.request("POST", "/api/attendance/punch", {
+                "action": "check_out", "latitude": branch["latitude"],
+                "longitude": branch["longitude"], "accuracy": 5,
+            })["attendance"]
+        self.assertEqual(checkout["work_date"], "2037-05-04")
+        self.assertEqual(checkout["gross_minutes"], 480)
+        self.assertEqual(checkout["net_minutes"], 480)
+        self.assertTrue(checkout["check_out_at"].startswith("2037-05-05T06:00:00"))
 
 
 if __name__ == "__main__":

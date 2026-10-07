@@ -1056,3 +1056,25 @@ html[lang="en"] body,html[lang="en"] :is(button,input,select,textarea,.leaflet-c
 .account-provision-panel{margin-bottom:16px}.account-candidate-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}.account-candidate{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--line);border-radius:10px;background:#fff}.account-candidate b,.account-candidate small{display:block}.account-candidate small{color:var(--muted);font-size:11px;margin-top:4px}
 /* Lifecycle actions are intentionally available from the employee dossier only. */
 #employeesRows [data-terminate-employee]{display:none!important}
+
+/* Salary reconciliation remains visually distinct at desktop and tablet widths. */
+.executive-metric.finance-reconciliation{min-width:0;background:linear-gradient(135deg,#fffdfa,#f5f8f4)}
+.executive-metric.finance-reconciliation b{max-width:100%;font-size:clamp(20px,1.65vw,25px);font-variant-numeric:tabular-nums;letter-spacing:-.045em;line-height:1.2;white-space:nowrap;direction:ltr;text-align:start}
+/* Keep small workspace metadata readable on the parchment surfaces (WCAG AA). */
+.page-context>small,#userRole,.page-head p,.executive-head p,.executive-asof span{color:#4f615d}
+.page-head .eyebrow,.executive-head .eyebrow,.section-head .eyebrow,.quick-action span{color:#855619}
+@media(min-width:1201px){
+  .executive-metrics{grid-template-columns:repeat(4,minmax(0,1fr));grid-auto-flow:row dense}
+  .executive-metric.finance-reconciliation{grid-column:span 2}
+  .executive-metric:nth-child(5n){border-left:1px solid #e2e6e0}
+  .executive-metric:nth-child(4n){border-left:0}
+}
+@media(max-width:900px){
+  .sidebar,.sidebar-collapsed .sidebar{transform:translateX(calc(100% + 70px));pointer-events:none;box-shadow:none}
+  .sidebar.open,.sidebar-collapsed .sidebar.open{transform:none;pointer-events:auto;box-shadow:0 0 60px #071b2266}
+  html[dir="ltr"] .sidebar,html[dir="ltr"] .sidebar-collapsed .sidebar{transform:translateX(calc(-100% - 70px))}
+  html[dir="ltr"] .sidebar.open,html[dir="ltr"] .sidebar-collapsed .sidebar.open{transform:none}
+  .main,.sidebar-collapsed .main,html[dir="ltr"] .main,html[dir="ltr"] .sidebar-collapsed .main{width:100%;max-width:100%;margin-inline:0!important}
+  .executive-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:390px){.executive-metrics{grid-template-columns:1fr}}
