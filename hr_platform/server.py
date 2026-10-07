@@ -6319,17 +6319,21 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def attendance_relief_for_day(self, employee_id: int, work_date: date) -> dict[str, Any]:
             rows = self.db.execute(
-                """SELECT lt.code,lr.hours
+                """SELECT lt.code,lt.name,lr.hours
                      FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
                     WHERE lr.employee_id=? AND lr.status='approved'
-                      AND lr.start_date<=? AND lr.end_date>=?""",
+                      AND lr.start_date<=? AND lr.end_date>=?
+                    ORDER BY lr.id""",
                 (employee_id, work_date.isoformat(), work_date.isoformat()),
             ).fetchall()
             permission_minutes = sum(int(round(float(row["hours"] or 0) * 60)) for row in rows if row["code"] == "work_permission")
+            full_day_leave = next((row for row in rows if row["code"] != "work_permission"), None)
             return {
                 "permission_minutes": permission_minutes,
                 "emergency_excused": any(row["code"] in EMERGENCY_LEAVE_CODES for row in rows),
-                "full_day_leave": any(row["code"] != "work_permission" for row in rows),
+                "full_day_leave": full_day_leave is not None,
+                "leave_type_code": full_day_leave["code"] if full_day_leave else None,
+                "leave_type_name": full_day_leave["name"] if full_day_leave else None,
             }
 
         def attendance_metrics(
@@ -6580,6 +6584,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if relief["full_day_leave"] and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent", "not_due_yet"}:
                     metrics["day_status"] = "approved_leave"
                     metrics["approved_leave"] = True
+                metrics["leave_type_code"] = relief["leave_type_code"]
+                metrics["leave_type_name"] = relief["leave_type_name"]
                 if response_scope == "team_attendance":
                     items.append({
                         "id": employee["id"], "employee_no": employee["employee_no"],
@@ -6652,7 +6658,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee_ids = [int(employee["id"]) for employee in employees]
             attendance_by_key: dict[tuple[int, str], sqlite3.Row] = {}
             overtime_by_key: dict[tuple[int, str], int] = {}
-            approved_leave_days: set[tuple[int, str]] = set()
+            approved_leave_days: dict[tuple[int, str], dict[str, str]] = {}
             emergency_leave_days: set[tuple[int, str]] = set()
             approved_permission_minutes: dict[tuple[int, str], int] = {}
             if employee_ids:
@@ -6668,7 +6674,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ).fetchall():
                     overtime_by_key[(int(row["employee_id"]), row["work_date"])] = int(row["minutes"] or 0)
                 leave_rows = self.db.execute(
-                    f"""SELECT lr.employee_id,lr.start_date,lr.end_date,lr.hours,lt.code
+                    f"""SELECT lr.employee_id,lr.start_date,lr.end_date,lr.hours,lt.code,lt.name
                            FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
                           WHERE lr.employee_id IN ({placeholders}) AND lr.status='approved'
                             AND lr.start_date<=? AND lr.end_date>=?""",
@@ -6682,7 +6688,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         if leave["code"] == "work_permission":
                             approved_permission_minutes[key] = approved_permission_minutes.get(key, 0) + int(round(float(leave["hours"] or 0) * 60))
                         else:
-                            approved_leave_days.add(key)
+                            approved_leave_days.setdefault(key, {"code": leave["code"], "name": leave["name"]})
                             if leave["code"] in EMERGENCY_LEAVE_CODES:
                                 emergency_leave_days.add(key)
                         cursor += timedelta(days=1)
@@ -6693,6 +6699,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "raw_late_minutes": 0, "excused_late_minutes": 0,
                 "permission_minutes": 0, "permission_credit_minutes": 0,
                 "absence_days": 0, "weekly_rest_days": 0, "leave_days": 0,
+                "sick_leave_days": 0, "other_leave_days": 0,
                 "approved_overtime_minutes": 0, "attendance_records": 0,
                 "expected_employee_days": 0, "present_days": 0, "open_days": 0, "late_days": 0,
             }
@@ -6734,12 +6741,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         approved_permission_minutes.get(key, 0),
                         key in emergency_leave_days,
                     )
-                    has_leave = (employee_id, work_date) in approved_leave_days
+                    leave_classification = approved_leave_days.get(key)
+                    has_leave = leave_classification is not None
                     if has_leave and not metrics.get("check_in_at") and metrics["day_status"] in {"working_day", "absent", "not_due_yet"}:
                         metrics["day_status"] = "approved_leave"
                     metrics.update({
                         "employee_no": employee["employee_no"], "full_name": employee["full_name"],
                         "branch_name": employee["branch_name"], "department_name": employee["department_name"], "approved_leave": has_leave,
+                        "leave_type_code": leave_classification["code"] if leave_classification else None,
+                        "leave_type_name": leave_classification["name"] if leave_classification else None,
                     })
                     matches_status = (
                         not status_filter
@@ -6773,6 +6783,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         summary["weekly_rest_days"] += 1
                     elif metrics["day_status"] == "approved_leave":
                         summary["leave_days"] += 1
+                        if metrics.get("leave_type_code") == "sick":
+                            summary["sick_leave_days"] += 1
+                        else:
+                            summary["other_leave_days"] += 1
                     items.append(metrics)
                 cursor += timedelta(days=1)
             if response_scope == "team_attendance":
@@ -6808,22 +6822,54 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.require_permission("attendance.export")
             payload = self.attendance_range_payload(user)
             if payload["scope"] == "team_attendance":
-                rows: list[list[Any]] = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "تسجيل الدخول", "تسجيل الخروج"]]
-                rows.extend([[item["work_date"], item["full_name"], item["employee_no"], item.get("check_in_at") or "", item.get("check_out_at") or ""] for item in payload["items"]])
-            else:
-                rows = [["التاريخ", "اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "المناوبة", "الدخول", "الخروج", "صافي الدقائق", "التأخير الخام", "التأخير المعوض", "التأخير غير المعوض", "الترخيص المعتمد بالدقائق", "رصيد الترخيص المضاف للصافي", "الإضافي المعتمد", "الموقع بالمتر", "الحالة"]]
+                team_rows: dict[int, dict[str, Any]] = {}
+                for item in payload["items"]:
+                    employee_id = int(item["employee_id"])
+                    aggregate = team_rows.setdefault(employee_id, {
+                        "full_name": item["full_name"], "employee_no": item["employee_no"],
+                        "recorded_days": set(), "first_check_in": None, "last_check_out": None,
+                    })
+                    aggregate["recorded_days"].add(item["work_date"])
+                    check_in = item.get("check_in_at")
+                    check_out = item.get("check_out_at")
+                    if check_in and (aggregate["first_check_in"] is None or check_in < aggregate["first_check_in"]):
+                        aggregate["first_check_in"] = check_in
+                    if check_out and (aggregate["last_check_out"] is None or check_out > aggregate["last_check_out"]):
+                        aggregate["last_check_out"] = check_out
+                rows = [["اسم الموظف", "الرقم الوظيفي", "أيام التسجيل", "أول دخول مسجل", "آخر خروج مسجل", "النطاق"]]
                 rows.extend([
-                    [
-                        item["work_date"], item["full_name"], item["employee_no"], item.get("department_name") or "",
-                        item.get("branch_name") or "", (item.get("shift") or {}).get("name") or "", item.get("check_in_at") or "",
-                        item.get("check_out_at") or "", item.get("net_minutes") or 0, item.get("raw_late_minutes") or 0,
-                        item.get("excused_late_minutes") or 0, item.get("late_minutes") or 0,
-                        item.get("permission_minutes") or 0, item.get("permission_credit_minutes") or 0,
-                        item.get("approved_overtime_minutes") or 0,
-                        item.get("check_in_distance_m") if item.get("check_in_distance_m") is not None else "",
-                        item.get("day_status") or "",
-                    ]
-                    for item in payload["items"]
+                    [aggregate["full_name"], aggregate["employee_no"], len(aggregate["recorded_days"]),
+                     aggregate["first_check_in"] or "", aggregate["last_check_out"] or "", "أوقات مسجلة فقط"]
+                    for aggregate in sorted(team_rows.values(), key=lambda row: row["full_name"])
+                ])
+            else:
+                employee_rows: dict[int, dict[str, Any]] = {}
+                for item in payload["items"]:
+                    employee_id = int(item["employee_id"])
+                    aggregate = employee_rows.setdefault(employee_id, {
+                        "full_name": item["full_name"], "employee_no": item["employee_no"],
+                        "department_name": item.get("department_name") or "", "branch_name": item.get("branch_name") or "",
+                        "expected_days": 0, "present_days": 0, "absence_days": 0, "late_minutes": 0,
+                        "permission_minutes": 0, "sick_leave_days": 0, "other_leave_days": 0, "net_minutes": 0,
+                    })
+                    if int(item.get("required_minutes") or 0) > 0:
+                        aggregate["expected_days"] += 1
+                    if item.get("check_in_at"):
+                        aggregate["present_days"] += 1
+                    if item.get("day_status") == "absent":
+                        aggregate["absence_days"] += 1
+                    if item.get("day_status") == "approved_leave":
+                        leave_key = "sick_leave_days" if item.get("leave_type_code") == "sick" else "other_leave_days"
+                        aggregate[leave_key] += 1
+                    aggregate["late_minutes"] += int(item.get("late_minutes") or 0)
+                    aggregate["permission_minutes"] += int(item.get("permission_minutes") or 0)
+                    aggregate["net_minutes"] += int(item.get("net_minutes") or 0)
+                rows = [["اسم الموظف", "الرقم الوظيفي", "القسم", "الفرع", "أيام العمل المتوقعة", "أيام الحضور", "أيام الغياب", "إجمالي التأخير بالدقائق", "الترخيص المعتمد بالدقائق", "أيام الإجازة المرضية", "أيام الإجازات الأخرى", "صافي دقائق العمل"]]
+                rows.extend([
+                    [aggregate["full_name"], aggregate["employee_no"], aggregate["department_name"], aggregate["branch_name"],
+                     aggregate["expected_days"], aggregate["present_days"], aggregate["absence_days"], aggregate["late_minutes"],
+                     aggregate["permission_minutes"], aggregate["sick_leave_days"], aggregate["other_leave_days"], aggregate["net_minutes"]]
+                    for aggregate in sorted(employee_rows.values(), key=lambda row: row["full_name"])
                 ])
             with self.db:
                 audit(self.db, user["id"], "attendance.range_export", "attendance", None, {"date_from": payload["date_from"], "date_to": payload["date_to"], "row_count": len(payload["items"]), "filters": payload["filters"]})
