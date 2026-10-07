@@ -117,6 +117,7 @@
     'لا توجد بيانات موثقة لهذا اليوم ضمن النطاق المحدد.':'No verified data is available for this day within the selected scope.',
     'لا توجد بيانات حضور موثقة لهذا الشهر ضمن النطاق والفلاتر المحددة.':'No verified attendance data is available for this month under the selected scope and filters.',
     'المرفق المطلوب':'Required attachment', 'جارٍ إرسال الطلب…':'Submitting request…',
+    'المرفق إلزامي تلقائياً للإجازة المرضية والوفاة والوالدية والوضع فقط. جميع الأنواع الأخرى تُقدّم دون مرفق.':'An attachment is required only for sick, bereavement, parental, and maternity leave. All other leave types can be submitted without one.',
     'الجنس':'Gender', 'اختياري / غير محدد':'Optional / not specified', 'ذكر':'Male', 'أنثى':'Female',
     'عقد العمل':'Employment contract', 'تاريخ بداية العقد':'Contract start date', 'تاريخ نهاية العقد':'Contract end date',
     'ترتبط صلاحية بطاقة العمل بتاريخ بداية ونهاية عقد العمل.':'The employee-card validity follows the contract start and end dates.',

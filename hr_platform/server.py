@@ -54,6 +54,7 @@ WORK_PERMISSION_MAX_REQUESTS = 2
 WORK_PERMISSION_MAX_HOURS_PER_REQUEST = 2.0
 WORK_PERMISSION_MAX_MONTHLY_HOURS = 4.0
 EMERGENCY_LEAVE_CODES = {"weather_emergency", "force_majeure"}
+ATTACHMENT_REQUIRED_LEAVE_CODES = {"sick", "bereavement", "parental", "maternity"}
 
 
 PERMISSION_CATALOG: dict[str, dict[str, str]] = {
@@ -2192,7 +2193,7 @@ def initialize_database(db_path: Path) -> None:
                 ("maternity", "إجازة أمومة", 60, 0, 1, 1, 0),
                 ("parental", "إجازة والدية", 5, 0, 1, 1, 0),
                 ("bereavement", "إجازة حداد", 5, 0, 1, 1, 0),
-                ("study", "إجازة دراسية", 10, 7, 1, 1, 0),
+                ("study", "إجازة دراسية", 10, 7, 0, 1, 0),
                 ("unpaid", "إجازة بدون راتب", 0, 7, 0, 0, 0),
                 ("work_permission", "ترخيص خلال ساعات العمل (حتى ساعتين)", 0, 0, 0, 1, 2),
                 ("weather_emergency", "استئذان ظروف جوية قهرية", 0, 0, 0, 1, 0),
@@ -2200,6 +2201,15 @@ def initialize_database(db_path: Path) -> None:
             ]
             for values in leave_seed:
                 db.execute("INSERT OR IGNORE INTO leave_types(code,name,annual_entitlement,min_notice_days,requires_attachment,paid,max_hours) VALUES(?,?,?,?,?,?,?)", values)
+            # Attachment policy is intentionally fixed: only medical, death,
+            # parental and maternity leave require evidence. Normalize legacy
+            # databases so study, annual, administrative and custom leave
+            # types never remain blocked by an old configurable flag.
+            attachment_codes = tuple(sorted(ATTACHMENT_REQUIRED_LEAVE_CODES))
+            db.execute(
+                f"UPDATE leave_types SET requires_attachment=CASE WHEN code IN ({','.join('?' for _ in attachment_codes)}) THEN 1 ELSE 0 END",
+                attachment_codes,
+            )
             current_year = local_now().year
             for emp_id in employee_ids.values():
                 for leave in db.execute("SELECT id,annual_entitlement FROM leave_types WHERE active=1").fetchall():
@@ -7067,7 +7077,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             data = dict(row)
             data["active"] = bool(data.get("active"))
             data["paid"] = bool(data.get("paid"))
-            data["requires_attachment"] = bool(data.get("requires_attachment"))
+            data["requires_attachment"] = str(data.get("code") or "") in ATTACHMENT_REQUIRED_LEAVE_CODES
             data["annual_entitlement"] = float(data.get("annual_entitlement") or 0)
             data["max_hours"] = float(data.get("max_hours") or 0)
             return data
@@ -7084,12 +7094,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for key, minimum in (("annual_entitlement", 0), ("min_notice_days", 0), ("max_hours", 0)):
                 if current is None or key in data:
                     values[key] = as_float(data.get(key, current[key] if current else 0), key, minimum)
-            for key in ("requires_attachment", "paid", "active"):
+            for key in ("paid", "active"):
                 if current is None or key in data:
                     raw = data.get(key, current[key] if current else False)
                     if not isinstance(raw, (bool, int, float)):
                         raise APIError(422, f"قيمة «{key}» غير صحيحة.", "validation_error", {"field": key})
                     values[key] = 1 if bool(raw) else 0
+            effective_code = str(values.get("code", current["code"] if current else ""))
+            values["requires_attachment"] = 1 if effective_code in ATTACHMENT_REQUIRED_LEAVE_CODES else 0
             if values.get("code") == "work_permission" and "max_hours" not in values:
                 values["max_hours"] = 2
             return values
@@ -7579,7 +7591,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             attachment = None
             if data.get("attachment_data"):
                 attachment = validate_data_url(data["attachment_data"], "مرفق الإجازة", ("image/png", "image/jpeg", "image/webp", "application/pdf"), 2_000_000)
-            if leave_type["requires_attachment"] and not attachment:
+            if leave_type["code"] in ATTACHMENT_REQUIRED_LEAVE_CODES and not attachment:
                 raise APIError(422, "المرفق مطلوب لهذا النوع من الإجازات.", "attachment_required")
             overlap = self.db.execute("SELECT 1 FROM leave_requests WHERE employee_id=? AND status IN ('submitted','approved') AND start_date<=? AND end_date>=?", (employee_id, end.isoformat(), start.isoformat())).fetchone()
             if overlap:

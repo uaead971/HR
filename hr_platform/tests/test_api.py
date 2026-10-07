@@ -173,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r3")
+        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r4")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3678,8 +3678,15 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('id="attendanceMonthlyReport"', index)
         self.assertIn("attachment_data:attachmentData", app)
         self.assertIn("async function loadAttendanceMonthDataset", app)
+        self.assertNotIn('name="requires_attachment"', app)
+        self.assertIn("المرفق إلزامي تلقائياً للإجازة المرضية والوفاة والوالدية والوضع فقط", app)
 
         hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute("UPDATE leave_types SET requires_attachment=1 WHERE code='study'")
+        hr_server.initialize_database(self.db_path)
+
         suffix = uuid.uuid4().hex[:8]
         email = f"leave-fallback-{suffix}@demo.ae"
         password = "LeaveFallback@12345"
@@ -3704,8 +3711,31 @@ class HRAPIEndToEndTests(unittest.TestCase):
             db.execute("UPDATE organization SET general_manager_employee_id=NULL WHERE id=1")
 
         worker = self.client(email, password)
-        sick = next(row for row in worker.request("GET", "/api/leaves/types")["items"] if row["code"] == "sick")
+        leave_types = worker.request("GET", "/api/leaves/types")["items"]
+        all_leave_types = admin.request("GET", "/api/leaves/types?include_inactive=1")["items"]
+        required_codes = {row["code"] for row in all_leave_types if row["requires_attachment"]}
+        self.assertEqual(required_codes, {"sick", "bereavement", "parental", "maternity"})
+        study = next(row for row in leave_types if row["code"] == "study")
+        self.assertFalse(study["requires_attachment"])
+
+        administrative = admin.request("POST", "/api/leaves/types", {
+            "code": f"administrative_{suffix}", "name": "إجازة إدارية",
+            "annual_entitlement": 0, "min_notice_days": 0, "max_hours": 0,
+            "active": True, "paid": True, "requires_attachment": True,
+        }, expected=201)["leave_type"]
+        self.assertFalse(administrative["requires_attachment"])
+
         leave_day = date.today() + timedelta(days=120)
+        worker.request("POST", "/api/leaves/requests", {
+            "leave_type_id": study["id"], "start_date": (leave_day + timedelta(days=10)).isoformat(),
+            "end_date": (leave_day + timedelta(days=10)).isoformat(), "reason": "إجازة دراسية بلا مرفق",
+        }, expected=201)
+        worker.request("POST", "/api/leaves/requests", {
+            "leave_type_id": administrative["id"], "start_date": (leave_day + timedelta(days=20)).isoformat(),
+            "end_date": (leave_day + timedelta(days=20)).isoformat(), "reason": "إجازة إدارية بلا مرفق",
+        }, expected=201)
+
+        sick = next(row for row in leave_types if row["code"] == "sick")
         body = {
             "leave_type_id": sick["id"], "start_date": leave_day.isoformat(),
             "end_date": leave_day.isoformat(), "reason": "إجازة مرضية موثقة",
