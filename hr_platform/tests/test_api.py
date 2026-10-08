@@ -173,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261007-production-r6")
+        application_script = index.index("app.js?v=5.8.0&build=20261008-production-r7")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3260,7 +3260,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "audience_type": "employees", "employee_ids": [employee["id"]],
         }, expected=201)["notification"]
         admin.request("GET", "/api/notifications/manage")
-        hr.request("GET", "/api/notifications/manage", expected=403)
+        managed_by_hr = hr.request("GET", "/api/notifications/manage")["items"]
+        self.assertIn(sent["id"], {item["id"] for item in managed_by_hr})
         admin.request("PATCH", f"/api/notifications/{sent['id']}", {"hidden": True})
         self.assertFalse(any(item["id"] == sent["id"] for item in gm.request("GET", "/api/notifications/inbox")["items"]))
         admin.request("PATCH", f"/api/notifications/{sent['id']}", {"hidden": False, "title": "رسالة معدلة", "body": "النص المعدل"})
@@ -3341,7 +3342,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "employee_no": f"ADMIN-{suffix}", "full_name": "مدير نظام غير مصرح",
             "email": f"admin-role-{suffix}@demo.ae", "hire_date": "2024-01-01",
             "create_user": True, "password": "AdminRole@12345", "role": "admin",
-        }, expected=422)
+        }, expected=403)
 
         for path in ("/api/branches", "/api/shifts", "/api/job-grades", "/api/job-titles"):
             employee.request("GET", path, expected=403)
@@ -4049,6 +4050,136 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('data-original-value="${esc(current)}"', app)
         self.assertIn("e.approval_eligible||String(e.id)===String(current)", app)
         self.assertIn("field.dataset.originalValue", app)
+
+    def test_76_position_permission_hierarchy_and_system_admin_account_protection(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+
+        hr_identity = hr.request("GET", "/api/auth/me")
+        self.assertEqual(set(hr_identity["permissions"]), hr_server.ALL_PERMISSIONS)
+        self.assertNotIn("*", hr_identity["permissions"])
+        for permission in (
+            "security.manage_users", "security.manage_permissions", "security.reset_password",
+            "leave.types.manage", "leave.balance.manage", "notification.manage", "smtp.manage",
+        ):
+            self.assertIn(permission, hr_identity["permissions"])
+
+        admin_users = admin.request("GET", "/api/admin/users")["items"]
+        protected_admin = next(user for user in admin_users if user["email"] == "admin@demo.ae")
+        hr_users = hr.request("GET", "/api/admin/users")["items"]
+        self.assertNotIn("admin@demo.ae", {user["email"] for user in hr_users})
+        self.assertFalse(any(user["role"] == "admin" or user["is_super_admin"] for user in hr_users))
+
+        admin_id = protected_admin["id"]
+        for method, path, body in (
+            ("GET", f"/api/admin/users/{admin_id}/permissions", None),
+            ("PATCH", f"/api/admin/users/{admin_id}/permissions", {"overrides": []}),
+            ("PATCH", f"/api/admin/users/{admin_id}", {"active": False}),
+            ("POST", f"/api/admin/users/{admin_id}/reset-password", {
+                "password": "Blocked@12345", "confirm_password": "Blocked@12345", "confirm": True,
+            }),
+        ):
+            denied = hr.request(method, path, body, expected=403)
+            self.assertEqual(denied["code"], "system_admin_account_protected")
+            self.assertIn("حساب مسؤول النظام محمي", denied["error"])
+
+        suffix = uuid.uuid4().hex[:8]
+        created = hr.request("POST", "/api/employees", {
+            "employee_no": f"RBAC-{suffix}", "full_name": f"مستخدم تسلسل {suffix}",
+            "email": f"rbac-{suffix}@demo.ae", "hire_date": "2025-01-01",
+            "create_user": True, "password": "Hierarchy@12345", "role": "employee",
+        }, expected=201)["employee"]
+        target = next(user for user in hr.request("GET", "/api/admin/users")["items"] if user["employee_id"] == created["id"])
+
+        promoted = hr.request("PATCH", f"/api/admin/users/{target['id']}", {"role": "manager"})["user"]
+        self.assertEqual(promoted["role"], "manager")
+        self.assertEqual(set(promoted["permissions"]), {"attendance.team", "leave.team"})
+        narrowed = hr.request("PATCH", f"/api/admin/users/{target['id']}/permissions", {
+            "overrides": [{"permission": "leave.team", "granted": False}],
+        })["user"]
+        self.assertEqual(set(narrowed["permissions"]), {"attendance.team"})
+
+        escalation = hr.request("PATCH", f"/api/admin/users/{target['id']}", {"role": "admin"}, expected=403)
+        self.assertEqual(escalation["code"], "role_authority_exceeded")
+        self.assertEqual(escalation["details"]["field"], "role")
+
+        # HR may administer operational policy because the role owns the full
+        # catalogue, without gaining any access to the protected top account.
+        self.assertTrue(hr.request("GET", "/api/leaves/types?include_inactive=1")["can_manage"])
+        hr.request("GET", "/api/notifications/manage")
+        hr.request("GET", "/api/admin/smtp")
+
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        server = (root / "server.py").read_text(encoding="utf-8")
+        self.assertIn("data-access-role", app)
+        self.assertIn("تسلسل الصلاحيات", index)
+        self.assertIn('"hr": set(ALL_PERMISSIONS)', server)
+        self.assertIn("system_admin_account_protected", server)
+
+    def test_77_unassigned_employee_may_punch_at_any_active_branch(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        suffix = uuid.uuid4().hex[:8]
+        near_but_outside = admin.request("POST", "/api/branches", {
+            "name": f"فرع قريب ضيق {suffix}", "address": "موقع الاختبار الأول",
+            "latitude": 24.0000, "longitude": 54.0000, "radius_m": 50, "active": True,
+        }, expected=201)["branch"]
+        valid_branch = admin.request("POST", "/api/branches", {
+            "name": f"فرع صالح {suffix}", "address": "موقع الاختبار الثاني",
+            "latitude": 24.0015, "longitude": 54.0000, "radius_m": 200, "active": True,
+        }, expected=201)["branch"]
+        checkout_branch = admin.request("POST", "/api/branches", {
+            "name": f"فرع خروج {suffix}", "address": "موقع الاختبار الثالث",
+            "latitude": 24.0100, "longitude": 54.0100, "radius_m": 120, "active": True,
+        }, expected=201)["branch"]
+
+        unassigned = admin.request("POST", "/api/employees", {
+            "employee_no": f"NOBR-{suffix}", "full_name": f"موظف بلا فرع {suffix}",
+            "email": f"no-branch-{suffix}@demo.ae", "hire_date": "2025-01-01",
+            "create_user": True, "password": "NoBranch@12345", "role": "employee",
+        }, expected=201)["employee"]
+        self.assertIsNone(unassigned["branch_id"])
+        worker = self.client(f"no-branch-{suffix}@demo.ae", "NoBranch@12345")
+
+        # The closest branch is outside its small radius, so the server must
+        # choose the active branch whose geofence actually contains the user.
+        check_in = worker.request("POST", "/api/attendance/punch", {
+            "action": "check_in", "latitude": 24.0006, "longitude": 54.0000, "accuracy": 4,
+        })
+        self.assertEqual(check_in["branch"]["id"], valid_branch["id"])
+        self.assertTrue(check_in["branch"]["unassigned_fallback"])
+
+        # With no fixed assignment, checkout may occur inside another active
+        # branch while the attendance row retains its original check-in branch.
+        check_out = worker.request("POST", "/api/attendance/punch", {
+            "action": "check_out", "latitude": checkout_branch["latitude"],
+            "longitude": checkout_branch["longitude"], "accuracy": 4,
+        })
+        self.assertEqual(check_out["branch"]["id"], checkout_branch["id"])
+        self.assertTrue(check_out["branch"]["unassigned_fallback"])
+        self.assertEqual(check_out["attendance"]["branch_id"], valid_branch["id"])
+
+        outside = worker.request("POST", "/api/attendance/punch", {
+            "action": "check_in", "latitude": 0.0, "longitude": 0.0, "accuracy": 4,
+        }, expected=403)
+        self.assertEqual(outside["code"], "outside_geofence")
+        self.assertTrue(outside["details"]["unassigned_branch_fallback"])
+
+        assigned = admin.request("POST", "/api/employees", {
+            "employee_no": f"FIXBR-{suffix}", "full_name": f"موظف بفرع ثابت {suffix}",
+            "email": f"fixed-branch-{suffix}@demo.ae", "hire_date": "2025-01-01",
+            "branch_id": near_but_outside["id"], "create_user": True,
+            "password": "FixedBranch@12345", "role": "employee",
+        }, expected=201)["employee"]
+        self.assertEqual(assigned["branch_id"], near_but_outside["id"])
+        fixed_worker = self.client(f"fixed-branch-{suffix}@demo.ae", "FixedBranch@12345")
+        restricted = fixed_worker.request("POST", "/api/attendance/punch", {
+            "action": "check_in", "latitude": valid_branch["latitude"],
+            "longitude": valid_branch["longitude"], "accuracy": 4,
+        }, expected=403)
+        self.assertEqual(restricted["code"], "outside_geofence")
+        self.assertFalse(restricted["details"]["unassigned_branch_fallback"])
 
 
 if __name__ == "__main__":

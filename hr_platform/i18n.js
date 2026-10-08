@@ -192,6 +192,23 @@
     'اسم المكتبة مطلوب.':'Library name is required.','المكتبة مطلوبة.':'Library is required.','عنوان المستند مطلوب.':'Document title is required.','ملف المستند مطلوب.':'Document file is required.','رفع أول مستند':'Upload first document','لا توجد مستندات تطابق البحث الحالي.':'No documents match the current search.'
   });
 
+  Object.assign(english, {
+    'يحدد المنصب سقف الصلاحيات، ويمكن تخصيص الصلاحيات داخله بالمنح أو المنع الصريح.':'The position defines the permission ceiling; permissions within it can be explicitly granted or denied.',
+    'تسلسل الصلاحيات:':'Permission hierarchy:',
+    'مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات التشغيلية والإدارية، لكنه لا يستطيع رؤية حساب مسؤول النظام أو تعديله أو إعادة تعيين كلمة مروره.':'The system administrator is the protected highest authority. HR has all operational and administrative permissions but cannot see, modify, or reset the system administrator account.',
+    'المنصب والصلاحيات الأساسية':'Position and base permissions','رئيس قسم الموارد البشرية':'HR Manager','مسؤول مباشر':'Line Manager',
+    'تم تحديث منصب المستخدم وتطبيق سقف الصلاحيات الجديد':'The user position and its new permission ceiling were applied.',
+    'يمكن للمخول الاستعلام عن رصيد موظف وإضافة أو تعديل الاستحقاق والمرحل والمستخدم. يحفظ النظام كل تعديل في سجل التدقيق.':'Authorized users can query and edit employee entitlement, carried, and used balances. Every change is recorded in the audit log.',
+    'صلاحية إدارية':'Administrative permission','إدارة مخولة':'Authorized management',
+    'يمكن لحامل صلاحية إدارة الإشعارات تعديل الرسالة أو إخفاؤها فوراً من صناديق جميع المستلمين. لا تُحذف السجلات من قاعدة البيانات.':'Users with notification-management permission can edit or hide a message from all recipient inboxes. Records are retained in the database.',
+    'إدارة الموارد البشرية':'Human Resources Administration',
+    'إضافة وتعديل وتعطيل أنواع الإجازات متاح لحامل الصلاحية، وتبقى الطلبات وسجل الاعتمادات محفوظة.':'Authorized users can add, edit, or disable leave types while requests and approval history remain preserved.',
+    'لا تملك صلاحية إدارة الرسائل الداخلية.':'You do not have permission to manage internal messages.','تعديل وإخفاء الإشعارات المرسلة':'Edit and hide sent notifications',
+    'إدارة أنواع الإجازات وسياسة التقويم':'Manage leave types and calendar policy','إضافة وتعديل أرصدة الموظفين':'Add and edit employee leave balances',
+    'تم قبول الموقع داخل نطاق فرع «{branch}» على بعد {distance} م؛ ملفك غير مرتبط بفرع محدد.':'Location accepted within the “{branch}” branch geofence, {distance} m away; your profile is not assigned to a specific branch.',
+    'تم قبول الموقع داخل نطاق فرع «{branch}» على بعد {distance} م.':'Location accepted within the “{branch}” branch geofence, {distance} m away.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();
