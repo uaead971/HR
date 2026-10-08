@@ -1329,17 +1329,54 @@ def service_duration_components(start: date, end: date, unpaid_days: float = 0.0
     """
     excluded = max(0, int(round(float(unpaid_days or 0))))
     adjusted_end = max(start, end - timedelta(days=excluded))
-    years = adjusted_end.year - start.year
-    months = adjusted_end.month - start.month
-    days = adjusted_end.day - start.day
-    if days < 0:
-        previous_month = adjusted_end.replace(day=1) - timedelta(days=1)
-        days += previous_month.day
-        months -= 1
-    if months < 0:
-        months += 12
+
+    # Anchor each component to a clamped calendar anniversary.  Borrowing the
+    # number of days in the previous month is subtly wrong for month-end
+    # hires: 31 January to 1 March is one month and one day, not one month.
+    years = max(0, adjusted_end.year - start.year)
+    year_anniversary = add_calendar_months(start, years * 12)
+    if year_anniversary > adjusted_end:
         years -= 1
-    return max(0, years), max(0, months), max(0, days)
+        year_anniversary = add_calendar_months(start, years * 12)
+
+    months = max(0, (adjusted_end.year - year_anniversary.year) * 12 + adjusted_end.month - year_anniversary.month)
+    month_anniversary = add_calendar_months(year_anniversary, months)
+    if month_anniversary > adjusted_end:
+        months -= 1
+        month_anniversary = add_calendar_months(year_anniversary, months)
+
+    return years, months, max(0, (adjusted_end - month_anniversary).days)
+
+
+def employee_service_duration(
+    hire_date: Any,
+    termination_date: Any = None,
+    active: bool = True,
+    as_of: date | None = None,
+) -> dict[str, Any]:
+    """Return a stable, structured calendar duration for an employee file."""
+    empty = {"years": None, "months": None, "days": None, "as_of": None}
+    if not hire_date:
+        return {**empty, "status": "missing"}
+    try:
+        start = date.fromisoformat(str(hire_date)[:10])
+    except (TypeError, ValueError):
+        return {**empty, "status": "invalid"}
+
+    today = as_of or local_now().date()
+    status = "active"
+    end = today
+    if not active and termination_date:
+        try:
+            end = date.fromisoformat(str(termination_date)[:10])
+        except (TypeError, ValueError):
+            return {**empty, "status": "invalid"}
+        status = "terminated"
+
+    if start > end:
+        return {"years": 0, "months": 0, "days": 0, "as_of": end.isoformat(), "status": "not_started"}
+    years, months, days = service_duration_components(start, end)
+    return {"years": years, "months": months, "days": days, "as_of": end.isoformat(), "status": status}
 
 
 def leave_days_excluding_public_holidays(db: sqlite3.Connection, start: date, end: date) -> float:
@@ -3000,12 +3037,21 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
             "total": len(completeness_fields),
             "missing": [field for field in completeness_fields if not data.get(field)],
         }
-    if data.get("hire_date"):
-        try:
-            service_days=max(0,(local_now().date()-date.fromisoformat(data["hire_date"])).days)
-            data["service_days"]=service_days; data["service_years"]=round(service_days/365.2425,1)
-        except ValueError:
-            data["service_days"]=None; data["service_years"]=None
+    duration = employee_service_duration(
+        data.get("hire_date"),
+        data.get("termination_date"),
+        active=data["active"],
+    )
+    data["service_duration"] = duration
+    if duration["status"] in {"missing", "invalid"}:
+        data["service_days"] = None
+        data["service_years"] = None
+    else:
+        start = date.fromisoformat(str(data["hire_date"])[:10])
+        end = date.fromisoformat(str(duration["as_of"])[:10])
+        service_days = max(0, (end - start).days)
+        data["service_days"] = service_days
+        data["service_years"] = round(service_days / 365.2425, 1)
     if not include_sensitive:
         for field in EMPLOYEE_SENSITIVE_FIELDS:
             data.pop(field, None)

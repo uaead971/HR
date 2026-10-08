@@ -25,6 +25,32 @@
   function decimal(v){const value=Number(v);if(!Number.isFinite(value))return digits('0');const formatted=i18n()?.formatNumber(value,{maximumFractionDigits:2,minimumFractionDigits:0})||new Intl.NumberFormat('ar-AE',{maximumFractionDigits:2,minimumFractionDigits:0}).format(value);return formatted}
   function dateText(v){if(!v)return '—';return i18n()?.formatDate(v)||(()=>{try{return new Intl.DateTimeFormat('ar-AE',{dateStyle:'medium'}).format(new Date(v+'T00:00:00'))}catch(_){return v}})()}
   function dateTimeText(v){if(!v)return '—';return i18n()?.formatDate(v,{dateStyle:'medium',timeStyle:'short'})||v}
+  function serviceDurationLabel(duration){
+    const value=duration&&typeof duration==='object'?duration:null,status=value?.status;
+    if(!value||status==='missing'||status==='invalid')return tr('غير مسجل');
+    if(status==='not_started')return tr('لم تبدأ الخدمة');
+    const parts=[value.years,value.months,value.days].map(Number);
+    if(parts.some(part=>!Number.isFinite(part)||part<0))return tr('غير مسجل');
+    return `${digits(parts[0])} ${tr('سنة')} · ${digits(parts[1])} ${tr('شهر')} · ${digits(parts[2])} ${tr('يوم')}`;
+  }
+  function setServiceDurationElement(element,duration){
+    if(!element)return;
+    element.dataset.serviceDuration='';
+    element.dataset.serviceDurationStatus=duration?.status||'missing';
+    element.dataset.serviceDurationYears=duration?.years??'';
+    element.dataset.serviceDurationMonths=duration?.months??'';
+    element.dataset.serviceDurationDays=duration?.days??'';
+    element.dataset.i18nPreserve='';
+    element.textContent=serviceDurationLabel(duration);
+  }
+  function refreshServiceDurationLabels(root=document){
+    $$('[data-service-duration]',root).forEach(element=>setServiceDurationElement(element,{
+      status:element.dataset.serviceDurationStatus,
+      years:element.dataset.serviceDurationYears,
+      months:element.dataset.serviceDurationMonths,
+      days:element.dataset.serviceDurationDays,
+    }));
+  }
   function minutesText(value){const total=Math.max(0,Number(value)||0),hours=Math.floor(total/60),minutes=total%60;if(hours&&minutes)return `${digits(hours)} ${tr('ساعة')} ${digits(minutes)} ${tr('دقيقة')}`;if(hours)return `${digits(hours)} ${tr('ساعة')}`;return `${digits(minutes)} ${tr('دقيقة')}`}
   function initials(name){return String(name||'م').trim().split(/\s+/).slice(0,2).map(x=>x[0]).join('.')}
   function items(data){return Array.isArray(data)?data:(data&&Array.isArray(data.items)?data.items:[])}
@@ -306,6 +332,12 @@
     if(!dossier||!employee||dossier.dataset.v56Enhanced)return;
     dossier.dataset.v56Enhanced='1';
     const nav=$('.profile-tabs',dossier),overviewTab=$('[data-profile-tab="overview"]',nav),documentsTab=$('[data-profile-tab="documents"]',nav),overview=$('[data-profile-panel="overview"]',dossier);
+    const counters=$('.record-counters',dossier);
+    if(counters&&!$('[data-service-duration-counter]',counters)){
+      counters.insertAdjacentHTML('beforeend','<span class="service-duration-counter" data-service-duration-counter><b class="service-duration-value"></b><small>مدة الخدمة</small></span>');
+      setServiceDurationElement($('.service-duration-value',counters),employee.service_duration);
+    }
+    setServiceDurationElement($('.profile-facts>div:first-child em',overview),employee.service_duration);
     if(overviewTab)overviewTab.textContent=tr('الملخص');
     const canSeeEmergency=hasPermission('employee.emergency.manage')||Number(state.user?.employee_id)===Number(employee.id);
     const canSeeCustody=hasPermission('employee_custody.view')||Number(state.user?.employee_id)===Number(employee.id);
@@ -319,6 +351,7 @@
     const emergency=canSeeEmergency?`<section class="profile-panel" data-profile-panel="emergency"><div class="section-head"><div><span class="eyebrow">${tr('اتصال آمن')}</span><h2>${tr('جهات اتصال الطوارئ')}</h2><p>${tr('تظهر فقط للموظف نفسه وللمخولين بإدارة جهات الطوارئ.')}</p></div>${hasPermission('employee.emergency.manage')?`<button class="primary" data-add-emergency="${employee.id}">${icon('plus')}${tr('إضافة جهة اتصال')}</button>`:''}</div><div class="emergency-contact-list loading-block" data-emergency-list="${employee.id}">${tr('جارٍ تحميل جهات الاتصال…')}</div></section>`:'';
     const custody=canSeeCustody?`<section class="profile-panel" data-profile-panel="custody"><div class="section-head"><div><span class="eyebrow">${tr('الأصول المسلّمة')}</span><h2>${tr('العهد والأصول')}</h2><p>${tr('سجل استلام وتسليم العهدة مع الرقم التسلسلي وحالة الأصل.')}</p></div>${hasPermission('employee_custody.manage')?`<button class="primary" data-add-custody="${employee.id}">${icon('plus')}${tr('إضافة عهدة')}</button>`:''}</div><div class="custody-list loading-block" data-custody-list="${employee.id}">${tr('جارٍ تحميل سجل العهد…')}</div></section>`:'';
     $('[data-profile-panel="documents"]',dossier).insertAdjacentHTML('beforebegin',personal+employment+address+emergency+custody);
+    setServiceDurationElement($('[data-profile-panel="employment"] .profile-facts>div:nth-child(7) em',dossier),employee.service_duration);
     const employmentFacts=$('[data-profile-panel="employment"] .profile-facts',dossier);if(employmentFacts)employmentFacts.insertAdjacentHTML('beforeend',profileDatum('بداية عقد العمل',dateText(employee.contract_start_on))+profileDatum('نهاية عقد العمل',dateText(employee.contract_end_on))+profileDatum('مسؤول الاعتماد',employee.approval_employee_name||'غير معين','الموارد البشرية · القرار النهائي'));
     const employmentPanel=$('[data-profile-panel="employment"]',dossier);
     if(employmentPanel){
@@ -1034,6 +1067,7 @@
   document.addEventListener('input',e=>{if(e.target.id==='visualOverlayRange')syncVisualOverlayOutput(e.target.value)});
   document.addEventListener('hr:localechange',async()=>{
     applyOrganization();
+    refreshServiceDurationLabels();
     syncVisualOverlayOutput($('#visualOverlayRange').value);
     const active=$('.page.active');
     if(active&&pageLabels[active.id])$('#contextTitle').textContent=tr(pageLabels[active.id]);
