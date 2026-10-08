@@ -83,8 +83,8 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "attendance.export": "تصدير كشف الحضور والانصراف CSV",
         "shift.view": "عرض المناوبات", "shift.manage": "إدارة المناوبات",
         "leave.view": "عرض طلبات الإجازة", "leave.team": "قرار المسؤول المباشر على طلبات الفريق", "leave.approve": "الاعتماد النهائي للإجازات لدى الموارد البشرية",
-        "leave.types.manage": "إدارة أنواع الإجازات وسياسة الرصيد (مدير النظام فقط)",
-        "leave.balance.manage": "إضافة وتعديل أرصدة الموظفين (مدير النظام فقط)",
+        "leave.types.manage": "إدارة أنواع الإجازات وسياسة التقويم",
+        "leave.balance.manage": "إضافة وتعديل أرصدة الموظفين",
         "overtime.view": "عرض العمل الإضافي", "overtime.approve": "اعتماد العمل الإضافي",
     },
     "payroll": {
@@ -101,7 +101,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "lifecycle.manage": "إدارة دورة الموظف",
     },
     "communications": {
-        "notification.send": "إرسال إشعارات داخلية", "notification.manage": "تعديل وإخفاء الإشعارات المرسلة لمسؤول النظام فقط", "communications.view": "عرض حملات البريد",
+        "notification.send": "إرسال إشعارات داخلية", "notification.manage": "تعديل وإخفاء الإشعارات المرسلة", "communications.view": "عرض حملات البريد",
         "communications.send": "إنشاء وإرسال حملات البريد", "communications.retry": "إعادة محاولة البريد المتعثر",
     },
     "security": {
@@ -116,18 +116,10 @@ ALL_PERMISSIONS = {permission for group in PERMISSION_CATALOG.values() for permi
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "admin": {"*"},
-    "hr": {
-        "org.view", "organization.view", "org.manage", "branch.view", "branch.manage", "employee.view", "employee.manage", "employee.profile.edit", "employee.lifecycle.manage", "employee.emergency.manage",
-        "salary.view", "attendance.view", "attendance.export", "shift.view", "shift.manage", "overtime.view",
-        "overtime.approve", "leave.view", "leave.approve", "evaluation.view", "evaluation.review", "evaluation.cycle.manage",
-        "notification.send", "salary_certificate.issue", "salary_certificate.print", "salary_certificate.verify", "department.manage",
-        "evaluation.override_manager",
-        "employee_document.manage", "employee_action.manage", "employee_custody.view", "employee_custody.manage", "employee_custody.print", "payroll.manage", "payroll.approve", "payroll.pay",
-        "document_library.manage",
-        "advance.view", "advance.approve", "reference.manage", "lifecycle.view", "lifecycle.manage", "report.view",
-        "dashboard.view", "audit.view", "communications.view", "communications.send", "communications.retry",
-        "employee_report.view", "employee_report.export",
-    },
+    # The HR head is the highest operational role.  It receives the complete
+    # permission catalogue, while target-level guards below keep every system
+    # administrator account outside its visibility and control.
+    "hr": set(ALL_PERMISSIONS),
     # Legacy databases may still contain this value.  It is deliberately
     # limited to the direct-manager ceiling and is migrated to ``manager``.
     "general_manager": {"attendance.team", "leave.team"},
@@ -139,6 +131,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
 
 ACCOUNT_ROLES = {"admin", "hr", "manager", "employee"}
 PEOPLE_ADMIN_ROLES = {"admin", "hr"}
+ROLE_AUTHORITY = {"employee": 10, "manager": 20, "general_manager": 20, "hr": 30, "admin": 100}
 
 DOCUMENT_TYPES = {
     "passport", "identity", "residency", "visa", "work_permit", "contract", "job_offer",
@@ -2285,19 +2278,14 @@ def is_configured_general_manager(db: sqlite3.Connection, user: dict[str, Any]) 
 
 
 def is_system_admin(user: dict[str, Any] | sqlite3.Row | None) -> bool:
-    """Return whether the account is the protected system administrator.
-
-    Leave policy maintenance is intentionally stricter than ordinary HR
-    approval.  A user may have ``leave.approve`` without being allowed to
-    change the organisation's leave types or statutory calendar.
-    """
+    """Return whether the account belongs to the protected top authority."""
     if user is None:
         return False
     keys = user.keys() if hasattr(user, "keys") else user
     return bool(
         (str(user["role"] if "role" in keys else "") == "admin")
         or bool(user["is_super_admin"] if "is_super_admin" in keys else False)
-    ) and bool(user["active"] if "active" in keys else True)
+    )
 
 
 def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str) -> bool:
@@ -3799,7 +3787,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True); assert user is not None
             if not (has_permission(self.db, user, "security.manage_users") or has_permission(self.db, user, "security.manage_permissions")):
                 raise APIError(403, "لا تملك صلاحية إدارة المستخدمين.", "forbidden")
-            rows = self.db.execute("SELECT id,email,display_name,role,employee_id,active,must_change_password,is_super_admin,last_password_change_at FROM users ORDER BY display_name").fetchall()
+            if is_system_admin(user):
+                rows = self.db.execute("SELECT id,email,display_name,role,employee_id,active,must_change_password,is_super_admin,last_password_change_at FROM users ORDER BY display_name").fetchall()
+            else:
+                # A system administrator is not merely read-only for HR: the
+                # account is intentionally absent from its directory.
+                rows = self.db.execute(
+                    """SELECT id,email,display_name,role,employee_id,active,must_change_password,is_super_admin,last_password_change_at
+                         FROM users WHERE role<>'admin' AND is_super_admin=0 ORDER BY display_name"""
+                ).fetchall()
             candidates = self.db.execute(
                 """SELECT e.id,e.full_name,e.employee_no,e.email,e.job_title
                      FROM employees e LEFT JOIN users u ON u.employee_id=e.id
@@ -3826,8 +3822,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
             validate_password_strength(password)
             role = str(data.get("role") or "employee")
-            if role not in ACCOUNT_ROLES or (role == "admin" and not is_system_admin(actor)):
-                raise APIError(422, "الدور المحدد غير صالح لإنشاء الحساب.", "validation_error", {"field": "role"})
+            self.validate_role_assignment(actor, role)
             stamp = now_iso(); digest, salt = password_record(password)
             try:
                 with self.db:
@@ -3842,10 +3837,28 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(409, "تعذر إنشاء الحساب لأن البريد أو الموظف مرتبط بحساب آخر.", "duplicate_account") from exc
             self.send_json(201, {"account": {"id": int(cursor.lastrowid), "email": email, "role": role, "employee_id": employee_id}})
 
-        def admin_target(self, user_id: int) -> sqlite3.Row:
+        def admin_target(self, user_id: int, actor: dict[str, Any] | None = None) -> sqlite3.Row:
             row = self.db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             if not row: raise APIError(404, "المستخدم غير موجود.", "not_found")
+            if actor is not None and is_system_admin(row) and not is_system_admin(actor):
+                raise APIError(
+                    403,
+                    "حساب مسؤول النظام محمي ولا يمكن عرضه أو تعديل صلاحياته أو بيانات دخوله.",
+                    "system_admin_account_protected",
+                )
             return row
+
+        def validate_role_assignment(self, actor: dict[str, Any], role: str) -> None:
+            if role not in ACCOUNT_ROLES:
+                raise APIError(422, "الدور غير صالح.", "validation_error", {"field": "role"})
+            actor_level = ROLE_AUTHORITY.get(str(actor.get("role") or ""), 0)
+            if not is_system_admin(actor) and ROLE_AUTHORITY.get(role, 0) > actor_level:
+                raise APIError(
+                    403,
+                    "لا يمكنك منح منصب أو صلاحيات تتجاوز مستوى منصبك. منصب مسؤول النظام محمي.",
+                    "role_authority_exceeded",
+                    {"field": "role", "role": role},
+                )
 
         def guard_admin_continuity(self, actor: dict[str, Any], target: sqlite3.Row, updates: dict[str, Any]) -> None:
             if bool(target["is_super_admin"]) and (updates.get("active") == 0 or updates.get("role", target["role"]) != "admin"):
@@ -3856,11 +3869,21 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if not others: raise APIError(409, "يجب الإبقاء على مدير نظام نشط واحد على الأقل.", "last_admin_protected")
 
         def api_admin_user_patch(self, user_id: int) -> None:
-            actor = self.require_permission("security.manage_users"); target = self.admin_target(user_id); data = self.read_json(); updates: dict[str, Any] = {}
+            actor = self.require_permission("security.manage_users"); target = self.admin_target(user_id, actor); data = self.read_json(); updates: dict[str, Any] = {}
             if "active" in data: updates["active"] = 1 if bool(data["active"]) else 0
             if "role" in data:
-                if data["role"] not in ACCOUNT_ROLES: raise APIError(422, "الدور غير صالح.", "validation_error")
-                updates["role"] = data["role"]
+                role = str(data["role"])
+                self.validate_role_assignment(actor, role)
+                if int(actor["id"]) == int(target["id"]) and role != str(target["role"]):
+                    next_permissions = ROLE_PERMISSIONS.get(role, set())
+                    if not {"security.manage_users", "security.manage_permissions"}.issubset(next_permissions):
+                        raise APIError(
+                            409,
+                            "لا يمكنك خفض منصب حسابك الحالي بما يؤدي إلى فقدان صلاحيات إدارة المستخدمين.",
+                            "critical_self_role_change",
+                            {"field": "role"},
+                        )
+                updates["role"] = role
             if not updates: raise APIError(422, "لا توجد تغييرات.", "validation_error")
             self.guard_admin_continuity(actor, target, updates); before = {k: target[k] for k in updates}; updates["updated_at"] = now_iso()
             with self.db:
@@ -3870,11 +3893,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, {"user": self.admin_user_payload(self.admin_target(user_id))})
 
         def api_user_permissions_get(self, user_id: int) -> None:
-            self.require_permission("security.manage_permissions"); target = self.admin_target(user_id)
+            actor = self.require_permission("security.manage_permissions"); target = self.admin_target(user_id, actor)
             self.send_json(200, {"user": self.admin_user_payload(target), "groups": self.permission_catalog_payload()})
 
         def api_user_permissions_patch(self, user_id: int) -> None:
-            actor = self.require_permission("security.manage_permissions"); target = self.admin_target(user_id); data = self.read_json()
+            actor = self.require_permission("security.manage_permissions"); target = self.admin_target(user_id, actor); data = self.read_json()
             if target["role"] == "admin" or bool(target["is_super_admin"]): raise APIError(409, "صلاحيات مدير النظام ثابتة وكاملة ومحمية.", "protected_super_admin")
             raw = data.get("overrides")
             if not isinstance(raw, list) or len(raw) > len(ALL_PERMISSIONS): raise APIError(422, "قائمة الصلاحيات غير صالحة.", "validation_error")
@@ -3897,7 +3920,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, {"user": self.admin_user_payload(self.admin_target(user_id))})
 
         def api_admin_password_reset(self, user_id: int) -> None:
-            actor = self.require_permission("security.reset_password"); target = self.admin_target(user_id); data = self.read_json()
+            actor = self.require_permission("security.reset_password"); target = self.admin_target(user_id, actor); data = self.read_json()
             if data.get("confirm") is not True: raise APIError(422, "يلزم تأكيد تعيين كلمة المرور المؤقتة.", "confirmation_required")
             password = str(data.get("password", ""))
             if password != str(data.get("confirm_password", "")): raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
@@ -5714,8 +5737,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         password = str(data.get("password", ""))
                         validate_password_strength(password)
                         role = str(data.get("role", "employee"))
-                        if role not in ACCOUNT_ROLES or (role == "admin" and not is_system_admin(user)):
-                            raise APIError(422, "الدور غير صالح.", "validation_error")
+                        self.validate_role_assignment(user, role)
                         digest, salt = password_record(password)
                         account_cursor = self.db.execute(
                             "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -6893,12 +6915,31 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             employee = self.db.execute("SELECT branch_id,active FROM employees WHERE id=?", (employee_id,)).fetchone()
             if not employee or not bool(employee["active"]):
                 raise APIError(403, "ملف الموظف غير نشط.", "inactive_employee")
-            branch = self.db.execute("SELECT * FROM branches WHERE id=?", (employee["branch_id"],)).fetchone() if employee["branch_id"] else None
+            unassigned_branch_fallback = employee["branch_id"] is None
+            branch = None
+            distance = 0.0
+            if employee["branch_id"]:
+                branch = self.db.execute("SELECT * FROM branches WHERE id=?", (employee["branch_id"],)).fetchone()
+                if branch is not None and bool(branch["active"]):
+                    distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
+            else:
+                # An employee without a branch assignment may attend from any
+                # active company branch.  The same geofence validation remains
+                # mandatory; we select the nearest active branch so overlapping
+                # geofences and rejection messages stay deterministic.
+                active_branches = self.db.execute("SELECT * FROM branches WHERE active=1 ORDER BY id").fetchall()
+                if active_branches:
+                    measured = [
+                        (haversine_m(latitude, longitude, candidate["latitude"], candidate["longitude"]), candidate)
+                        for candidate in active_branches
+                    ]
+                    containing = [item for item in measured if item[0] <= item[1]["radius_m"]]
+                    distance, branch = min(containing or measured, key=lambda item: item[0])
             if branch is None or not bool(branch["active"]):
                 with self.db:
                     self.db.execute("INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,accepted,reason,created_at) VALUES(?,?,?,?,?,?,0,?,?)", (employee_id, employee["branch_id"], action, latitude, longitude, accuracy, "no_active_branch", now_iso()))
-                raise APIError(403, "لا يوجد فرع نشط مرتبط بملفك. راجع الموارد البشرية.", "no_active_branch")
-            distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
+                message = "لا توجد فروع نشطة متاحة لتسجيل الحضور. راجع الموارد البشرية." if unassigned_branch_fallback else "لا يوجد فرع نشط مرتبط بملفك. راجع الموارد البشرية."
+                raise APIError(403, message, "no_active_branch")
             inside = distance <= branch["radius_m"]
             punch_time = local_now()
             stamp = punch_time.isoformat(timespec="seconds")
@@ -6908,11 +6949,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     (employee_id, branch["id"], action, latitude, longitude, accuracy, round(distance, 2), int(inside), None if inside else "outside_geofence", stamp),
                 )
             if not inside:
+                message = (
+                    f"أنت خارج نطاق جميع الفروع النشطة. أقرب فرع «{branch['name']}» يبعد {round(distance)} م، والنطاق المسموح {branch['radius_m']} م."
+                    if unassigned_branch_fallback
+                    else f"أنت خارج نطاق فرع «{branch['name']}». المسافة الحالية {round(distance)} م، والنطاق المطلوب {branch['radius_m']} م."
+                )
                 raise APIError(
                     403,
-                    f"أنت خارج نطاق فرع «{branch['name']}». المسافة الحالية {round(distance)} م، والنطاق المطلوب {branch['radius_m']} م.",
+                    message,
                     "outside_geofence",
-                    {"distance_m": round(distance, 1), "radius_m": branch["radius_m"], "branch": branch["name"]},
+                    {"distance_m": round(distance, 1), "radius_m": branch["radius_m"], "branch": branch["name"], "unassigned_branch_fallback": unassigned_branch_fallback},
                 )
             work_day = punch_time.date()
             work_date = work_day.isoformat()
@@ -6947,14 +6993,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if current["check_out_at"]:
                         raise APIError(409, "تم تسجيل الخروج لهذا اليوم بالفعل.", "already_checked_out")
                     self.db.execute("UPDATE attendance SET check_out_at=?,check_out_lat=?,check_out_lng=?,check_out_accuracy=?,check_out_distance_m=?,updated_at=? WHERE id=?", (stamp, latitude, longitude, accuracy, round(distance, 2), stamp, current["id"]))
-                audit(self.db, user["id"], f"attendance.{action}", "employee", employee_id, {"branch_id": branch["id"], "distance_m": round(distance, 2)})
+                audit(self.db, user["id"], f"attendance.{action}", "employee", employee_id, {"branch_id": branch["id"], "distance_m": round(distance, 2), "unassigned_branch_fallback": unassigned_branch_fallback})
             saved = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, work_date)).fetchone()
             shift = self.shift_for_employee(employee_id, date.fromisoformat(work_date))
             overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee_id, work_date)).fetchone()[0]
             relief = self.attendance_relief_for_day(employee_id, date.fromisoformat(work_date))
             with self.db:
                 self.ensure_lateness_warning(employee_id, int(user["id"]))
-            self.send_json(200, {"attendance": self.attendance_metrics(saved, shift, overtime, relief["permission_minutes"], relief["emergency_excused"]), "distance_m": round(distance, 1), "monthly_lateness": self.monthly_lateness_summary(employee_id, work_date[:7])})
+            self.send_json(200, {"attendance": self.attendance_metrics(saved, shift, overtime, relief["permission_minutes"], relief["emergency_excused"]), "distance_m": round(distance, 1), "branch": {"id": int(branch["id"]), "name": branch["name"], "unassigned_fallback": unassigned_branch_fallback}, "monthly_lateness": self.monthly_lateness_summary(employee_id, work_date[:7])})
 
         def api_attendance_daily(self) -> None:
             user = self.current_user(True)
@@ -7539,11 +7585,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return self.approval_recipient_ids("leave.approve")
 
         def require_leave_policy_admin(self) -> dict[str, Any]:
-            user = self.current_user(True)
-            assert user is not None
-            if not is_system_admin(user):
-                raise APIError(403, "إدارة أنواع الإجازات وسياسة التقويم متاحة لمدير النظام فقط.", "system_admin_required")
-            return user
+            return self.require_permission("leave.types.manage")
 
         def leave_type_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             data = dict(row)
@@ -7823,7 +7865,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if target_id:
                 employee = self.db.execute("SELECT gender FROM employees WHERE id=?", (target_id,)).fetchone()
                 target_gender = str(employee["gender"] if employee and "gender" in employee.keys() else "unspecified").lower() if employee else None
-            include_inactive = is_system_admin(user) and self.query.get("include_inactive") == "1"
+            can_manage = has_permission(self.db, user, "leave.types.manage")
+            include_inactive = can_manage and self.query.get("include_inactive") == "1"
             rows = self.db.execute("SELECT * FROM leave_types " + ("" if include_inactive else "WHERE active=1 ") + "ORDER BY id").fetchall()
             if target_id and target_gender != "female":
                 rows = [row for row in rows if row["code"] != "maternity"]
@@ -7844,7 +7887,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "max_hours_per_request": WORK_PERMISSION_MAX_HOURS_PER_REQUEST,
                     "max_monthly_hours": WORK_PERMISSION_MAX_MONTHLY_HOURS,
                 }
-            self.send_json(200, {"items": [self.leave_type_payload(r) for r in rows], "can_manage": is_system_admin(user), "work_permission_policy": {"max_requests": WORK_PERMISSION_MAX_REQUESTS, "max_hours_per_request": WORK_PERMISSION_MAX_HOURS_PER_REQUEST, "max_monthly_hours": WORK_PERMISSION_MAX_MONTHLY_HOURS}, "work_permission_usage": permission_usage})
+            self.send_json(200, {"items": [self.leave_type_payload(r) for r in rows], "can_manage": can_manage, "work_permission_policy": {"max_requests": WORK_PERMISSION_MAX_REQUESTS, "max_hours_per_request": WORK_PERMISSION_MAX_HOURS_PER_REQUEST, "max_monthly_hours": WORK_PERMISSION_MAX_MONTHLY_HOURS}, "work_permission_usage": permission_usage})
 
         def api_leave_balances(self) -> None:
             user = self.current_user(True)
@@ -7859,11 +7902,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             """Create or replace a per-year leave balance adjustment.
 
             Viewing balances remains available through the normal leave-view
-            rules, while mutation is deliberately stricter: only a system
-            administrator can edit the entitlement, carried and used values.
-            Every change is marked as a manual override and written to audit.
+            rules, while mutation requires the dedicated balance-management
+            permission. Every change is marked as a manual override and
+            written to audit.
             """
-            user = self.require_leave_policy_admin()
+            user = self.require_permission("leave.balance.manage")
             data = self.read_json()
             employee_id = as_int(data.get("employee_id"), "employee_id", 1)
             leave_type_id = as_int(data.get("leave_type_id"), "leave_type_id", 1)
@@ -9372,11 +9415,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         # Notifications
         def require_notification_admin(self) -> dict[str, Any]:
-            user = self.current_user(True)
-            assert user is not None
-            if str(user.get("role")) != "admin":
-                raise APIError(403, "إدارة الرسائل الداخلية متاحة لمسؤول النظام فقط.", "forbidden", {"permission": "notification.manage"})
-            return user
+            return self.require_permission("notification.manage")
 
         def api_notification_manage_get(self) -> None:
             self.require_notification_admin()
@@ -9507,8 +9546,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
             if not may_view_notification(self.db, user, row):
                 raise APIError(403, "هذا إشعار إداري لا تملك صلاحية الاطلاع عليه.", "forbidden")
-            privileged = str(user.get("role")) == "admin" or row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
-            if row["hidden_at"] and str(user.get("role")) != "admin":
+            can_manage = has_permission(self.db, user, "notification.manage")
+            privileged = can_manage or row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
+            if row["hidden_at"] and not can_manage:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
             if row["available_at"] and row["available_at"] > now_iso() and not privileged:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
