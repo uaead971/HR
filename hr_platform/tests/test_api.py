@@ -173,7 +173,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261008-production-r7")
+        application_script = index.index("app.js?v=5.8.0&build=20261008-production-r8")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -518,10 +518,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 (manager_id, "employee_report.view"),
             )
             permissions.commit()
-        manager.request(
+        delegated_report = manager.request(
             "POST", f"/api/employees/{employee_id}/comprehensive-report",
-            {"date_from": period_start.isoformat(), "date_to": period_end.isoformat()}, expected=403,
+            {"date_from": period_start.isoformat(), "date_to": period_end.isoformat()},
         )
+        self.assertEqual(delegated_report["report"]["employee"]["id"], employee_id)
         manager.request(
             "POST", f"/api/employees/{employee_id}/comprehensive-report/export",
             {"format": "print_pdf", "date_from": period_start.isoformat(), "date_to": period_end.isoformat()}, expected=403,
@@ -2965,9 +2966,17 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(len(contacts), 2)
         self.assertTrue(next(contact for contact in contacts if contact["id"] == first["id"])["is_primary"])
 
-        admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": [{"permission": "employee.emergency.manage", "granted": False}]})
-        hr.request("POST", f"/api/employees/{target['id']}/emergency-contacts", {"full_name": "ممنوع", "relationship": "قريب", "phone": "+971500000005"}, expected=403)
-        admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": []})
+        protected_hr_access = admin.request(
+            "PATCH", f"/api/admin/users/{hr_user['id']}/permissions",
+            {"overrides": [{"permission": "employee.emergency.manage", "granted": False}]},
+            expected=422,
+        )
+        self.assertEqual(protected_hr_access["code"], "hr_full_access_required")
+        hr.request(
+            "POST", f"/api/employees/{target['id']}/emergency-contacts",
+            {"full_name": "جهة ثالثة", "relationship": "قريب", "phone": "+971500000005"},
+            expected=201,
+        )
         with contextlib.closing(hr_server.open_db(self.db_path)) as db:
             audit_details = " ".join(row["details"] for row in db.execute("SELECT details FROM audit_log WHERE action LIKE 'employee.emergency_contact.%' AND entity_id=?", (str(target["id"]),)).fetchall())
             self.assertNotIn("جهة أولى سرية", audit_details)
@@ -3616,24 +3625,34 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(approved_dashboard["metrics"]["payroll_runs"], 1)
         self.assertEqual(approved_dashboard["metrics"]["payroll_net"], run["net"])
 
-        hr_user = next(row for row in admin.request("GET", "/api/admin/users")["items"] if row["email"] == "hr@demo.ae")
-        original_overrides = hr_user["overrides"]
-        denied_overrides = [row for row in original_overrides if row["permission"] != "salary.view"] + [{"permission": "salary.view", "granted": False}]
-        try:
-            admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": denied_overrides})
-            hidden_dashboard = hr.request("GET", "/api/dashboard")
-            self.assertFalse(hidden_dashboard["salary_metrics_visible"])
-            self.assertIsNone(hidden_dashboard["metrics"]["salary_contract_total"])
-            self.assertIsNone(hidden_dashboard["metrics"]["payroll_net"])
-            hidden_report = hr.request("GET", "/api/reports/summary")["summary"]
-            self.assertFalse(hidden_report["salary_metrics_visible"])
-            self.assertIsNone(hidden_report["salary_contract_total"])
-            _, hidden_csv = hr.raw_request("/api/reports/summary.csv")
-            hidden_csv_text = hidden_csv.decode("utf-8-sig")
-            self.assertNotIn("إجمالي الرواتب", hidden_csv_text)
-            self.assertNotIn("صافي الرواتب", hidden_csv_text)
-        finally:
-            admin.request("PATCH", f"/api/admin/users/{hr_user['id']}/permissions", {"overrides": original_overrides})
+        limited_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"FIN-LIMIT-{suffix}", "full_name": "مدير دون صلاحية الرواتب",
+            "email": f"finance-limited-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "create_user": True, "password": "FinanceLimited@12345", "role": "manager",
+        }, expected=201)["employee"]
+        limited_user = next(
+            row for row in admin.request("GET", "/api/admin/users")["items"]
+            if row["employee_id"] == limited_employee["id"]
+        )
+        admin.request(
+            "PATCH", f"/api/admin/users/{limited_user['id']}/permissions",
+            {"overrides": [
+                {"permission": "dashboard.view", "granted": True},
+                {"permission": "report.view", "granted": True},
+            ]},
+        )
+        limited_manager = self.client(f"finance-limited-{suffix}@demo.ae", "FinanceLimited@12345")
+        hidden_dashboard = limited_manager.request("GET", "/api/dashboard")
+        self.assertFalse(hidden_dashboard["salary_metrics_visible"])
+        self.assertIsNone(hidden_dashboard["metrics"]["salary_contract_total"])
+        self.assertIsNone(hidden_dashboard["metrics"]["payroll_net"])
+        hidden_report = limited_manager.request("GET", "/api/reports/summary")["summary"]
+        self.assertFalse(hidden_report["salary_metrics_visible"])
+        self.assertIsNone(hidden_report["salary_contract_total"])
+        _, hidden_csv = limited_manager.raw_request("/api/reports/summary.csv")
+        hidden_csv_text = hidden_csv.decode("utf-8-sig")
+        self.assertNotIn("إجمالي الرواتب", hidden_csv_text)
+        self.assertNotIn("صافي الرواتب", hidden_csv_text)
 
         report = hr.request("GET", "/api/reports/summary")["summary"]
         current_employees = [
@@ -4180,6 +4199,107 @@ class HRAPIEndToEndTests(unittest.TestCase):
         }, expected=403)
         self.assertEqual(restricted["code"], "outside_geofence")
         self.assertFalse(restricted["details"]["unassigned_branch_fallback"])
+
+    def test_78_full_hr_access_and_delegable_manager_permission_catalog(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        catalog = admin.request("GET", "/api/admin/permissions/catalog")["groups"]
+        catalog_permissions = {
+            permission["key"]
+            for group in catalog
+            for permission in group["permissions"]
+        }
+        self.assertEqual(catalog_permissions, hr_server.ALL_PERMISSIONS)
+        self.assertGreaterEqual(len(catalog_permissions), 60)
+
+        # HR always receives the complete catalogue, even if an old database
+        # still contains a per-user denial from a previous release.
+        admin_users = admin.request("GET", "/api/admin/users")["items"]
+        hr_account = next(item for item in admin_users if item["email"] == "hr@demo.ae")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "INSERT OR REPLACE INTO user_permissions(user_id,permission,granted) VALUES(?,?,0)",
+                (hr_account["id"], "dashboard.view"),
+            )
+        hr_identity = hr.request("GET", "/api/auth/me")
+        self.assertEqual(set(hr_identity["permissions"]), catalog_permissions)
+        self.assertEqual(hr_identity["permission_reasons"]["dashboard.view"], "role:hr_full_access")
+        denied_hr_override = admin.request(
+            "PATCH", f"/api/admin/users/{hr_account['id']}/permissions",
+            {"overrides": [{"permission": "dashboard.view", "granted": False}]}, expected=422,
+        )
+        self.assertEqual(denied_hr_override["code"], "hr_full_access_required")
+
+        suffix = uuid.uuid4().hex[:8]
+        manager_employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"DELEG-{suffix}", "full_name": f"مسؤول مفوض {suffix}",
+            "email": f"delegated-{suffix}@demo.ae", "hire_date": "2025-01-01",
+            "create_user": True, "password": "Delegated@12345", "role": "manager",
+        }, expected=201)["employee"]
+        manager_account = next(
+            item for item in admin.request("GET", "/api/admin/users")["items"]
+            if item["employee_id"] == manager_employee["id"]
+        )
+        delegated = admin.request(
+            "PATCH", f"/api/admin/users/{manager_account['id']}/permissions",
+            {"overrides": [{"permission": permission, "granted": True} for permission in sorted(catalog_permissions)]},
+        )["user"]
+        self.assertEqual(set(delegated["permissions"]), catalog_permissions)
+        delegated_client = self.client(f"delegated-{suffix}@demo.ae", "Delegated@12345")
+        self.assertEqual(set(delegated_client.request("GET", "/api/auth/me")["permissions"]), catalog_permissions)
+        delegated_client.request("GET", "/api/document-library/categories?status=all")
+
+        general_manager_employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"GM-DELEG-{suffix}", "full_name": f"مدير عام مفوض {suffix}",
+            "email": f"delegated-gm-{suffix}@demo.ae", "hire_date": "2025-01-01",
+            "create_user": True, "password": "GeneralManager@12345", "role": "employee",
+        }, expected=201)["employee"]
+        admin.request(
+            "PATCH", f"/api/employees/{general_manager_employee['id']}",
+            {"institution_role": "general_manager"},
+        )
+        general_manager_account = next(
+            item for item in admin.request("GET", "/api/admin/users")["items"]
+            if item["employee_id"] == general_manager_employee["id"]
+        )
+        general_manager = admin.request(
+            "PATCH", f"/api/admin/users/{general_manager_account['id']}/permissions",
+            {"overrides": [{"permission": permission, "granted": True} for permission in sorted(catalog_permissions)]},
+        )["user"]
+        self.assertEqual(set(general_manager["permissions"]), catalog_permissions)
+        general_manager_client = self.client(f"delegated-gm-{suffix}@demo.ae", "GeneralManager@12345")
+        self.assertEqual(
+            set(general_manager_client.request("GET", "/api/auth/me")["permissions"]),
+            catalog_permissions,
+        )
+        general_manager_client.request("GET", "/api/document-library/categories?status=all")
+
+        # Complete delegated permissions do not expose or permit mutation of
+        # the protected system-administrator account.
+        protected_admin = next(item for item in admin_users if item["email"] == "admin@demo.ae")
+        delegated_directory = delegated_client.request("GET", "/api/admin/users")["items"]
+        self.assertNotIn("admin@demo.ae", {item["email"] for item in delegated_directory})
+        protected = delegated_client.request(
+            "GET", f"/api/admin/users/{protected_admin['id']}/permissions", expected=403,
+        )
+        self.assertEqual(protected["code"], "system_admin_account_protected")
+
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        i18n = (root / "i18n.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        self.assertIn("syncSessionPermissions", app)
+        self.assertIn("if(!state.user)return;setAttendanceDefaultRange()", app)
+        self.assertIn("#userName,#userRole", i18n)
+        self.assertIn("$('#userRole').textContent=tr(roleLabels[user.role]||user.role)", app)
+        self.assertIn("جميع صلاحيات النظام في القائمة", index)
+        self.assertIn("build=20261008-production-r8", index)
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "DELETE FROM user_permissions WHERE user_id=? AND permission='dashboard.view'",
+                (hr_account["id"],),
+            )
 
 
 if __name__ == "__main__":
