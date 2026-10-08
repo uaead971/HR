@@ -193,11 +193,12 @@
   });
 
   Object.assign(english, {
-    'يحدد المنصب سقف الصلاحيات، ويمكن تخصيص الصلاحيات داخله بالمنح أو المنع الصريح.':'The position defines the permission ceiling; permissions within it can be explicitly granted or denied.',
+    'يعطي المنصب صلاحيات افتراضية، وتظهر جميع صلاحيات النظام في القائمة لمنحها للمسؤولين حسب الحاجة.':'A position provides default permissions, while every system permission remains visible for assignment to authorized roles as needed.',
     'تسلسل الصلاحيات:':'Permission hierarchy:',
-    'مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات التشغيلية والإدارية، لكنه لا يستطيع رؤية حساب مسؤول النظام أو تعديله أو إعادة تعيين كلمة مروره.':'The system administrator is the protected highest authority. HR has all operational and administrative permissions but cannot see, modify, or reset the system administrator account.',
+    'مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات التشغيلية والإدارية تلقائياً. ويمكن منح المدير العام أو المسؤول المباشر أي صلاحية من القائمة، دون السماح لهم برؤية حساب مسؤول النظام أو تعديله أو إعادة تعيين كلمة مروره.':'The system administrator is the protected highest authority. HR automatically has every operational and administrative permission. The general manager or a line manager can be granted any listed permission, without access to view, modify, or reset the system administrator account.',
     'المنصب والصلاحيات الأساسية':'Position and base permissions','رئيس قسم الموارد البشرية':'HR Manager','مسؤول مباشر':'Line Manager',
-    'تم تحديث منصب المستخدم وتطبيق سقف الصلاحيات الجديد':'The user position and its new permission ceiling were applied.',
+    'تم تحديث منصب المستخدم وتطبيق الصلاحيات الافتراضية الجديدة':'The user position and its new default permissions were applied.',
+    'جميع صلاحيات الموارد البشرية فعّالة تلقائياً':'All HR permissions are active automatically.','مسؤول الموارد البشرية: جميع الصلاحيات فعّالة':'HR: all permissions are active.','صلاحيات الموارد البشرية الكاملة':'Full HR permissions','المدير العام للمؤسسة':'Organization general manager','منح مخصص':'Custom grant','مقيدة بدور الموظف':'Restricted by employee role','تم تحديث صلاحيات حسابك والقوائم المتاحة':'Your account permissions and available menus were updated.',
     'يمكن للمخول الاستعلام عن رصيد موظف وإضافة أو تعديل الاستحقاق والمرحل والمستخدم. يحفظ النظام كل تعديل في سجل التدقيق.':'Authorized users can query and edit employee entitlement, carried, and used balances. Every change is recorded in the audit log.',
     'صلاحية إدارية':'Administrative permission','إدارة مخولة':'Authorized management',
     'يمكن لحامل صلاحية إدارة الإشعارات تعديل الرسالة أو إخفاؤها فوراً من صناديق جميع المستلمين. لا تُحذف السجلات من قاعدة البيانات.':'Users with notification-management permission can edit or hide a message from all recipient inboxes. Records are retained in the database.',
@@ -224,7 +225,7 @@
     return result;
   }
   function shouldPreserve(element) {
-    return Boolean(element && element.closest('[data-i18n-preserve],.org-name,.org-legal-name,#userName,.event small,.distribution-row,#employeesRows td:not(:last-child),option:not([value=""]):not([data-i18n-option]),[dir="ltr"]:not(html),.employee-cell,.work-card-person,.organization-person,.employee-card-photo'));
+    return Boolean(element && element.closest('[data-i18n-preserve],.org-name,.org-legal-name,#userName,#userRole,.event small,.distribution-row,#employeesRows td:not(:last-child),option:not([value=""]):not([data-i18n-option]),[dir="ltr"]:not(html),.employee-cell,.work-card-person,.organization-person,.employee-card-photo'));
   }
   function translateTextNode(node) {
     const parent = node.parentElement;

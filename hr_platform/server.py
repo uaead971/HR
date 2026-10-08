@@ -132,6 +132,7 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
 ACCOUNT_ROLES = {"admin", "hr", "manager", "employee"}
 PEOPLE_ADMIN_ROLES = {"admin", "hr"}
 ROLE_AUTHORITY = {"employee": 10, "manager": 20, "general_manager": 20, "hr": 30, "admin": 100}
+DELEGABLE_PERMISSION_ROLES = {"manager", "general_manager"}
 
 DOCUMENT_TYPES = {
     "passport", "identity", "residency", "visa", "work_permit", "contract", "job_offer",
@@ -1977,6 +1978,10 @@ def initialize_database(db_path: Path) -> None:
                       AND EXISTS(SELECT 1 FROM users WHERE role='general_manager' AND active=1 AND employee_id IS NOT NULL)"""
             )
             db.execute("UPDATE users SET role='manager',updated_at=COALESCE(updated_at,?) WHERE role='general_manager'", (now_iso(),))
+            # HR is a fixed full-access operational role.  Remove legacy
+            # per-user denials so an upgraded HR account immediately receives
+            # every catalogue permission and all corresponding navigation.
+            db.execute("DELETE FROM user_permissions WHERE user_id IN (SELECT id FROM users WHERE role='hr')")
             db.execute("UPDATE salary_certificates SET request_status='issued' WHERE request_status IS NULL OR request_status NOT IN ('requested','approved','rejected','issued')")
             db.execute(
                 """UPDATE leave_requests
@@ -2288,15 +2293,26 @@ def is_system_admin(user: dict[str, Any] | sqlite3.Row | None) -> bool:
     )
 
 
+def may_receive_delegated_permissions(db: sqlite3.Connection, user: dict[str, Any] | sqlite3.Row) -> bool:
+    """Whether catalogue permissions may extend this account's role defaults."""
+    keys = user.keys() if hasattr(user, "keys") else user
+    role = str(user["role"] if "role" in keys else "")
+    return role in DELEGABLE_PERMISSION_ROLES or is_configured_general_manager(db, user)
+
+
 def has_permission(db: sqlite3.Connection, user: dict[str, Any], permission: str) -> bool:
     if user.get("role") == "admin" and bool(user.get("active", True)):
         return True
+    if user.get("role") == "hr" and bool(user.get("active", True)):
+        return permission in ALL_PERMISSIONS
     base = ROLE_PERMISSIONS.get(str(user["role"]), set())
     override = db.execute("SELECT granted FROM user_permissions WHERE user_id=? AND permission=?", (user["id"], permission)).fetchone()
     if override is not None:
-        # Explicit denial may narrow a category, but a grant cannot promote an
-        # employee, direct manager, or HR head beyond that category's ceiling.
-        return bool(override["granted"]) and ("*" in base or permission in base)
+        # Administrative positions and the configured general manager can be
+        # delegated any real catalogue permission. Ordinary employees remain
+        # restricted to their self-service role even if a legacy row exists.
+        can_expand = may_receive_delegated_permissions(db, user)
+        return bool(override["granted"]) and ("*" in base or permission in base or (can_expand and permission in ALL_PERMISSIONS))
     return "*" in base or permission in base
 
 
@@ -2304,14 +2320,20 @@ def effective_permissions(db: sqlite3.Connection, user: dict[str, Any]) -> tuple
     if user.get("role") == "admin" and bool(user.get("active", True)):
         values = sorted(ALL_PERMISSIONS | {"*"})
         return values, {permission: "protected_super_admin" for permission in values}
+    if user.get("role") == "hr" and bool(user.get("active", True)):
+        values = sorted(ALL_PERMISSIONS)
+        return values, {permission: "role:hr_full_access" for permission in values}
     base = ROLE_PERMISSIONS.get(str(user.get("role")), set())
     granted = set(ALL_PERMISSIONS if "*" in base else base)
     reasons = {permission: f"role:{user.get('role')}" for permission in granted}
+    can_expand = may_receive_delegated_permissions(db, user)
     for item in db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=?", (user["id"],)):
-        if bool(item["granted"]) and ("*" in base or item["permission"] in base):
+        if bool(item["granted"]) and ("*" in base or item["permission"] in base or (can_expand and item["permission"] in ALL_PERMISSIONS)):
             granted.add(item["permission"]); reasons[item["permission"]] = "explicit_grant"
-        else:
+        elif not bool(item["granted"]):
             granted.discard(item["permission"]); reasons[item["permission"]] = "explicit_deny"
+        else:
+            granted.discard(item["permission"]); reasons[item["permission"]] = "role_restricted"
     if "organization.view" in base and "organization.view" not in granted and "organization.view" not in {
         row["permission"] for row in db.execute("SELECT permission FROM user_permissions WHERE user_id=? AND permission='organization.view'", (user["id"],))
     } and "employee.view" in granted:
@@ -3369,7 +3391,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return int(user["employee_id"])
 
         def has_privileged_people_access(self, user: dict[str, Any], permission: str) -> bool:
-            return str(user.get("role")) in PEOPLE_ADMIN_ROLES and has_permission(self.db, user, permission)
+            # Sensitive people access is governed by the explicit permission.
+            # Ordinary employees cannot receive expanded grants, while an
+            # authorized manager/general manager can be delegated the same
+            # capability from the complete catalogue.
+            return has_permission(self.db, user, permission)
 
         def has_organization_chart_access(self, user: dict[str, Any]) -> bool:
             """Allow the dedicated chart permission without widening employee data access.
@@ -3780,7 +3806,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def admin_user_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             user = dict(row); effective, reasons = effective_permissions(self.db, user)
-            overrides = [{"permission": x["permission"], "granted": bool(x["granted"])} for x in self.db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=? ORDER BY permission", (user["id"],))]
+            # HR is a fixed full-access role.  Do not leak obsolete overrides
+            # into the editor because they can make an active permission look
+            # denied even though the server correctly grants the full catalog.
+            overrides = [] if user["role"] == "hr" else [{"permission": x["permission"], "granted": bool(x["granted"])} for x in self.db.execute("SELECT permission,granted FROM user_permissions WHERE user_id=? ORDER BY permission", (user["id"],))]
             return public_user(user) | {"permissions": effective, "permission_reasons": reasons, "overrides": overrides, "last_password_change_at": user.get("last_password_change_at")}
 
         def api_admin_users(self) -> None:
@@ -3885,11 +3914,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         )
                 updates["role"] = role
             if not updates: raise APIError(422, "لا توجد تغييرات.", "validation_error")
-            self.guard_admin_continuity(actor, target, updates); before = {k: target[k] for k in updates}; updates["updated_at"] = now_iso()
+            self.guard_admin_continuity(actor, target, updates); before = {k: target[k] for k in updates}; role_changed = "role" in updates and updates["role"] != target["role"]; updates["updated_at"] = now_iso()
             with self.db:
                 self.db.execute("UPDATE users SET "+",".join(f"{k}=?" for k in updates)+" WHERE id=?", (*updates.values(), user_id))
+                if role_changed:
+                    # A position change applies a clean role preset. This also
+                    # removes stale denials that previously hid HR modules.
+                    self.db.execute("DELETE FROM user_permissions WHERE user_id=?", (user_id,))
                 if updates.get("active") == 0: self.db.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
-                audit(self.db, actor["id"], "security.user_update", "user", user_id, {"before": before, "after": updates})
+                audit(self.db, actor["id"], "security.user_update", "user", user_id, {"before": before, "after": updates, "permission_overrides_reset": role_changed})
             self.send_json(200, {"user": self.admin_user_payload(self.admin_target(user_id))})
 
         def api_user_permissions_get(self, user_id: int) -> None:
@@ -3901,14 +3934,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if target["role"] == "admin" or bool(target["is_super_admin"]): raise APIError(409, "صلاحيات مدير النظام ثابتة وكاملة ومحمية.", "protected_super_admin")
             raw = data.get("overrides")
             if not isinstance(raw, list) or len(raw) > len(ALL_PERMISSIONS): raise APIError(422, "قائمة الصلاحيات غير صالحة.", "validation_error")
+            if target["role"] == "hr" and any(isinstance(item, dict) and item.get("granted") is False for item in raw):
+                raise APIError(422, "مسؤول الموارد البشرية يجب أن يحتفظ بجميع صلاحيات النظام التشغيلية والإدارية.", "hr_full_access_required")
             normalized: dict[str, bool] = {}
             ceiling = ROLE_PERMISSIONS.get(str(target["role"]), set())
+            can_expand = may_receive_delegated_permissions(self.db, target)
             for item in raw:
                 if not isinstance(item, dict) or item.get("permission") not in ALL_PERMISSIONS or not isinstance(item.get("granted"), bool):
                     raise APIError(422, "تحتوي القائمة على صلاحية غير صالحة.", "validation_error")
-                if item["granted"] and "*" not in ceiling and item["permission"] not in ceiling:
+                if item["granted"] and "*" not in ceiling and item["permission"] not in ceiling and not can_expand and target["role"] != "hr":
                     raise APIError(422, "لا يمكن منح صلاحية تتجاوز تصنيف هذا الحساب.", "role_permission_ceiling", {"permission": item["permission"], "role": target["role"]})
+                if item["granted"] and not has_permission(self.db, actor, item["permission"]):
+                    raise APIError(403, "لا يمكنك منح صلاحية لا تملكها في حسابك.", "permission_grant_exceeds_actor", {"permission": item["permission"]})
                 normalized[item["permission"]] = item["granted"]
+            if target["role"] == "hr":
+                # Grants are already inherited from the fixed HR role and do
+                # not need redundant rows in the database.
+                normalized.clear()
             critical = {"security.manage_permissions", "security.manage_users"}
             if actor["id"] == user_id and any(permission in critical and not granted for permission, granted in normalized.items()):
                 raise APIError(409, "لا يمكنك منع صلاحيات الإدارة الحرجة عن حسابك الحالي.", "critical_self_deny")
@@ -6097,10 +6139,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200,{"items":documents,"alerts":alerts,"counts":{"total":len(documents),"expired":sum(d["status"]=="expired" for d in documents),"expiring_soon":sum(d["status"]=="expiring_soon" for d in documents)}})
 
         def require_document_library(self) -> dict[str, Any]:
-            user = self.require_permission("document_library.manage")
-            if str(user.get("role")) not in PEOPLE_ADMIN_ROLES:
-                raise APIError(403, "مكتبة الوثائق متاحة فقط لمدير النظام ومسؤول الموارد البشرية.", "forbidden")
-            return user
+            return self.require_permission("document_library.manage")
 
         def serialize_document_library_category(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             item = dict(row)
