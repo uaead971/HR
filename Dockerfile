@@ -6,16 +6,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 # Keep an explicit revision marker so each application source sync invalidates
 # the image layer that copies the web application into the runtime image.
-ARG BUILD_REV=2026-10-07-v58-attendance-calendar-r5
+ARG BUILD_REV=2026-10-08-v58-bilingual-contract-arial-r9
 RUN echo "Building Khaisha HR revision ${BUILD_REV}"
 COPY hr_platform/ /app/
 COPY start.sh /app/start.sh
 
-# ReportLab's dependency-free PDF writer needs a real Unicode font for Arabic.
-# Install the freely redistributable Noto/DejaVu fonts in the image so
-# contracts and certificates render identically on Render and locally.
+# The dependency-free PDF writer prefers Arial. Linux uses the freely
+# redistributable Arial-compatible Liberation family when it has the required
+# glyphs, then the Unicode-complete DejaVu fallback. This prevents bilingual
+# contracts from showing square missing-glyph boxes.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends fonts-noto-core fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends fonts-liberation2 fonts-noto-core fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/data \
     && chmod +x /app/start.sh

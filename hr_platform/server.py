@@ -498,27 +498,40 @@ def _ttf_cmap(font_data: bytes) -> dict[int, int]:
 
 
 def _pdf_unicode_font() -> tuple[bytes, dict[int, int]] | None:
-    """Load a local Unicode font when available; fall back to Helvetica elsewhere."""
+    """Load an Arial-style font that covers both Arabic and Latin glyphs.
+
+    ``NotoSansArabic`` was previously preferred in production.  That font
+    renders the Arabic labels but does not contain the Latin names commonly
+    stored beside them, so PDF viewers displayed those characters as square
+    missing-glyph boxes.  Prefer licensed Arial when the host provides it,
+    otherwise use an Arial-compatible Unicode sans font and verify the actual
+    cmap before accepting it.
+    """
     global _PDF_FONT_CACHE
     if _PDF_FONT_CACHE is not None:
         return _PDF_FONT_CACHE
-    paths = (
-        # Noto/DejaVu are installed in the production Docker image.  Keep
-        # these before platform fonts so the generated PDF is deterministic
-        # on Render and on local macOS installations.
-        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf"),
+    configured_path = os.environ.get("HR_PDF_FONT_PATH", "").strip()
+    paths = tuple(path for path in (
+        Path(configured_path) if configured_path else None,
         Path("/System/Library/Fonts/Supplemental/Arial.ttf"),
         Path("/Library/Fonts/Arial Unicode.ttf"),
         Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
-        Path("/System/Library/Fonts/Supplemental/Tahoma.ttf"),
+        Path("C:/Windows/Fonts/arial.ttf"),
+        Path("/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"),
+        Path("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf"),
+        # DejaVu Sans is the production-safe Arial-compatible fallback.  It
+        # includes the Latin and Arabic presentation glyphs needed by this
+        # dependency-free PDF writer.
         Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-    )
+        Path("/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansArabic-Regular.ttf"),
+    ) if path is not None)
     for path in paths:
         try:
             data = path.read_bytes()
             cmap = _ttf_cmap(data)
-            if cmap:
+            sample = _shape_arabic_for_pdf("عقد العمل / Employment Contract 0123456789")
+            if cmap and all(character.isspace() or int(cmap.get(ord(character), 0)) for character in sample):
                 _PDF_FONT_CACHE = (data, cmap)
                 return _PDF_FONT_CACHE
         except (OSError, ValueError, struct.error):
@@ -662,8 +675,46 @@ def _shape_arabic_for_pdf(value: str) -> str:
     return "".join(visual)
 
 
+def _pdf_glyph_run(value: Any, cmap: dict[int, int]) -> tuple[bytes, dict[int, int]]:
+    """Encode a text run without ever emitting the missing-glyph CID zero."""
+    encoded = bytearray()
+    used: dict[int, int] = {}
+    replacement_codepoint = ord("?")
+    replacement_glyph = int(cmap.get(replacement_codepoint, 0))
+    if not replacement_glyph:
+        raise RuntimeError("The configured PDF font does not contain a replacement glyph")
+    for character in _shape_arabic_for_pdf(str(value or "-")):
+        codepoint = ord(character)
+        glyph = int(cmap.get(codepoint, 0))
+        if not glyph:
+            decomposition = unicodedata.decomposition(character).split()
+            if len(decomposition) >= 2 and decomposition[0].startswith("<"):
+                codepoint = int(decomposition[1], 16)
+                glyph = int(cmap.get(codepoint, 0))
+        if not glyph:
+            codepoint, glyph = replacement_codepoint, replacement_glyph
+        encoded.extend(struct.pack(">H", glyph))
+        used[glyph] = codepoint
+    return bytes(encoded), used
+
+
+def _pdf_localized_value(value: Any, language: str) -> str:
+    """Pick the matching half of values stored as ``Arabic - English``."""
+    text = str(value or "-").strip() or "-"
+    parts = [part.strip() for part in re.split(r"\s+-\s+", text) if part.strip()]
+    if len(parts) < 2:
+        return text
+    arabic_parts = [part for part in parts if re.search(r"[\u0600-\u06ff]", part)]
+    latin_parts = [part for part in parts if re.search(r"[A-Za-z]", part) and not re.search(r"[\u0600-\u06ff]", part)]
+    if language == "ar" and arabic_parts:
+        return " - ".join(arabic_parts)
+    if language == "en" and latin_parts:
+        return " - ".join(latin_parts)
+    return parts[0] if language == "ar" else parts[-1]
+
+
 def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
-    """Create the professional, framed Arabic employment-contract form."""
+    """Create a professional six-page Arabic/English employment contract."""
     employee = contract.get("employee") or {}
     organization = contract.get("organization") or {}
     start = contract.get("contract_start_on") or "-"
@@ -678,8 +729,24 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     issued_at = contract.get("issued_at") or "-"
     salary = employee.get("salary")
     salary_text = f"{float(salary):,.2f} درهم إماراتي" if salary not in (None, "") else "-"
+    employer_ar, employer_en = _pdf_localized_value(employer, "ar"), _pdf_localized_value(employer, "en")
+    display_name_ar, display_name_en = _pdf_localized_value(display_name, "ar"), _pdf_localized_value(display_name, "en")
+    name_ar, name_en = _pdf_localized_value(name, "ar"), _pdf_localized_value(name, "en")
+    address_ar, address_en = _pdf_localized_value(address, "ar"), _pdf_localized_value(address, "en")
+    representative_ar = _pdf_localized_value(representative, "ar")
+    representative_en = _pdf_localized_value(representative, "en")
+    nationality_ar = _pdf_localized_value(employee.get("nationality") or "-", "ar")
+    nationality_en = _pdf_localized_value(employee.get("nationality") or "-", "en")
+    job_title_ar = _pdf_localized_value(employee.get("job_title") or "-", "ar")
+    job_title_en = _pdf_localized_value(employee.get("job_title") or "-", "en")
+    department_ar = _pdf_localized_value(employee.get("department_name") or "-", "ar")
+    department_en = _pdf_localized_value(employee.get("department_name") or "-", "en")
+    branch_ar = _pdf_localized_value(employee.get("branch_name") or "-", "ar")
+    branch_en = _pdf_localized_value(employee.get("branch_name") or "-", "en")
     font_bundle = _pdf_unicode_font()
-    use_unicode = bool(font_bundle)
+    if not font_bundle:
+        raise RuntimeError("Arial-compatible Unicode font is required to generate bilingual contracts")
+    use_unicode = True
     used_glyphs: dict[int, int] = {}
     page_streams: list[bytes] = []
 
@@ -713,18 +780,8 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
         if use_unicode:
             assert font_bundle is not None
             _, cmap = font_bundle
-            encoded = bytearray()
-            for character in _shape_arabic_for_pdf(text):
-                codepoint = ord(character)
-                glyph = int(cmap.get(codepoint, 0))
-                if not glyph:
-                    decomposition = unicodedata.decomposition(character).split()
-                    if len(decomposition) >= 2 and decomposition[0].startswith("<"):
-                        codepoint = int(decomposition[1], 16)
-                        glyph = int(cmap.get(codepoint, 0))
-                encoded.extend(struct.pack(">H", glyph))
-                if glyph:
-                    used_glyphs[glyph] = codepoint
+            encoded, glyphs = _pdf_glyph_run(text, cmap)
+            used_glyphs.update(glyphs)
             commands.extend([
                 "BT", f"{r:.4f} {g:.4f} {b:.4f} rg", f"/F2 {size:.2f} Tf",
                 f"1 0 0 1 {x:.2f} {y:.2f} Tm", f"<{encoded.hex().upper()}> Tj", "ET",
@@ -778,7 +835,7 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
         add_fill(commands, 38, 774, 519, 40, teal)
         add_fill(commands, 38, 770, 519, 4, gold)
         if language == "en":
-            add_text(commands, display_name, 53, 797, 10.5, white)
+            add_text(commands, display_name_en, 53, 797, 10.5, white)
             add_text(commands, "Employment Contract", 400, 798, 12.0, white)
             add_text(commands, "HR-controlled institutional form", 53, 783, 7.0, color("#c5d9d2"))
             add_text(commands, "Employment form and acknowledgement", 365, 783, 7.0, color("#f1d69c"))
@@ -786,7 +843,7 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
             add_text(commands, f"Contract reference: {contract_number}", 53, 45, 7.0, muted)
             add_text(commands, f"Issue date: {issued_at}", 395, 45, 7.0, muted)
         else:
-            add_text(commands, display_name, 53, 797, 10.5, white)
+            add_text(commands, display_name_ar, 53, 797, 10.5, white)
             add_text(commands, "عقد عمل", 432, 798, 13.0, white)
             add_text(commands, "نموذج مؤسسي محفوظ لدى الموارد البشرية", 53, 783, 7.0, color("#c5d9d2"))
             add_text(commands, "استمارة تعاقد وإقرار", 415, 783, 7.0, color("#f1d69c"))
@@ -798,21 +855,21 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     # Page one: identity, employment data and the first two clauses.
     first = page_shell(1, total_pages=6)
     y = heading(first, "بيانات العقد والأطراف", 757)
-    field(first, "صاحب العمل / الطرف الأول", employer, 55, y, 240)
-    field(first, "الموظف / الطرف الثاني", name, 305, y, 235)
+    field(first, "صاحب العمل / الطرف الأول", employer_ar, 55, y, 240)
+    field(first, "الموظف / الطرف الثاني", name_ar, 305, y, 235)
     y -= 38
     field(first, "الرخصة التجارية", license_no, 55, y, 240)
-    field(first, "الجنسية", employee.get("nationality") or "-", 305, y, 235)
+    field(first, "الجنسية", nationality_ar, 305, y, 235)
     y -= 38
-    field(first, "يمثله", representative, 55, y, 240)
+    field(first, "يمثله", representative_ar, 55, y, 240)
     field(first, "رقم الهوية / الجواز", employee.get("emirates_id_no") or employee.get("passport_no") or "-", 305, y, 235)
     y -= 38
-    field(first, "العنوان ووسائل الاتصال", address, 55, y, 240)
+    field(first, "العنوان ووسائل الاتصال", address_ar, 55, y, 240)
     field(first, "الرقم الوظيفي", employee.get("employee_no") or "-", 305, y, 235)
     y -= 46
     y = heading(first, "بيانات الوظيفة ومدة العقد", y)
-    field(first, "المسمى الوظيفي", employee.get("job_title") or "-", 55, y, 240)
-    field(first, "القسم / الفرع", f"{employee.get('department_name') or '-'} / {employee.get('branch_name') or '-'}", 305, y, 235)
+    field(first, "المسمى الوظيفي", job_title_ar, 55, y, 240)
+    field(first, "القسم / الفرع", f"{department_ar} / {branch_ar}", 305, y, 235)
     y -= 38
     field(first, "تاريخ التعيين", employee.get("hire_date") or "-", 55, y, 240)
     field(first, "نوع العقد", "محدد المدة" if end != "-" else "غير محدد المدة", 305, y, 235)
@@ -821,10 +878,10 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     field(first, "نهاية العقد", end, 305, y, 235)
     y -= 38
     field(first, "الأجر الإجمالي الشهري", salary_text, 55, y, 240)
-    field(first, "مقر العمل الأساسي", address, 305, y, 235)
+    field(first, "مقر العمل الأساسي", address_ar, 305, y, 235)
     y -= 46
-    y = clause(first, "البند الأول: الإقرار بالاطلاع", f"يقر الطرف الثاني ({name}) بأنه اطلع اطلاعاً تاماً على أحكام قانون العمل الإماراتي (المرسوم بقانون اتحادي رقم 33 لسنة 2021) ولائحته التنفيذية، وعلى اللائحة الداخلية للشركة وسياساتها وقواعد السلوك الوظيفي المعمول بها، وفهم كافة بنودها، ويلتزم بالعمل بموجبها، على أن تطبق اللائحة الداخلية في كل ما لا يتعارض مع أحكام القانون الاتحادي، وفي حال التعارض تطبق أحكام القانون باعتبارها الحد الأدنى الملزم لحقوق الطرف الثاني.", y)
-    clause(first, "البند الثاني: موضوع العقد", f"يعمل الطرف الثاني لدى الطرف الأول تحت المسمى الوظيفي: {employee.get('job_title') or '-'}، في قسم أو إدارة: {employee.get('department_name') or '-'}، ومقر العمل الأساسي: {address}، مع أحقية الطرف الأول في انتداب الطرف الثاني للعمل في أي مكان آخر داخل الدولة حسب مقتضيات العمل، وكذلك تكليفه بمهام إضافية تتصل بطبيعة وظيفته دون أن يشكل ذلك إخلالاً بشروط هذا العقد.", y - 5)
+    y = clause(first, "البند الأول: الإقرار بالاطلاع", f"يقر الطرف الثاني ({name_ar}) بأنه اطلع اطلاعاً تاماً على أحكام قانون العمل الإماراتي (المرسوم بقانون اتحادي رقم 33 لسنة 2021) ولائحته التنفيذية، وعلى اللائحة الداخلية للشركة وسياساتها وقواعد السلوك الوظيفي المعمول بها، وفهم كافة بنودها، ويلتزم بالعمل بموجبها، على أن تطبق اللائحة الداخلية في كل ما لا يتعارض مع أحكام القانون الاتحادي، وفي حال التعارض تطبق أحكام القانون باعتبارها الحد الأدنى الملزم لحقوق الطرف الثاني.", y)
+    clause(first, "البند الثاني: موضوع العقد", f"يعمل الطرف الثاني لدى الطرف الأول تحت المسمى الوظيفي: {job_title_ar}، في قسم أو إدارة: {department_ar}، ومقر العمل الأساسي: {address_ar}، مع أحقية الطرف الأول في انتداب الطرف الثاني للعمل في أي مكان آخر داخل الدولة حسب مقتضيات العمل، وكذلك تكليفه بمهام إضافية تتصل بطبيعة وظيفته دون أن يشكل ذلك إخلالاً بشروط هذا العقد.", y - 5)
     page_streams.append("\n".join(first).encode("ascii", "ignore"))
 
     # Page two: the detailed working terms and employee obligations.
@@ -852,11 +909,11 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     add_stroke(third, 55, y - 82, 238, 72, line)
     add_stroke(third, 302, y - 82, 238, 72, line)
     add_text(third, "الطرف الأول - صاحب العمل", 68, y - 25, 8.3, muted)
-    add_text(third, employer, 68, y - 40, 8.6, ink)
+    add_text(third, employer_ar, 68, y - 40, 8.6, ink)
     add_text(third, "الاسم والتوقيع: __________________", 68, y - 61, 8.0, ink)
     add_text(third, "التاريخ: _________________________", 68, y - 75, 8.0, ink)
     add_text(third, "الطرف الثاني - الموظف", 315, y - 25, 8.3, muted)
-    add_text(third, name, 315, y - 40, 8.6, ink)
+    add_text(third, name_ar, 315, y - 40, 8.6, ink)
     add_text(third, "الاسم والتوقيع: __________________", 315, y - 61, 8.0, ink)
     add_text(third, "التاريخ: _________________________", 315, y - 75, 8.0, ink)
     add_text(third, "يقر الطرفان بأن هذه الاستمارة تمثل عقد العمل والإقرار المتفق عليه، وبأن أي حق إلزامي مقرر بموجب القانون يبقى محفوظاً بالكامل.", 61, y - 105, 7.5, muted)
@@ -867,21 +924,21 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     salary_text_en = f"{float(salary):,.2f} AED" if salary not in (None, "") else "-"
     first_en = page_shell(4, total_pages=6, language="en")
     y = heading(first_en, "Contract parties and identity", 757)
-    field(first_en, "Employer / First party", employer, 55, y, 240)
-    field(first_en, "Employee / Second party", name, 305, y, 235)
+    field(first_en, "Employer / First party", employer_en, 55, y, 240)
+    field(first_en, "Employee / Second party", name_en, 305, y, 235)
     y -= 38
     field(first_en, "Trade licence number", license_no, 55, y, 240)
-    field(first_en, "Nationality", employee.get("nationality") or "-", 305, y, 235)
+    field(first_en, "Nationality", nationality_en, 305, y, 235)
     y -= 38
-    field(first_en, "Represented by", representative, 55, y, 240)
+    field(first_en, "Represented by", representative_en, 55, y, 240)
     field(first_en, "Emirates ID / passport", employee.get("emirates_id_no") or employee.get("passport_no") or "-", 305, y, 235)
     y -= 38
-    field(first_en, "Address and contact", address, 55, y, 240)
+    field(first_en, "Address and contact", address_en, 55, y, 240)
     field(first_en, "Employee number", employee.get("employee_no") or "-", 305, y, 235)
     y -= 46
     y = heading(first_en, "Employment details and contract term", y)
-    field(first_en, "Job title", employee.get("job_title") or "-", 55, y, 240)
-    field(first_en, "Department / branch", f"{employee.get('department_name') or '-'} / {employee.get('branch_name') or '-'}", 305, y, 235)
+    field(first_en, "Job title", job_title_en, 55, y, 240)
+    field(first_en, "Department / branch", f"{department_en} / {branch_en}", 305, y, 235)
     y -= 38
     field(first_en, "Hire date", employee.get("hire_date") or "-", 55, y, 240)
     field(first_en, "Contract type", "Fixed term" if end != "-" else "Indefinite term", 305, y, 235)
@@ -890,7 +947,7 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     field(first_en, "Contract end", end, 305, y, 235)
     y -= 38
     field(first_en, "Gross monthly salary", salary_text_en, 55, y, 240)
-    field(first_en, "Primary work location", address, 305, y, 235)
+    field(first_en, "Primary work location", address_en, 305, y, 235)
     y -= 46
     y = clause(first_en, "Clause 1: acknowledgement", "The employee confirms that they have fully read and understood UAE Labour Law, Federal Decree-Law No. 33 of 2021 and its implementing regulations, as well as the employer's internal regulations, policies and code of conduct. The internal rules apply only to the extent that they do not conflict with federal law; where a conflict exists, the mandatory legal minimum applies.", y)
     clause(first_en, "Clause 2: scope of employment", "The employee is employed by the employer under the job title and department recorded in this form, with the primary work location recorded above. The employer may assign related duties or a work location within the UAE where reasonably required by the business, without reducing any statutory right.", y - 5)
@@ -918,11 +975,11 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     add_stroke(third_en, 55, y - 82, 238, 72, line)
     add_stroke(third_en, 302, y - 82, 238, 72, line)
     add_text(third_en, "First party - employer", 68, y - 25, 8.3, muted)
-    add_text(third_en, employer, 68, y - 40, 8.6, ink)
+    add_text(third_en, employer_en, 68, y - 40, 8.6, ink)
     add_text(third_en, "Name and signature: __________________", 68, y - 61, 8.0, ink)
     add_text(third_en, "Date: ______________________________", 68, y - 75, 8.0, ink)
     add_text(third_en, "Second party - employee", 315, y - 25, 8.3, muted)
-    add_text(third_en, name, 315, y - 40, 8.6, ink)
+    add_text(third_en, name_en, 315, y - 40, 8.6, ink)
     add_text(third_en, "Name and signature: __________________", 315, y - 61, 8.0, ink)
     add_text(third_en, "Date: ______________________________", 315, y - 75, 8.0, ink)
     add_text(third_en, "Both parties acknowledge that this form records the agreed employment terms and preserves every mandatory legal right.", 61, y - 105, 7.5, muted)
@@ -961,11 +1018,11 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
         width_entries = " ".join(f"{glyph} [{font_widths.get(glyph, 600)}]" for glyph in sorted(used_glyphs))
         cid_widths = f"/W [{width_entries}]" if width_entries else ""
         objects.extend([
-            b"<< /Type /FontDescriptor /FontName /KhaishaSans /Flags 4 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 " + str(compressed_number).encode("ascii") + b" 0 R >>",
+            b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 " + str(compressed_number).encode("ascii") + b" 0 R >>",
             b"<< /Length " + str(len(to_unicode)).encode("ascii") + b" >>\nstream\n" + to_unicode + b"\nendstream",
             b"<< /Length " + str(len(compressed_font)).encode("ascii") + b" /Filter /FlateDecode >>\nstream\n" + compressed_font + b"\nendstream",
-            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /KhaishaSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
-            f"<< /Type /Font /Subtype /Type0 /BaseFont /KhaishaSans /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
         ])
     else:
         font_number = 3 + page_count * 2 + 1
@@ -1031,18 +1088,8 @@ def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
             text = str(text or "-")
             if font_bundle:
                 _, cmap = font_bundle
-                encoded = bytearray()
-                for character in _shape_arabic_for_pdf(text):
-                    codepoint = ord(character)
-                    glyph = int(cmap.get(codepoint, 0))
-                    if not glyph:
-                        decomposition = unicodedata.decomposition(character).split()
-                        if len(decomposition) >= 2 and decomposition[0].startswith("<"):
-                            codepoint = int(decomposition[1], 16)
-                            glyph = int(cmap.get(codepoint, 0))
-                    encoded.extend(struct.pack(">H", glyph))
-                    if glyph:
-                        used_glyphs[glyph] = codepoint
+                encoded, glyphs = _pdf_glyph_run(text, cmap)
+                used_glyphs.update(glyphs)
                 content_lines.extend(["BT", "0.13 0.24 0.22 rg", f"/F2 {font_size:.2f} Tf", f"1 0 0 1 {x} {y} Tm", f"<{encoded.hex().upper()}> Tj", "ET"])
             else:
                 content_lines.extend(["BT", "/F1 10 Tf", f"1 0 0 1 {x} {y} Tm", f"({_pdf_text(text)}) Tj", "ET"])
@@ -1066,11 +1113,11 @@ def build_salary_certificate_pdf(certificate: dict[str, Any]) -> bytes:
             b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F2 9 0 R >> >> /Contents 4 0 R >>",
             b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
-            b"<< /Type /FontDescriptor /FontName /KhaishaSans /Flags 4 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 7 0 R >>",
+            b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 /FontBBox [0 -250 2000 1000] /Ascent 900 /Descent -250 /CapHeight 700 /ItalicAngle 0 /StemV 80 /FontFile2 7 0 R >>",
             b"<< /Length " + str(len(to_unicode)).encode("ascii") + b" >>\nstream\n" + to_unicode + b"\nendstream",
             b"<< /Length " + str(len(compressed_font)).encode("ascii") + b" /Filter /FlateDecode >>\nstream\n" + compressed_font + b"\nendstream",
-            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /KhaishaSans /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
-            f"<< /Type /Font /Subtype /Type0 /BaseFont /KhaishaSans /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Arial /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {font_descriptor_number} 0 R /CIDToGIDMap /Identity /DW 600 {cid_widths} >>".encode("ascii"),
+            f"<< /Type /Font /Subtype /Type0 /BaseFont /Arial /Encoding /Identity-H /DescendantFonts [{cid_number} 0 R] /ToUnicode {to_unicode_number} 0 R >>".encode("ascii"),
         ]
     else:
         objects = [
