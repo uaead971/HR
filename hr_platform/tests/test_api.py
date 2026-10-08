@@ -101,6 +101,63 @@ class EmploymentContractPDFTests(unittest.TestCase):
         self.assertEqual(hr_server._pdf_localized_value("فرع الشهامة - Al Shahama Branch", "en"), "Al Shahama Branch")
 
 
+class ServiceDurationTests(unittest.TestCase):
+    def test_calendar_components_clamp_month_end_and_leap_day(self):
+        self.assertEqual(
+            hr_server.service_duration_components(date(2026, 1, 31), date(2026, 3, 1)),
+            (0, 1, 1),
+        )
+        self.assertEqual(
+            hr_server.service_duration_components(date(2024, 2, 29), date(2025, 2, 28)),
+            (1, 0, 0),
+        )
+
+    def test_structured_duration_handles_missing_and_future_hire_dates(self):
+        missing = hr_server.employee_service_duration(None, as_of=date(2026, 10, 8))
+        self.assertEqual(missing["status"], "missing")
+        self.assertIsNone(missing["years"])
+
+        future = hr_server.employee_service_duration("2026-10-09", as_of=date(2026, 10, 8))
+        self.assertEqual(future["status"], "not_started")
+        self.assertEqual((future["years"], future["months"], future["days"]), (0, 0, 0))
+
+    def test_terminated_employee_duration_freezes_at_termination_date(self):
+        expected = {
+            "years": 3,
+            "months": 1,
+            "days": 1,
+            "as_of": "2023-03-01",
+            "status": "terminated",
+        }
+        self.assertEqual(
+            hr_server.employee_service_duration(
+                "2020-01-31", "2023-03-01", active=False, as_of=date(2026, 10, 8)
+            ),
+            expected,
+        )
+        self.assertEqual(
+            hr_server.employee_service_duration(
+                "2020-01-31", "2023-03-01", active=False, as_of=date(2035, 1, 1)
+            ),
+            expected,
+        )
+
+
+class EmployeeProfileServiceDurationFrontendTests(unittest.TestCase):
+    def test_employee_dossier_renders_structured_service_duration_counter(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+
+        self.assertIn("data-service-duration-counter", app)
+        self.assertIn("employee.service_duration", app)
+        self.assertIn("function serviceDurationLabel", app)
+        self.assertIn(".service-duration-counter", styles)
+        self.assertIn("'مدة الخدمة':'Service duration'", translations)
+        self.assertIn("'لم تبدأ الخدمة':'Service not started'", translations)
+
+
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1370,6 +1427,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(employee["qualification"], "بكالوريوس إدارة أعمال")
         self.assertEqual(employee["nationality"], "الإمارات العربية المتحدة")
         self.assertGreater(employee["service_days"], 0)
+        self.assertEqual(set(employee["service_duration"]), {"years", "months", "days", "as_of", "status"})
+        self.assertEqual(employee["service_duration"]["status"], "active")
 
         tiny_png = "data:image/png;base64,iVBORw0KGgo="
         def upload(document_type, title_text, expires_on=None, no_expiry=False, visible=True):

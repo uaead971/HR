@@ -374,6 +374,9 @@ body *{visibility:hidden!important}
 .record-counters{display:flex;gap:6px;margin-right:auto;flex-wrap:wrap}
 .record-counters span{background:#edf4f0;color:var(--muted);border-radius:8px;padding:7px 9px;font-size:9px;text-align:center}
 .record-counters b{display:block;color:var(--green);font-size:15px}
+.record-counters .service-duration-counter{flex:1 1 152px;min-width:152px;padding-inline:12px}
+.record-counters .service-duration-value{font-size:11px;line-height:1.55;white-space:nowrap}
+.record-counters .service-duration-counter>small{display:block;margin-top:1px;color:var(--muted);font-size:9px}
 .profile-facts{margin-top:14px}
 .profile-facts>div{padding:11px;background:#fafaf7;border-radius:8px}
 .profile-facts small,.profile-facts b{display:block}
