@@ -61,6 +61,46 @@ class APIClient:
             return response.headers, response.read()
 
 
+class EmploymentContractPDFTests(unittest.TestCase):
+    def test_contract_font_covers_arabic_latin_and_never_emits_missing_glyph(self):
+        font = hr_server._pdf_unicode_font()
+        self.assertIsNotNone(font)
+        _, cmap = font
+        sample = "عقد العمل / Employment Contract - عبد العزيز / Abd Al Aziz 1050"
+        encoded, _ = hr_server._pdf_glyph_run(sample, cmap)
+        glyphs = [int.from_bytes(encoded[index:index + 2], "big") for index in range(0, len(encoded), 2)]
+        self.assertTrue(glyphs)
+        self.assertNotIn(0, glyphs)
+
+    def test_contract_is_six_page_bilingual_arial_pdf(self):
+        pdf = hr_server.build_employment_contract_pdf({
+            "contract_number": "CTR-1050-20260921",
+            "issued_at": "2026-10-08",
+            "contract_start_on": "2026-09-21",
+            "contract_end_on": "2028-09-21",
+            "organization": {
+                "display_name": "خيشة - Khaisha",
+                "legal_name": "شركة خيشة - Khaisha LLC",
+                "address": "أبوظبي، الإمارات العربية المتحدة - Abu Dhabi, United Arab Emirates",
+            },
+            "employee": {
+                "full_name": "عبد العزيز محمد - Abd Al Aziz Mohammed",
+                "employee_no": "1050",
+                "nationality": "السودان - Sudan",
+                "job_title": "موظف إداري - Administrative Officer",
+                "department_name": "الموارد البشرية - Human Resources",
+                "branch_name": "فرع الشهامة - Al Shahama Branch",
+                "salary": 2300,
+            },
+        })
+        self.assertTrue(pdf.startswith(b"%PDF-1.4"))
+        self.assertEqual(pdf.count(b"/Type /Page "), 6)
+        self.assertIn(b"/BaseFont /Arial", pdf)
+        self.assertIn(b"/FontFile2", pdf)
+        self.assertEqual(hr_server._pdf_localized_value("فرع الشهامة - Al Shahama Branch", "ar"), "فرع الشهامة")
+        self.assertEqual(hr_server._pdf_localized_value("فرع الشهامة - Al Shahama Branch", "en"), "Al Shahama Branch")
+
+
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -173,7 +213,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261008-production-r8")
+        application_script = index.index("app.js?v=5.8.0&build=20261008-production-r9")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -4293,7 +4333,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("$('#userRole').textContent=tr(roleLabels[user.role]||user.role)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261008-production-r8", index)
+        self.assertIn("build=20261008-production-r9", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
