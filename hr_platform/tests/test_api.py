@@ -158,6 +158,45 @@ class EmployeeProfileServiceDurationFrontendTests(unittest.TestCase):
         self.assertIn("'لم تبدأ الخدمة':'Service not started'", translations)
 
 
+class ShiftManagementFrontendTests(unittest.TestCase):
+    def test_shift_cards_edit_selected_assignment_and_permissions_contract(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-edit-shift="${shift.id}"', app)
+        self.assertIn('data-assign-shift-card="${shift.id}"', app)
+        self.assertIn('data-delete-shift="${shift.id}"', app)
+        self.assertIn("'[data-assign-shift],[data-edit-shift],[data-assign-shift-card],[data-delete-shift]','shift.manage'", app)
+        self.assertIn("[data-delete-lifecycle],[data-delete-shift]','archive'", app)
+        self.assertIn("function shiftModal(shift=null)", app)
+        self.assertIn("method:editing?'PATCH':'POST'", app)
+        self.assertIn("api(editing?`/api/shifts/${shiftId}`:'/api/shifts'", app)
+        self.assertIn("function assignShiftModal(employeeId='',shiftId='')", app)
+        self.assertIn('type="hidden" name="shift_id" value="${selectedShift.id}"', app)
+        self.assertIn("function syncShiftAssignmentDates", app)
+        self.assertIn("to.min=from.value||''", app)
+        self.assertIn('name="effective_to" type="date"></label>', app)
+        self.assertNotIn('name="effective_to" type="date" min="${today}"', app)
+        self.assertIn("effective_to:to.value||null", app)
+        self.assertIn("function shiftAssignmentState", app)
+        self.assertIn("label:'مجدول'", app)
+        self.assertIn("label:'منتهي'", app)
+        self.assertIn("function deleteShift(shift,button)", app)
+        self.assertIn("حذف المناوبة «{name}» نهائياً؟ لا يمكن التراجع عن الحذف.", app)
+        self.assertIn("api(`/api/shifts/${shift.id}`,{method:'DELETE'})", app)
+        self.assertIn("setBusy(button,true,'جارٍ حذف المناوبة…')", app)
+        self.assertIn("toast('تم حذف المناوبة بنجاح')", app)
+        self.assertIn("catch(error){alertMessage(apiError(error),true)}", app)
+        self.assertIn(".selected-shift-summary", styles)
+        self.assertIn(".shift-card-footer", styles)
+        self.assertIn("'تعديل المناوبة':'Edit shift'", translations)
+        self.assertIn("'المناوبة المختارة':'Selected shift'", translations)
+        self.assertIn("'حذف المناوبة':'Delete shift'", translations)
+        self.assertIn("Deactivate it instead.", translations)
+
+
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -4399,6 +4438,113 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 "DELETE FROM user_permissions WHERE user_id=? AND permission='dashboard.view'",
                 (hr_account["id"],),
             )
+
+    def test_79_shift_edit_selected_assignment_effective_range_and_history(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        suffix = uuid.uuid4().hex[:8]
+        employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"SHIFT-{suffix}", "full_name": f"موظف مناوبات {suffix}",
+            "email": f"shift-{suffix}@demo.ae", "hire_date": "2024-01-01",
+        }, expected=201)["employee"]
+        shift = admin.request("POST", "/api/shifts", {
+            "name": f"مناوبة قابلة للتعديل {suffix}", "start_time": "09:00", "end_time": "18:00",
+            "break_minutes": 60, "grace_minutes": 15, "daily_limit_minutes": 480,
+            "working_days": [0, 1, 2, 3, 4], "rest_days": [5, 6], "active": True,
+        }, expected=201)["shift"]
+
+        updated_name = f"مناوبة ليلية معدلة {suffix}"
+        updated = admin.request("PATCH", f"/api/shifts/{shift['id']}", {
+            "name": updated_name, "start_time": "20:00", "end_time": "04:00",
+            "break_minutes": 30, "grace_minutes": 7, "daily_limit_minutes": 450,
+            "working_days": [0, 1, 2, 3, 4, 5], "rest_days": [6], "active": True,
+        })["shift"]
+        self.assertEqual(updated["name"], updated_name)
+        self.assertEqual((updated["start_time"], updated["end_time"]), ("20:00", "04:00"))
+        self.assertEqual(updated["working_days"], [0, 1, 2, 3, 4, 5])
+        persisted = next(item for item in admin.request("GET", "/api/shifts")["items"] if item["id"] == shift["id"])
+        self.assertEqual(persisted["name"], updated_name)
+        self.assertEqual(persisted["grace_minutes"], 7)
+
+        historical = admin.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": "2025-01-01", "effective_to": "2025-01-31",
+        }, expected=201)["assignment"]
+        historical_persisted = next(
+            item for item in admin.request("GET", "/api/shifts")["assignments"]
+            if item["id"] == historical["id"]
+        )
+        self.assertEqual(historical_persisted["effective_from"], "2025-01-01")
+        self.assertEqual(historical_persisted["effective_to"], "2025-01-31")
+
+        first = admin.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": "2035-01-01", "effective_to": "2035-12-31",
+        }, expected=201)["assignment"]
+        self.assertEqual(first["shift_id"], shift["id"])
+        self.assertEqual(first["effective_to"], "2035-12-31")
+
+        replacement_shift = admin.request("POST", "/api/shifts", {
+            "name": f"مناوبة بديلة {suffix}", "start_time": "07:00", "end_time": "15:00",
+            "break_minutes": 45, "grace_minutes": 5, "daily_limit_minutes": 435,
+            "working_days": [0, 1, 2, 3, 4], "rest_days": [5, 6], "active": True,
+        }, expected=201)["shift"]
+        replacement = admin.request("POST", f"/api/shifts/{replacement_shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": "2035-06-01", "effective_to": "2035-10-31",
+        }, expected=201)["assignment"]
+        assignments = [
+            item for item in admin.request("GET", "/api/shifts")["assignments"]
+            if item["employee_id"] == employee["id"]
+        ]
+        original_history = next(item for item in assignments if item["id"] == first["id"])
+        selected_replacement = next(item for item in assignments if item["id"] == replacement["id"])
+        self.assertEqual(original_history["effective_to"], "2035-05-31")
+        self.assertEqual(selected_replacement["shift_id"], replacement_shift["id"])
+        self.assertEqual(selected_replacement["effective_to"], "2035-10-31")
+
+        admin.request("PATCH", f"/api/shifts/{replacement_shift['id']}", {"active": False})
+        rejected = admin.request("POST", f"/api/shifts/{replacement_shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": "2036-01-01",
+        }, expected=404)
+        self.assertEqual(rejected["code"], "not_found")
+
+    def test_80_shift_delete_allows_unused_and_protects_every_assignment_period(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        suffix = uuid.uuid4().hex[:8]
+        unused = admin.request("POST", "/api/shifts", {
+            "name": f"مناوبة غير مستخدمة {suffix}", "start_time": "08:00", "end_time": "16:00",
+            "break_minutes": 30, "grace_minutes": 5, "daily_limit_minutes": 450,
+            "working_days": [0, 1, 2, 3, 4], "rest_days": [5, 6], "active": False,
+        }, expected=201)["shift"]
+        self.assertTrue(admin.request("DELETE", f"/api/shifts/{unused['id']}")["ok"])
+        shift_ids = {item["id"] for item in admin.request("GET", "/api/shifts")["items"]}
+        self.assertNotIn(unused["id"], shift_ids)
+
+        today = date.today()
+        cases = (
+            ("historical", "2025-01-01", "2025-01-31"),
+            ("current", (today - timedelta(days=1)).isoformat(), None),
+            ("future", (today + timedelta(days=365)).isoformat(), None),
+        )
+        protected_ids = set()
+        for index, (period, effective_from, effective_to) in enumerate(cases, start=1):
+            employee = admin.request("POST", "/api/employees", {
+                "employee_no": f"DEL-{period[:3].upper()}-{suffix}",
+                "full_name": f"موظف حماية سجل {period} {suffix}",
+                "email": f"shift-delete-{period}-{suffix}@demo.ae", "hire_date": "2024-01-01",
+            }, expected=201)["employee"]
+            shift = admin.request("POST", "/api/shifts", {
+                "name": f"مناوبة محمية {index} {suffix}", "start_time": "09:00", "end_time": "17:00",
+                "break_minutes": 30, "grace_minutes": 10, "daily_limit_minutes": 450,
+                "working_days": [0, 1, 2, 3, 4], "rest_days": [5, 6], "active": True,
+            }, expected=201)["shift"]
+            assignment = {"employee_id": employee["id"], "effective_from": effective_from}
+            if effective_to:
+                assignment["effective_to"] = effective_to
+            admin.request("POST", f"/api/shifts/{shift['id']}/assign", assignment, expected=201)
+            rejected = admin.request("DELETE", f"/api/shifts/{shift['id']}", expected=409)
+            self.assertEqual(rejected["code"], "shift_has_assignments")
+            protected_ids.add(shift["id"])
+
+        remaining_ids = {item["id"] for item in admin.request("GET", "/api/shifts")["items"]}
+        self.assertTrue(protected_ids.issubset(remaining_ids))
 
 
 if __name__ == "__main__":
