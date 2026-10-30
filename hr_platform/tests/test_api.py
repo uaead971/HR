@@ -309,7 +309,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r10")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r11")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -861,6 +861,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("document.documentElement.dir", i18n)
         self.assertIn("new Intl.DateTimeFormat", i18n)
         self.assertIn("new Intl.NumberFormat", i18n)
+        self.assertIn("ar-AE-u-nu-latn", i18n)
+        self.assertIn("en-AE-u-nu-latn", i18n)
+        self.assertIn("numberingSystem: 'latn'", i18n)
         self.assertIn("currency: 'AED'", i18n)
         self.assertIn('html[dir="ltr"] .sidebar', styles)
         self.assertIn("hr:localechange", app + i18n)
@@ -4434,7 +4437,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("$('#userRole').textContent=tr(roleLabels[user.role]||user.role)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r10", index)
+        self.assertIn("build=20261030-production-r11", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4680,6 +4683,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
         root = Path(__file__).parents[1]
         app = (root / "app.js").read_text(encoding="utf-8")
+        i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
         self.assertIn("attendance-clock-in", app)
         self.assertIn("attendance-clock-out", app)
@@ -4688,6 +4692,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".attendance-clock-out{color:#111820", styles)
         self.assertIn(".attendance-late-time{color:#b42318", styles)
         self.assertIn("font-size:17px", styles)
+        self.assertNotIn("value.replace(/\\d/g,d=>'٠١٢٣٤٥٦٧٨٩'[d])", app)
+        self.assertIn("ar-AE-u-nu-latn", app + i18n)
+        self.assertIn("latinDigits", i18n)
 
     def test_84_approved_leave_sale_is_added_to_existing_draft_payroll(self):
         hr = self.client("hr@demo.ae", "HR@12345")

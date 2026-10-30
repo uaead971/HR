@@ -2,7 +2,7 @@
   'use strict';
 
   const STORAGE_KEY = 'khaisha.ui.locale';
-  const LOCALES = { ar: 'ar-AE', en: 'en-AE' };
+  const LOCALES = { ar: 'ar-AE-u-nu-latn', en: 'en-AE-u-nu-latn' };
   const english = {
     'موارد | منصة الموارد البشرية':'Khaisha | Human Resources','تسجيل الدخول':'Sign in','إدارة رأس المال البشري':'Human capital management',
     'بيئة عمل واحدة':'One connected workplace','الموظف في المركز.':'People at the centre.','والقرار في مكانه.':'Decisions where they belong.',
@@ -327,26 +327,36 @@
     try { return localStorage.getItem(STORAGE_KEY) === 'en' ? 'en' : 'ar'; } catch (_) { return 'ar'; }
   }
   function normalize(value) { return String(value == null ? '' : value).replace(/\s+/g, ' ').trim(); }
+  function latinDigits(value) {
+    return String(value == null ? '' : value)
+      .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
+      .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
+  }
   function translate(value, params) {
     let result = locale === 'en' ? (english[normalize(value)] || value) : value;
     if (params) Object.keys(params).forEach(key => { result = String(result).replace(new RegExp(`\\{${key}\\}`, 'g'), params[key]); });
-    return result;
+    return latinDigits(result);
   }
   function shouldPreserve(element) {
     return Boolean(element && element.closest('[data-i18n-preserve],.org-name,.org-legal-name,#userName,#userRole,.event small,.distribution-row,[dir="ltr"]:not(html),.employee-cell b,.employee-cell small,.work-card-person,.organization-person,.employee-card-photo'));
   }
   function translateTextNode(node) {
     const parent = node.parentElement;
-    if (!parent || parent.closest('[data-locale]') || shouldPreserve(parent)) return;
+    if (!parent || parent.closest('[data-locale]')) return;
     if (!originals.has(node)) originals.set(node, node.nodeValue);
     const source = originals.get(node);
-    const next = locale === 'en' ? (parent.id === 'logoutButton' ? source.replace(normalize(source), 'Sign out') : replaceText(source)) : source;
+    const next = shouldPreserve(parent)
+      ? latinDigits(source)
+      : locale === 'en'
+        ? (parent.id === 'logoutButton' ? latinDigits(source.replace(normalize(source), 'Sign out')) : replaceText(source))
+        : latinDigits(source);
     if (node.nodeValue !== next) node.nodeValue = next;
   }
   function replaceText(source) {
     const exact = english[normalize(source)];
-    if (exact) return source.replace(normalize(source), exact);
-    const normalized = normalize(source);
+    if (exact) return latinDigits(source.replace(normalize(source), exact));
+    const latinSource = latinDigits(source);
+    const normalized = normalize(latinSource);
     const patterns = [
       [/^(\d+) غير نشط$/, '$1 inactive'],
       [/^(\d+) غياب مستحق · من (\d+)$/, '$1 due absences · of $2'],
@@ -364,8 +374,8 @@
       [/^اختيار (.+) للتذكير$/, 'Select $1 for reminder'],
       [/^عرض تفاصيل تقييم (.+)$/, 'View review details for $1']
     ];
-    for (const [pattern,replacement] of patterns) if (pattern.test(normalized)) return source.replace(normalized, normalized.replace(pattern,replacement));
-    return source.replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)));
+    for (const [pattern,replacement] of patterns) if (pattern.test(normalized)) return latinSource.replace(normalized, normalized.replace(pattern,replacement));
+    return latinSource;
   }
   function translateElement(element) {
     if (!(element instanceof Element)) return;
@@ -375,7 +385,7 @@
       const saved = originalAttributes.get(element);
       if (!(attribute in saved)) saved[attribute] = element.getAttribute(attribute);
       const source = saved[attribute];
-      const next = locale === 'en' ? replaceText(source) : source;
+      const next = locale === 'en' ? replaceText(source) : latinDigits(source);
       if (element.getAttribute(attribute) !== next) element.setAttribute(attribute, next);
     });
     Array.from(element.childNodes).forEach(child => {
@@ -392,7 +402,7 @@
     const role = document.querySelector('#userRole');
     if (role && normalize(role.textContent) && normalize(role.textContent) !== '—') {
       if (!role.dataset.i18nOriginal) role.dataset.i18nOriginal = role.textContent;
-      const next = locale === 'en' ? (english[normalize(role.dataset.i18nOriginal)] || role.dataset.i18nOriginal) : role.dataset.i18nOriginal;
+      const next = locale === 'en' ? latinDigits(english[normalize(role.dataset.i18nOriginal)] || role.dataset.i18nOriginal) : latinDigits(role.dataset.i18nOriginal);
       if (role.textContent !== next) role.textContent = next;
     }
   }
@@ -422,9 +432,9 @@
   function formatDate(value, options) {
     if (!value) return '—';
     const date = value instanceof Date ? value : new Date(String(value).length === 10 ? `${value}T00:00:00` : value);
-    try { return new Intl.DateTimeFormat(LOCALES[locale], options || { dateStyle: 'medium' }).format(date); } catch (_) { return value; }
+    try { return new Intl.DateTimeFormat(LOCALES[locale], { ...(options || { dateStyle: 'medium' }), numberingSystem: 'latn' }).format(date); } catch (_) { return latinDigits(value); }
   }
-  function formatNumber(value, options) { return new Intl.NumberFormat(LOCALES[locale], options).format(Number(value) || 0); }
+  function formatNumber(value, options) { return new Intl.NumberFormat(LOCALES[locale], { ...(options || {}), numberingSystem: 'latn' }).format(Number(value) || 0); }
   function formatCurrency(value) { return formatNumber(value, { style: 'currency', currency: 'AED', maximumFractionDigits: 2 }); }
 
   window.HR_I18N = { t: translate, translate, setLocale, apply, get locale() { return locale; }, formatDate, formatNumber, formatCurrency, storageKey: STORAGE_KEY, resources: { ar: {}, en: english } };
