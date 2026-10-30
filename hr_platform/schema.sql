@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS organization (
   late_threshold_minutes INTEGER NOT NULL DEFAULT 60 CHECK (late_threshold_minutes BETWEEN 1 AND 10080),
   late_deduction_unit_minutes INTEGER NOT NULL DEFAULT 60 CHECK (late_deduction_unit_minutes BETWEEN 1 AND 1440),
   late_penalty_days_per_unit INTEGER NOT NULL DEFAULT 1 CHECK (late_penalty_days_per_unit BETWEEN 1 AND 30),
+  overtime_multiplier REAL NOT NULL DEFAULT 1.25 CHECK (overtime_multiplier BETWEEN 1 AND 3),
   card_template TEXT NOT NULL DEFAULT 'portrait_orbit' CHECK (card_template IN ('portrait_orbit','executive_horizontal','minimal_vertical')),
   card_primary_color TEXT NOT NULL DEFAULT '#123d34',
   card_accent_color TEXT NOT NULL DEFAULT '#c6a15b',
@@ -470,10 +471,13 @@ CREATE TABLE IF NOT EXISTS leave_sale_requests (
   decision_note TEXT NOT NULL DEFAULT '',
   decided_by INTEGER,
   decided_at TEXT,
+  payout_month TEXT,
+  payroll_item_id INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
-  FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL
+  FOREIGN KEY (decided_by) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (payroll_item_id) REFERENCES payroll_items(id) ON DELETE SET NULL
 );
 
 -- The calendar is intentionally data driven because UAE public-holiday dates
@@ -915,6 +919,8 @@ CREATE TABLE IF NOT EXISTS payroll_items (
   job_grade TEXT NOT NULL DEFAULT '',
   basic_cents INTEGER NOT NULL,
   allowances_cents INTEGER NOT NULL DEFAULT 0,
+  overtime_cents INTEGER NOT NULL DEFAULT 0,
+  leave_sale_cents INTEGER NOT NULL DEFAULT 0,
   bonus_cents INTEGER NOT NULL DEFAULT 0,
   base_deductions_cents INTEGER NOT NULL DEFAULT 0,
   deductions_cents INTEGER NOT NULL DEFAULT 0,
@@ -943,6 +949,40 @@ CREATE TABLE IF NOT EXISTS payroll_adjustments (
 );
 
 CREATE INDEX IF NOT EXISTS idx_payroll_adjustments_item ON payroll_adjustments(payroll_item_id,id);
+
+CREATE TABLE IF NOT EXISTS purchase_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  employee_id INTEGER NOT NULL,
+  purchase_name TEXT NOT NULL,
+  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+  responsible_name TEXT NOT NULL,
+  invoice_file_name TEXT NOT NULL,
+  invoice_mime_type TEXT NOT NULL CHECK (invoice_mime_type IN ('application/pdf','image/png','image/jpeg','image/webp')),
+  invoice_data_url TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'manager_pending' CHECK (status IN ('manager_pending','hr_pending','finance_pending','approved','rejected')),
+  current_step TEXT NOT NULL DEFAULT 'manager' CHECK (current_step IN ('manager','hr','finance','complete')),
+  manager_employee_id INTEGER NOT NULL,
+  manager_decided_by INTEGER,
+  manager_decided_at TEXT,
+  manager_note TEXT NOT NULL DEFAULT '',
+  hr_decided_by INTEGER,
+  hr_decided_at TEXT,
+  hr_note TEXT NOT NULL DEFAULT '',
+  finance_decided_by INTEGER,
+  finance_decided_at TEXT,
+  finance_note TEXT NOT NULL DEFAULT '',
+  rejected_step TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+  FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE RESTRICT,
+  FOREIGN KEY (manager_decided_by) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (hr_decided_by) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (finance_decided_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_purchase_requests_employee ON purchase_requests(employee_id,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_purchase_requests_status ON purchase_requests(status,created_at DESC);
 
 CREATE TABLE IF NOT EXISTS advances (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

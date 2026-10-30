@@ -101,6 +101,7 @@
         <a href="#payroll" data-page="payroll"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg></i><span>الرواتب والقسائم</span></a>
         <a href="#certificate-verification" data-page="certificate-verification" data-permission="salary_certificate.verify"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-certificate"></use></svg></i><span>التحقق من الشهادات</span></a>
         <a href="#advances" data-page="advances"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-loan"></use></svg></i><span>السلف والأقساط</span></a>
+        <a href="#purchases" data-page="purchases"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-documents"></use></svg></i><span>المشتريات</span></a>
         <span class="nav-label">الأداء والتطوير</span>
         <a href="#evaluations" data-page="evaluations"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-target"></use></svg></i><span>التقييم السنوي</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="recruitment" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-recruitment"></use></svg></i><span>التوظيف</span></a>
@@ -329,6 +330,12 @@
         <div class="metric-grid compact" id="advanceMetrics"></div><article class="card"><div id="advanceList" class="stack loading-block">جارٍ تحميل السلف…</div></article>
       </section>
 
+      <section class="page" id="purchases">
+        <div class="page-head"><div><span class="eyebrow">الخدمة الذاتية والمالية</span><h1>طلبات المشتريات</h1><p>طلب موثق بفاتورة يمر على المسؤول المباشر ثم الموارد البشرية ثم مدير الحسابات للاعتماد النهائي.</p></div><button class="primary" id="requestPurchase">+ طلب مشتريات</button></div>
+        <div class="metric-grid compact" id="purchaseMetrics"></div>
+        <article class="card purchase-workspace"><div class="section-head"><div><h2>سجل الطلبات ومسار الاعتماد</h2><p>تظهر لك طلباتك والطلبات الواقعة في مرحلة اعتمادك الحالية.</p></div><label>الحالة<select id="purchaseStatusFilter"><option value="">كل الحالات</option><option value="manager_pending">عند المسؤول المباشر</option><option value="hr_pending">عند الموارد البشرية</option><option value="finance_pending">عند مدير الحسابات</option><option value="approved">معتمد نهائياً</option><option value="rejected">مرفوض</option></select></label></div><div id="purchaseList" class="stack loading-block">جارٍ تحميل طلبات المشتريات…</div></article>
+      </section>
+
       <section class="page" id="lifecycle">
         <div class="page-head"><div><span class="eyebrow">دورة الموظف</span><h1 id="lifecycleTitle">التوظيف</h1><p>قوائم عمل حقيقية محفوظة للتوظيف والتهيئة والتعلم والمزايا وإنهاء الخدمة.</p></div><button class="primary" id="addLifecycleCase" data-permission="lifecycle.manage">+ إضافة عنصر</button></div>
         <div class="lifecycle-tabs"><button data-lifecycle-filter="recruitment">التوظيف</button><button data-lifecycle-filter="onboarding">التهيئة والعقود</button><button data-lifecycle-filter="learning">التعلم</button><button data-lifecycle-filter="benefits">المزايا</button><button data-lifecycle-filter="offboarding">إنهاء الخدمة</button></div>
@@ -347,6 +354,7 @@
       <section class="page" id="reports">
         <div class="page-head"><div><span class="eyebrow">التحليل التشغيلي</span><h1>التقارير الحية</h1><p>مؤشرات مشتقة لحظياً من قاعدة بيانات الموظفين والفروع والحضور والطلبات والرواتب.</p></div><div class="button-row"><a class="secondary report-download" href="/api/reports/summary.csv" download>تصدير CSV</a><button class="primary" id="printReports">طباعة</button></div></div>
         <div class="metric-grid" id="reportMetrics"></div><article class="card"><div class="section-head"><h2>مصادر المؤشرات</h2><span class="status" id="reportAsOf">—</span></div><p class="report-note">كل قيمة أعلاه محسوبة من السجلات الفعلية في لحظة فتح التقرير. لا توجد أرقام ثابتة أو تكاملات وهمية.</p></article>
+        <article class="card department-report-card"><div class="section-head"><div><span class="eyebrow">تقرير تفصيلي حسب القسم</span><h2>الإجازات والغياب والسلف والخصومات والانضباط</h2><p>حدد القسم والفترة لاحتساب كل موظف، بما في ذلك الخروج المبكر والعمل فوق ٤٨ ساعة شهرياً.</p></div><button class="secondary" id="exportDepartmentReport" type="button" disabled>تصدير CSV</button></div><form class="department-report-filters" id="departmentReportForm"><label>القسم<select name="department_id" id="departmentReportDepartment" required><option value="">اختر القسم</option></select></label><label>من<input name="date_from" type="date" required></label><label>إلى<input name="date_to" type="date" required></label><button class="primary" type="submit">إنشاء التقرير</button></form><div class="department-report-summary" id="departmentReportSummary"></div><div class="table-wrap"><table><thead><tr><th>الموظف</th><th>الإجازات</th><th>الغياب</th><th>السلف</th><th>الخصومات</th><th>المخالفات</th><th>الخروج المبكر</th><th>فوق ٤٨ ساعة/شهر</th></tr></thead><tbody id="departmentReportRows"><tr><td colspan="8"><div class="empty">اختر قسماً وفترة لإنشاء التقرير.</div></td></tr></tbody></table></div></article>
       </section>
 
       <section class="page" id="access-control">

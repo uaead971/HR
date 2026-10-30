@@ -211,6 +211,37 @@
     'تم قبول الموقع داخل نطاق فرع «{branch}» على بعد {distance} م.':'Location accepted within the “{branch}” branch geofence, {distance} m away.'
   });
 
+  Object.assign(english, {
+    'المشتريات':'Purchases','الخدمة الذاتية والمالية':'Self-service & Finance','طلبات المشتريات':'Purchase Requests',
+    'طلب موثق بفاتورة يمر على المسؤول المباشر ثم الموارد البشرية ثم مدير الحسابات للاعتماد النهائي.':'An invoice-backed request routed through the line manager, HR, and the accounts manager for final approval.',
+    '+ طلب مشتريات':'+ Purchase request','سجل الطلبات ومسار الاعتماد':'Request Register & Approval Flow',
+    'تظهر لك طلباتك والطلبات الواقعة في مرحلة اعتمادك الحالية.':'Shows your own requests and requests currently awaiting your approval.',
+    'عند المسؤول المباشر':'With line manager','عند الموارد البشرية':'With HR','عند مدير الحسابات':'With accounts manager',
+    'معتمد نهائياً':'Finally approved','جارٍ تحميل طلبات المشتريات…':'Loading purchase requests…',
+    'بانتظار اعتمادك':'Awaiting your approval','طلبات':'Requests','الطلبات الظاهرة':'Visible requests',
+    'طلباتك أو مرحلة اعتمادك':'Your requests or current approval stage','المعتمد نهائياً':'Finally approved',
+    'ضمن المسار المتسلسل':'Through the sequential workflow','اسم المشتريات':'Purchase name',
+    'المبلغ بالدرهم':'Amount in AED','الشخص المسؤول عن الطلب':'Person responsible for the request',
+    'فاتورة الشراء (إلزامية)':'Purchase invoice (required)','بعد الإرسال: المسؤول المباشر ← الموارد البشرية ← مدير الحسابات للاعتماد النهائي.':'After submission: line manager ← HR ← accounts manager for final approval.',
+    'إرسال طلب المشتريات':'Submit purchase request','تفاصيل طلب المشتريات':'Purchase request details',
+    'المبلغ':'Amount','المسؤول عن الطلب':'Request owner','مدير الحسابات':'Accounts manager',
+    'بانتظار القرار':'Awaiting decision','لم تصل المرحلة بعد':'Stage not reached yet','فاتورة الشراء':'Purchase invoice',
+    'تنزيل الفاتورة':'Download invoice','اعتماد مرحلة طلب المشتريات':'Approve purchase stage','رفض طلب المشتريات':'Reject purchase request',
+    'سبب الرفض (إلزامي)':'Rejection reason (required)','ملاحظة الاعتماد (اختيارية)':'Approval note (optional)',
+    'تأكيد الرفض':'Confirm rejection','تأكيد الاعتماد':'Confirm approval','تم إرسال طلب المشتريات إلى المسؤول المباشر':'Purchase request sent to the line manager',
+    'تم اعتماد المرحلة وإحالة الطلب':'Stage approved and request routed forward','تم رفض طلب المشتريات':'Purchase request rejected',
+    'لا توجد طلبات مشتريات ضمن هذا النطاق.':'No purchase requests are available in this scope.',
+    'تقرير تفصيلي حسب القسم':'Detailed Department Report','الإجازات والغياب والسلف والخصومات والانضباط':'Leave, Absence, Advances, Deductions & Conduct',
+    'حدد القسم والفترة لاحتساب كل موظف، بما في ذلك الخروج المبكر والعمل فوق ٤٨ ساعة شهرياً.':'Select a department and period to calculate each employee, including early departure and work above 48 hours per month.',
+    'اختر القسم':'Choose department','إنشاء التقرير':'Generate report','اختر قسماً وفترة لإنشاء التقرير.':'Choose a department and period to generate the report.',
+    'أيام الإجازة':'Leave days','أيام الغياب':'Absence days','إجمالي السلف':'Total advances','إجمالي الخصومات':'Total deductions',
+    'الخروج المبكر':'Early departure','فوق ٤٨ ساعة شهرياً':'Above 48 hours monthly','فوق ٤٨ ساعة/شهر':'Above 48 hours/month',
+    'المتبقي':'Remaining','شهر متجاوز':'months exceeded','لا يوجد موظفون في هذا القسم خلال الفترة.':'No employees were in this department during the selected period.',
+    'جارٍ احتساب التقرير…':'Calculating report…','مبيعات الإجازات':'Leave cash-out','بيع الإجازات':'Leave cash-out',
+    'إجمالي الاستحقاقات':'Total earnings','الاستقطاعات الأخرى':'Other deductions','إجمالي الاستقطاعات':'Total deductions',
+    'الراتب التعاقدي':'Contractual salary','سلفة شهرية:':'Monthly advance:','قسيمة راتب خاصة':'Private payslip'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

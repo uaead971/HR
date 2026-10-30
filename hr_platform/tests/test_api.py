@@ -4545,6 +4545,169 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
         remaining_ids = {item["id"] for item in admin.request("GET", "/api/shifts")["items"]}
         self.assertTrue(protected_ids.issubset(remaining_ids))
+    def test_81_purchase_request_invoice_and_three_stage_approval(self):
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
+        body = {
+            "purchase_name": "مستلزمات تشغيل الفرع",
+            "amount": 175.50,
+            "responsible_name": "مدير الفرع",
+            "invoice_file_name": "invoice.png",
+        }
+        missing = employee.request("POST", "/api/purchases", body, expected=422)
+        self.assertEqual(missing["code"], "invoice_required")
+        body["invoice_data_url"] = "data:image/png;base64,iVBORw0KGgo="
+        request = employee.request("POST", "/api/purchases", body, expected=201)["request"]
+        self.assertEqual(request["status"], "manager_pending")
+        self.assertEqual(request["amount_cents"], 17550)
+        self.assertNotIn("invoice_data_url", request)
+
+        detail = employee.request("GET", f"/api/purchases/{request['id']}")["request"]
+        self.assertEqual(detail["invoice_data_url"], body["invoice_data_url"])
+        employee.request(
+            "POST", f"/api/purchases/{request['id']}/decision",
+            {"action": "approve"}, expected=409,
+        )
+        first = manager.request(
+            "POST", f"/api/purchases/{request['id']}/decision",
+            {"action": "approve", "note": "تمت مراجعة الحاجة"},
+        )["request"]
+        self.assertEqual((first["status"], first["current_step"]), ("hr_pending", "hr"))
+        second = hr.request(
+            "POST", f"/api/purchases/{request['id']}/decision",
+            {"action": "approve", "note": "مطابق للسياسة"},
+        )["request"]
+        self.assertEqual((second["status"], second["current_step"]), ("finance_pending", "finance"))
+        final = admin.request(
+            "POST", f"/api/purchases/{request['id']}/decision",
+            {"action": "approve", "note": "اعتماد مالي نهائي"},
+        )["request"]
+        self.assertEqual((final["status"], final["current_step"]), ("approved", "complete"))
+        self.assertEqual(final["manager_note"], "تمت مراجعة الحاجة")
+        self.assertEqual(final["hr_note"], "مطابق للسياسة")
+        self.assertEqual(final["finance_note"], "اعتماد مالي نهائي")
+
+    def test_82_historical_payroll_includes_former_staff_overtime_and_leave_sale(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        former = hr.request("POST", "/api/employees", {
+            "employee_no": f"HIST-{suffix}", "full_name": f"موظف تاريخي {suffix}",
+            "email": f"historical-{suffix}@demo.ae", "hire_date": "2024-01-01",
+            "salary": 3000,
+        }, expected=201)["employee"]
+        stamp = hr_server.now_iso()
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            approver_id = db.execute("SELECT id FROM users WHERE email='hr@demo.ae'").fetchone()[0]
+            db.execute(
+                "UPDATE employees SET active=0,termination_date='2024-12-31',updated_at=? WHERE id=?",
+                (stamp, former["id"]),
+            )
+            db.execute(
+                """INSERT INTO overtime_requests(
+                       employee_id,work_date,start_time,end_time,duration_minutes,reason,status,
+                       decided_by,decided_at,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,'approved',?,?,?,?)""",
+                (former["id"], "2024-06-10", "17:00", "19:00", 120,
+                 "عمل إضافي تاريخي", approver_id, stamp, stamp, stamp),
+            )
+            db.execute(
+                """INSERT INTO leave_sale_requests(
+                       employee_id,days,daily_rate_cents,amount_cents,reason,status,decision_note,
+                       decided_by,decided_at,payout_month,created_at,updated_at
+                   ) VALUES(?,?,?,?,?,'approved',?,?,?,?,?,?)""",
+                (former["id"], 2.5, 10000, 25000, "بيع رصيد تاريخي", "معتمد",
+                 approver_id, stamp, "2024-06", stamp, stamp),
+            )
+        run = hr.request(
+            "POST", "/api/payroll/runs", {"payroll_month": "2024-06"}, expected=201,
+        )["run"]
+        item = next(row for row in run["items"] if row["employee_id"] == former["id"])
+        self.assertGreater(item["overtime_cents"], 0)
+        self.assertEqual(item["leave_sale_cents"], 25000)
+        self.assertEqual(item["gross_cents"], item["contract_gross_cents"] + item["overtime_cents"] + 25000)
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            linked = db.execute(
+                "SELECT payout_month,payroll_item_id FROM leave_sale_requests WHERE employee_id=? AND payout_month='2024-06'",
+                (former["id"],),
+            ).fetchone()
+        self.assertEqual(linked[0], "2024-06")
+        self.assertEqual(linked[1], item["id"])
+        _headers, content = hr.raw_request(f"/api/payroll/runs/{run['id']}/export.csv")
+        csv_text = content.decode("utf-8-sig")
+        self.assertIn("العمل الإضافي", csv_text)
+        self.assertIn("بيع الإجازات", csv_text)
+
+    def test_83_department_report_period_financials_and_frontend_time_colors(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        operations = next(
+            row for row in hr.request("GET", "/api/departments")["items"]
+            if row["name"] == "العمليات"
+        )
+        today = date.today()
+        date_from = today.replace(day=1).isoformat()
+        query = f"department_id={operations['id']}&date_from={date_from}&date_to={today.isoformat()}"
+        report = hr.request("GET", "/api/reports/departments?" + query)
+        self.assertEqual(report["department"]["id"], operations["id"])
+        self.assertEqual(report["monthly_required_hours"], 48)
+        self.assertGreaterEqual(report["totals"]["employees"], 1)
+        required = {
+            "employee_name", "leave_days", "absence_days", "advance", "advance_remaining",
+            "deductions", "violation_count", "early_exit_days", "early_exit_minutes",
+            "net_work_minutes", "excess_48h_minutes", "months_over_48h",
+        }
+        self.assertTrue(required.issubset(report["items"][0]))
+        employee.request("GET", "/api/reports/departments?" + query, expected=403)
+        headers, csv_content = hr.raw_request("/api/reports/departments.csv?" + query)
+        self.assertIn("text/csv", headers["Content-Type"])
+        self.assertIn("الدقائق فوق 48 ساعة شهرياً", csv_content.decode("utf-8-sig"))
+
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        self.assertIn("attendance-clock-in", app)
+        self.assertIn("attendance-clock-out", app)
+        self.assertIn("attendance-late-time", app)
+        self.assertIn(".attendance-clock-in{color:#11834f", styles)
+        self.assertIn(".attendance-clock-out{color:#111820", styles)
+        self.assertIn(".attendance-late-time{color:#b42318", styles)
+        self.assertIn("font-size:17px", styles)
+
+    def test_84_approved_leave_sale_is_added_to_existing_draft_payroll(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = next(
+            row for row in hr.request("GET", "/api/employees")["items"]
+            if row["employee_no"] == "EMP-1002"
+        )
+        suffix = uuid.uuid4().hex[:8]
+        email = f"leave-sale-payroll-{suffix}@demo.ae"
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"SALEPAY-{suffix}", "full_name": f"موظف بيع إجازة {suffix}",
+            "email": email, "hire_date": "2040-01-01", "salary": 6000,
+            "manager_id": manager["id"], "create_user": True,
+            "password": "LeaveSale@12345", "role": "employee",
+        }, expected=201)["employee"]
+        worker = self.client(email, "LeaveSale@12345")
+        fake_now = datetime(2045, 5, 12, 10, 0, tzinfo=ZoneInfo("Asia/Dubai"))
+        with mock.patch.object(hr_server, "local_now", return_value=fake_now):
+            run = hr.request(
+                "POST", "/api/payroll/runs", {"payroll_month": "2045-05"}, expected=201,
+            )["run"]
+            sale = worker.request(
+                "POST", "/api/leaves/sales", {"days": 1, "reason": "صرف مع مسير مايو"}, expected=201,
+            )["request"]
+            approved = hr.request(
+                "POST", f"/api/leaves/sales/{sale['id']}/decision",
+                {"action": "approve", "reason": "اعتماد الصرف"},
+            )["request"]
+        self.assertEqual(approved["payout_month"], "2045-05")
+        refreshed = hr.request("GET", f"/api/payroll/runs/{run['id']}")["run"]
+        item = next(row for row in refreshed["items"] if row["employee_id"] == employee["id"])
+        self.assertGreater(item["leave_sale_cents"], 0)
+        self.assertEqual(approved["payroll_item_id"], item["id"])
+        self.assertEqual(item["gross_cents"], item["contract_gross_cents"] + item["leave_sale_cents"])
 
 
 if __name__ == "__main__":

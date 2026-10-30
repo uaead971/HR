@@ -93,6 +93,8 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "payroll.manage": "إدارة المسيرات",
         "payroll.approve": "اعتماد المسيرات", "payroll.pay": "إثبات دفع المسيرات",
         "advance.view": "عرض السلف", "advance.approve": "اعتماد السلف",
+        "purchase.view": "عرض جميع طلبات المشتريات", "purchase.hr_approve": "مراجعة الموارد البشرية لطلبات المشتريات",
+        "purchase.finance_approve": "الاعتماد المالي النهائي لطلبات المشتريات",
     },
     "performance": {
         "evaluation.view": "عرض التقييمات", "evaluation.review": "مراجعة الموارد البشرية وحل التظلمات",
@@ -1822,6 +1824,7 @@ def initialize_database(db_path: Path) -> None:
                     "late_threshold_minutes": "INTEGER NOT NULL DEFAULT 60",
                     "late_deduction_unit_minutes": "INTEGER NOT NULL DEFAULT 60",
                     "late_penalty_days_per_unit": "INTEGER NOT NULL DEFAULT 1",
+                    "overtime_multiplier": "REAL NOT NULL DEFAULT 1.25",
                     "card_template": "TEXT NOT NULL DEFAULT 'portrait_orbit'",
                     "card_primary_color": "TEXT NOT NULL DEFAULT '#123d34'",
                     "card_accent_color": "TEXT NOT NULL DEFAULT '#c6a15b'",
@@ -1953,6 +1956,12 @@ def initialize_database(db_path: Path) -> None:
                 "payroll_items": {
                     "bonus_cents": "INTEGER NOT NULL DEFAULT 0",
                     "base_deductions_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "overtime_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "leave_sale_cents": "INTEGER NOT NULL DEFAULT 0",
+                },
+                "leave_sale_requests": {
+                    "payout_month": "TEXT",
+                    "payroll_item_id": "INTEGER",
                 },
             }
             for table, columns in migrations.items():
@@ -3308,6 +3317,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/salary-certificates/(\d+)", self.api_certificate_get),
                     ("POST", r"/api/salary-certificates/(\d+)/print", self.api_certificate_print),
                     ("POST", r"/api/salary-certificates/(\d+)/decision", self.api_certificate_request_decision),
+                    ("GET", r"/api/purchases", self.api_purchases_get),
+                    ("POST", r"/api/purchases", self.api_purchases_post),
+                    ("GET", r"/api/purchases/(\d+)", self.api_purchase_get),
+                    ("POST", r"/api/purchases/(\d+)/decision", self.api_purchase_decision),
                     ("GET", r"/api/payroll/runs", self.api_payroll_runs_get),
                     ("POST", r"/api/payroll/runs", self.api_payroll_runs_post),
                     ("GET", r"/api/payroll/runs/(\d+)", self.api_payroll_run_get),
@@ -3326,6 +3339,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("DELETE", r"/api/lifecycle/cases/(\d+)", self.api_lifecycle_delete),
                     ("GET", r"/api/reports/summary", self.api_report_summary),
                     ("GET", r"/api/reports/summary\.csv", self.api_report_summary_csv),
+                    ("GET", r"/api/reports/departments", self.api_department_report),
+                    ("GET", r"/api/reports/departments\.csv", self.api_department_report_csv),
                 ]
                 for route_method, pattern, handler in routes:
                     match = re.fullmatch(pattern, path)
@@ -8494,6 +8509,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if action == "reject" and not note:
                 raise APIError(422, "سبب الرفض مطلوب.", "validation_error")
             stamp = now_iso()
+            payout_month: str | None = None
+            draft_payroll_item_id: int | None = None
             with self.db:
                 if action == "approve":
                     annual = self.db.execute("SELECT id FROM leave_types WHERE code='annual' AND active=1").fetchone()
@@ -8509,8 +8526,36 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         self.db.execute("INSERT INTO leave_balances(employee_id,leave_type_id,year,entitlement) VALUES(?,?,?,?)", (row["employee_id"], annual["id"], local_now().year, entitlement))
                     if annual:
                         self.db.execute("UPDATE leave_balances SET used=used+? WHERE employee_id=? AND leave_type_id=? AND year=?", (row["days"], row["employee_id"], annual["id"], local_now().year))
+                    payout_month = local_now().strftime("%Y-%m")
+                    for _ in range(120):
+                        existing_run = self.db.execute(
+                            "SELECT id,status FROM payroll_runs WHERE payroll_month=?", (payout_month,),
+                        ).fetchone()
+                        if existing_run is None:
+                            break
+                        if existing_run["status"] == "draft":
+                            draft_item = self.db.execute(
+                                "SELECT id FROM payroll_items WHERE run_id=? AND employee_id=?",
+                                (existing_run["id"], row["employee_id"]),
+                            ).fetchone()
+                            if draft_item:
+                                draft_payroll_item_id = int(draft_item["id"])
+                                break
+                        year_value, month_value = map(int, payout_month.split("-"))
+                        payout_month = f"{year_value + (1 if month_value == 12 else 0):04d}-{(1 if month_value == 12 else month_value + 1):02d}"
+                    else:
+                        raise APIError(409, "تعذر العثور على شهر صرف متاح لبيع الإجازة.", "leave_sale_payout_month_unavailable")
                 status = "approved" if action == "approve" else "rejected"
-                self.db.execute("UPDATE leave_sale_requests SET status=?,decision_note=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, note, user["id"], stamp, stamp, request_id))
+                self.db.execute(
+                    "UPDATE leave_sale_requests SET status=?,decision_note=?,decided_by=?,decided_at=?,payout_month=?,payroll_item_id=?,updated_at=? WHERE id=?",
+                    (status, note, user["id"], stamp, payout_month, draft_payroll_item_id, stamp, request_id),
+                )
+                if draft_payroll_item_id:
+                    self.db.execute(
+                        "UPDATE payroll_items SET leave_sale_cents=leave_sale_cents+? WHERE id=?",
+                        (int(row["amount_cents"] or 0), draft_payroll_item_id),
+                    )
+                    self.recalculate_payroll_item(draft_payroll_item_id)
                 employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
                 if employee_user:
                     create_internal_notification(
@@ -10019,6 +10064,231 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
             self.send_json(200, {"certificate": self.certificate_payload(saved), "print_authorized": True})
 
+        # Employee purchase requests and their three-step approval workflow
+        def finance_purchase_approver(self, user: dict[str, Any]) -> bool:
+            if not has_permission(self.db, user, "purchase.finance_approve"):
+                return False
+            if is_system_admin(user):
+                return True
+            employee_id = user.get("employee_id")
+            if not employee_id:
+                return False
+            row = self.db.execute(
+                """SELECT d.name,d.manager_employee_id
+                     FROM employees e JOIN departments d ON d.id=e.department_id
+                    WHERE e.id=? AND e.active=1 AND d.active=1""",
+                (employee_id,),
+            ).fetchone()
+            if not row or int(row["manager_employee_id"] or 0) != int(employee_id):
+                return False
+            name = str(row["name"] or "").strip().casefold()
+            return any(label in name for label in ("المالية", "الماليه", "الحسابات", "finance", "accounts", "accounting"))
+
+        def purchase_request_row(self, request_id: int) -> sqlite3.Row:
+            row = self.db.execute(
+                """SELECT p.*,e.employee_no,e.full_name AS employee_name,m.full_name AS manager_name,
+                          mu.display_name AS manager_decided_by_name,hu.display_name AS hr_decided_by_name,
+                          fu.display_name AS finance_decided_by_name
+                     FROM purchase_requests p JOIN employees e ON e.id=p.employee_id
+                     JOIN employees m ON m.id=p.manager_employee_id
+                     LEFT JOIN users mu ON mu.id=p.manager_decided_by
+                     LEFT JOIN users hu ON hu.id=p.hr_decided_by
+                     LEFT JOIN users fu ON fu.id=p.finance_decided_by
+                    WHERE p.id=?""",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise APIError(404, "طلب المشتريات غير موجود.", "not_found")
+            return row
+
+        def can_access_purchase(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any]) -> bool:
+            data = dict(row)
+            return bool(
+                int(data["employee_id"]) == int(user.get("employee_id") or 0)
+                or int(data["manager_employee_id"]) == int(user.get("employee_id") or 0)
+                or has_permission(self.db, user, "purchase.view")
+                or has_permission(self.db, user, "purchase.hr_approve")
+                or self.finance_purchase_approver(user)
+            )
+
+        def purchase_payload(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any], include_invoice: bool = False) -> dict[str, Any]:
+            item = dict(row)
+            item["amount"] = cents_value(item["amount_cents"])
+            step = item["current_step"]
+            item["can_decide"] = bool(
+                item["status"] not in {"approved", "rejected"}
+                and int(item["employee_id"]) != int(user.get("employee_id") or 0)
+                and (
+                    (step == "manager" and int(item["manager_employee_id"]) == int(user.get("employee_id") or 0))
+                    or (step == "hr" and has_permission(self.db, user, "purchase.hr_approve"))
+                    or (step == "finance" and self.finance_purchase_approver(user))
+                )
+            )
+            if not include_invoice:
+                item.pop("invoice_data_url", None)
+            return item
+
+        def purchase_finance_recipient_ids(self, exclude_user_id: int | None = None) -> list[int]:
+            recipients: list[int] = []
+            for row in self.db.execute("SELECT * FROM users WHERE active=1"):
+                candidate = dict(row) | {"active": bool(row["active"]), "is_super_admin": bool(row["is_super_admin"])}
+                if exclude_user_id and int(candidate["id"]) == int(exclude_user_id):
+                    continue
+                if self.finance_purchase_approver(candidate):
+                    recipients.append(int(candidate["id"]))
+            return recipients
+
+        def api_purchases_get(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            conditions: list[str] = []
+            params: list[Any] = []
+            if not has_permission(self.db, user, "purchase.view"):
+                employee_id = int(user.get("employee_id") or 0)
+                access: list[str] = ["p.employee_id=?", "p.manager_employee_id=?"]
+                params.extend([employee_id, employee_id])
+                if has_permission(self.db, user, "purchase.hr_approve"):
+                    access.append("p.status='hr_pending'")
+                if self.finance_purchase_approver(user):
+                    access.append("p.status='finance_pending'")
+                conditions.append("(" + " OR ".join(access) + ")")
+            status = str(self.query.get("status", "")).strip()
+            if status:
+                allowed = {"manager_pending", "hr_pending", "finance_pending", "approved", "rejected"}
+                if status not in allowed:
+                    raise APIError(422, "حالة طلب المشتريات غير صالحة.", "validation_error", {"field": "status"})
+                conditions.append("p.status=?")
+                params.append(status)
+            where = " WHERE " + " AND ".join(conditions) if conditions else ""
+            rows = self.db.execute(
+                """SELECT p.*,e.employee_no,e.full_name AS employee_name,m.full_name AS manager_name,
+                          mu.display_name AS manager_decided_by_name,hu.display_name AS hr_decided_by_name,
+                          fu.display_name AS finance_decided_by_name
+                     FROM purchase_requests p JOIN employees e ON e.id=p.employee_id
+                     JOIN employees m ON m.id=p.manager_employee_id
+                     LEFT JOIN users mu ON mu.id=p.manager_decided_by
+                     LEFT JOIN users hu ON hu.id=p.hr_decided_by
+                     LEFT JOIN users fu ON fu.id=p.finance_decided_by""" + where + " ORDER BY p.created_at DESC,p.id DESC",
+                params,
+            ).fetchall()
+            self.send_json(200, {"items": [self.purchase_payload(row, user) for row in rows]})
+
+        def api_purchases_post(self) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            employee_id = self.own_employee_id()
+            data = self.read_json()
+            manager_employee_id = self.direct_manager_employee_id(employee_id)
+            manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (manager_employee_id,)).fetchone() if manager_employee_id else None
+            if not manager_employee_id or manager_user is None:
+                raise APIError(409, "لا يمكن إرسال الطلب قبل تعيين مسؤول مباشر نشط للموظف.", "purchase_manager_missing")
+            amount_cents = money_cents(data.get("amount"), "amount", Decimal("0.01"))
+            invoice_data_url = validate_data_url(
+                data.get("invoice_data_url"), "فاتورة الشراء",
+                ("application/pdf", "image/png", "image/jpeg", "image/webp"), 2_000_000,
+            )
+            if not invoice_data_url:
+                raise APIError(422, "فاتورة الشراء مرفق إلزامي.", "invoice_required", {"field": "invoice"})
+            mime_type = invoice_data_url[5:invoice_data_url.index(";")]
+            file_name = Path(str(data.get("invoice_file_name") or "")).name[:180]
+            allowed_extensions = {
+                "application/pdf": {".pdf"}, "image/png": {".png"},
+                "image/jpeg": {".jpg", ".jpeg"}, "image/webp": {".webp"},
+            }
+            if not file_name or Path(file_name).suffix.lower() not in allowed_extensions[mime_type]:
+                raise APIError(422, "اسم ملف الفاتورة أو امتداده لا يطابق محتواه.", "invalid_upload", {"field": "invoice"})
+            stamp = now_iso()
+            with self.db:
+                cursor = self.db.execute(
+                    """INSERT INTO purchase_requests(
+                           employee_id,purchase_name,amount_cents,responsible_name,invoice_file_name,invoice_mime_type,
+                           invoice_data_url,manager_employee_id,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (employee_id, require_text(data, "purchase_name", 240), amount_cents,
+                     require_text(data, "responsible_name", 180), file_name, mime_type, invoice_data_url,
+                     manager_employee_id, stamp, stamp),
+                )
+                request_id = int(cursor.lastrowid)
+                create_internal_notification(
+                    self.db, int(user["id"]), [int(manager_user["id"])], "طلب مشتريات يحتاج مراجعتك",
+                    f"أرسل الموظف طلب «{str(data.get('purchase_name') or '').strip()}» بقيمة {cents_value(amount_cents):,.2f} درهم مع فاتورة مرفقة.",
+                )
+                audit(self.db, user["id"], "purchase.submit", "purchase_request", request_id, {"amount_cents": amount_cents, "manager_employee_id": manager_employee_id, "invoice_mime_type": mime_type})
+            self.send_json(201, {"request": self.purchase_payload(self.purchase_request_row(request_id), user)})
+
+        def api_purchase_get(self, request_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            row = self.purchase_request_row(request_id)
+            if not self.can_access_purchase(row, user):
+                raise APIError(403, "لا يمكنك عرض طلب المشتريات هذا.", "forbidden")
+            self.send_json(200, {"request": self.purchase_payload(row, user, include_invoice=True)})
+
+        def api_purchase_decision(self, request_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            row = self.purchase_request_row(request_id)
+            if row["status"] in {"approved", "rejected"}:
+                raise APIError(409, "تم اتخاذ قرار نهائي على الطلب سابقاً.", "invalid_status")
+            if int(row["employee_id"]) == int(user.get("employee_id") or 0):
+                raise APIError(409, "لا يجوز لمقدم الطلب اعتماد طلبه.", "purchase_self_approval_forbidden")
+            step = str(row["current_step"])
+            authorized = (
+                (step == "manager" and int(row["manager_employee_id"]) == int(user.get("employee_id") or 0))
+                or (step == "hr" and has_permission(self.db, user, "purchase.hr_approve"))
+                or (step == "finance" and self.finance_purchase_approver(user))
+            )
+            if not authorized:
+                raise APIError(403, "هذا الطلب ليس في مرحلة اعتمادك الحالية.", "forbidden")
+            data = self.read_json()
+            action = str(data.get("action", "")).strip().lower()
+            if action not in {"approve", "reject"}:
+                raise APIError(422, "القرار يجب أن يكون approve أو reject.", "validation_error")
+            note = optional_text(data, "note", 1000)
+            if action == "reject" and not note:
+                raise APIError(422, "سبب رفض طلب المشتريات مطلوب.", "validation_error", {"field": "note"})
+            stamp = now_iso()
+            fields: dict[str, Any] = {
+                f"{step}_decided_by": user["id"], f"{step}_decided_at": stamp,
+                f"{step}_note": note, "updated_at": stamp,
+            }
+            if action == "reject":
+                fields.update({"status": "rejected", "current_step": "complete", "rejected_step": step})
+            elif step == "manager":
+                fields.update({"status": "hr_pending", "current_step": "hr"})
+            elif step == "hr":
+                fields.update({"status": "finance_pending", "current_step": "finance"})
+            else:
+                fields.update({"status": "approved", "current_step": "complete"})
+            with self.db:
+                updated = self.db.execute(
+                    "UPDATE purchase_requests SET " + ",".join(f"{key}=?" for key in fields)
+                    + " WHERE id=? AND current_step=? AND status=?",
+                    (*fields.values(), request_id, step, row["status"]),
+                )
+                if updated.rowcount != 1:
+                    raise APIError(409, "انتقل الطلب إلى مرحلة أخرى؛ حدّث القائمة قبل اتخاذ القرار.", "purchase_stage_changed")
+                recipients: list[int] = []
+                if fields["status"] == "hr_pending":
+                    recipients = self.approval_recipient_ids("purchase.hr_approve", int(user["id"]))
+                    if not recipients:
+                        raise APIError(409, "لا يوجد مسؤول موارد بشرية مخول لمراجعة طلبات المشتريات.", "purchase_hr_approver_missing")
+                elif fields["status"] == "finance_pending":
+                    recipients = self.purchase_finance_recipient_ids(int(user["id"]))
+                    if not recipients:
+                        raise APIError(409, "لا يوجد مدير حسابات مخول للاعتماد النهائي. عيّن مديراً لقسم المالية وامنحه صلاحية الاعتماد المالي.", "purchase_finance_approver_missing")
+                else:
+                    employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
+                    recipients = [int(employee_user["id"])] if employee_user else []
+                if recipients:
+                    create_internal_notification(
+                        self.db, int(user["id"]), recipients,
+                        "تحديث طلب المشتريات",
+                        f"طلب «{row['purchase_name']}» أصبح في حالة {fields['status']}." + (f" السبب: {note}" if action == "reject" else ""),
+                    )
+                audit(self.db, user["id"], f"purchase.{step}_{action}", "purchase_request", request_id, {"to_status": fields["status"], "note": note})
+            self.send_json(200, {"request": self.purchase_payload(self.purchase_request_row(request_id), user)})
+
         # Payroll runs, employee payslips and advances
         def advance_schedule_summary(self, employee_id: int, exclude_month: str | None = None) -> dict[str, Any]:
             """Return the approved advance amount still scheduled for an employee.
@@ -10056,7 +10326,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchone()
             bonus = int(totals["bonus"] or 0)
             deductions = int(item["base_deductions_cents"] or 0) + int(totals["deductions"] or 0)
-            gross = int(item["basic_cents"]) + int(item["allowances_cents"]) + bonus
+            gross = (
+                int(item["basic_cents"]) + int(item["allowances_cents"])
+                + int(item["overtime_cents"] or 0) + int(item["leave_sale_cents"] or 0) + bonus
+            )
             total_deductions = deductions + int(item["advance_cents"])
             if total_deductions > gross:
                 raise APIError(
@@ -10074,10 +10347,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def payroll_item_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             item = dict(row)
-            for key in ("basic_cents", "allowances_cents", "bonus_cents", "base_deductions_cents", "deductions_cents", "advance_cents", "net_cents"):
+            for key in ("basic_cents", "allowances_cents", "overtime_cents", "leave_sale_cents", "bonus_cents", "base_deductions_cents", "deductions_cents", "advance_cents", "net_cents"):
                 item[key.removesuffix("_cents")] = cents_value(item[key])
             contract_gross_cents = int(item["basic_cents"]) + int(item["allowances_cents"])
-            gross_cents = contract_gross_cents + int(item["bonus_cents"])
+            gross_cents = contract_gross_cents + int(item["overtime_cents"]) + int(item["leave_sale_cents"]) + int(item["bonus_cents"])
             total_deductions_cents = int(item["deductions_cents"]) + int(item["advance_cents"])
             item["contract_gross_cents"] = contract_gross_cents
             item["contract_gross"] = cents_value(contract_gross_cents)
@@ -10101,7 +10374,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
             rows=self.db.execute("SELECT * FROM payroll_items WHERE run_id=? ORDER BY employee_name",(run_id,)).fetchall()
             items=[]
-            totals={"basic_cents":0,"allowances_cents":0,"bonus_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
+            totals={"basic_cents":0,"allowances_cents":0,"overtime_cents":0,"leave_sale_cents":0,"bonus_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
             for row in rows:
                 item=self.payroll_item_payload(row)
                 for key in totals: totals[key]+=int(item[key])
@@ -10110,7 +10383,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
             result["contract_gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
             result["contract_gross"] = cents_value(result["contract_gross_cents"])
-            result["gross_cents"] = result["contract_gross_cents"] + totals["bonus_cents"]
+            result["gross_cents"] = result["contract_gross_cents"] + totals["overtime_cents"] + totals["leave_sale_cents"] + totals["bonus_cents"]
             result["gross"] = cents_value(result["gross_cents"])
             result["total_deductions_cents"] = totals["deductions_cents"] + totals["advance_cents"]
             result["total_deductions"] = cents_value(result["total_deductions_cents"])
@@ -10137,24 +10410,34 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if deductions and not deduction_reason:
                 raise APIError(422,"سبب الخصم مطلوب.","validation_error",{"field":"deduction_reason"})
             year_value, month_value = map(int, month.split("-"))
+            payroll_month_start = date(year_value, month_value, 1).isoformat()
             next_month = date(year_value + (1 if month_value == 12 else 0), 1 if month_value == 12 else month_value + 1, 1)
             payroll_month_end = (next_month - timedelta(days=1)).isoformat()
             stamp=now_iso()
             if self.db.execute("SELECT 1 FROM payroll_runs WHERE payroll_month=?",(month,)).fetchone(): raise APIError(409,"يوجد مسير لهذا الشهر.","duplicate_payroll_run")
             employees=self.db.execute(
-                employee_query(True)+" WHERE e.active=1 AND (e.hire_date IS NULL OR e.hire_date<=?) ORDER BY e.full_name",
-                (payroll_month_end,),
+                employee_query(True)+" WHERE (e.hire_date IS NULL OR e.hire_date<=?) AND (e.termination_date IS NULL OR e.termination_date>=?) ORDER BY e.full_name",
+                (payroll_month_end,payroll_month_start),
             ).fetchall()
-            policy=self.db.execute("SELECT late_deduction_enabled,late_threshold_minutes,late_deduction_unit_minutes,late_penalty_days_per_unit FROM organization WHERE id=1").fetchone()
+            policy=self.db.execute("SELECT late_deduction_enabled,late_threshold_minutes,late_deduction_unit_minutes,late_penalty_days_per_unit,overtime_multiplier FROM organization WHERE id=1").fetchone()
             with self.db:
                 cur=self.db.execute("INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES(?,?,?,?)",(month,user["id"],stamp,stamp)); run_id=int(cur.lastrowid)
                 for employee in employees:
                     basic=money_cents(employee["basic_salary"] or employee["salary"] or 0,"basic_salary")
                     employee_allowances=money_cents(salary_breakdown_from_row(employee)["allowances_total"],"allowances")
+                    overtime_minutes=int(self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND status='approved' AND work_date BETWEEN ? AND ?",(employee["id"],payroll_month_start,payroll_month_end)).fetchone()[0] or 0)
+                    overtime_multiplier=Decimal(str(policy["overtime_multiplier"] if policy else 1.25))
+                    overtime_cents=int((Decimal(basic)*Decimal(overtime_minutes)*overtime_multiplier/Decimal(14400)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+                    leave_sales=self.db.execute("SELECT id,amount_cents FROM leave_sale_requests WHERE employee_id=? AND status='approved' AND payroll_item_id IS NULL AND COALESCE(payout_month,substr(decided_at,1,7),substr(created_at,1,7))=? ORDER BY id",(employee["id"],month)).fetchall()
+                    leave_sale_cents=sum(int(sale["amount_cents"] or 0) for sale in leave_sales)
                     installment=self.db.execute("SELECT COALESCE(SUM(ai.amount_cents),0) FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id WHERE a.employee_id=? AND a.status='approved' AND ai.due_month=? AND ai.status='scheduled'",(employee["id"],month)).fetchone()[0]
                     total_allowances=employee_allowances+allowances
-                    item_cur=self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,bonus_cents,base_deductions_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,0,0,0,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,total_allowances,int(installment),max(0,basic+total_allowances-int(installment))))
+                    item_cur=self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,overtime_cents,leave_sale_cents,bonus_cents,base_deductions_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,?,?,0,0,0,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,total_allowances,overtime_cents,leave_sale_cents,int(installment),max(0,basic+total_allowances+overtime_cents+leave_sale_cents-int(installment))))
                     item_id=int(item_cur.lastrowid)
+                    if leave_sales:
+                        sale_ids=[int(sale["id"]) for sale in leave_sales]
+                        placeholders=",".join("?" for _ in sale_ids)
+                        self.db.execute(f"UPDATE leave_sale_requests SET payout_month=?,payroll_item_id=?,updated_at=? WHERE id IN ({placeholders})",(month,item_id,stamp,*sale_ids))
                     if bonus:
                         self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,'bonus',?,?,?,0,?)",(run_id,item_id,employee["id"],bonus,bonus_reason,user["id"],stamp))
                     if deductions:
@@ -10171,7 +10454,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                                 reason=f"خصم تأخير تلقائي: {late} دقيقة بدون إذن، بعد سماح {threshold} دقيقة، {penalty_days} يوم من الأجر التعاقدي"
                                 self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,'lateness',?,?,?,1,?)",(run_id,item_id,employee["id"],penalty,reason,user["id"],stamp))
                     self.recalculate_payroll_item(item_id)
-                audit(self.db,user["id"],"payroll.create","payroll_run",run_id,{"month":month,"employees":len(employees),"bonus_cents":bonus,"deduction_cents":deductions,"lateness_policy_enabled":bool(policy and policy["late_deduction_enabled"])})
+                audit(self.db,user["id"],"payroll.create","payroll_run",run_id,{"month":month,"employees":len(employees),"bonus_cents":bonus,"deduction_cents":deductions,"overtime_multiplier":float(overtime_multiplier if employees else Decimal(str(policy["overtime_multiplier"] if policy else 1.25))),"lateness_policy_enabled":bool(policy and policy["late_deduction_enabled"])})
             self.send_json(201,{"run":self.payroll_payload(run_id)})
 
         def api_payroll_run_get(self, run_id: int) -> None:
@@ -10267,8 +10550,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user=self.require_permission("salary.view")
             if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"تصدير المسيرات متاح للإدارة المخولة فقط.","forbidden")
             run=self.payroll_payload(run_id)
-            rows=[["الشهر",run["payroll_month"],"الحالة",run["status"]],["الرقم الوظيفي","الموظف","المسمى","الدرجة","الأساسي","البدلات","البونص","الراتب الإجمالي","الاستقطاعات","قسط السلفة","أسباب التعديلات","الصافي"]]
-            rows += [[i["employee_no"],i["employee_name"],i["job_title"],i["job_grade"],f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["bonus"]:.2f}',f'{i["gross"]:.2f}',f'{i["deductions"]:.2f}',f'{i["advance"]:.2f}'," | ".join(f"{a['kind']}: {a['reason']} ({a['amount']:.2f})" for a in i.get("adjustments",[])),f'{i["net"]:.2f}'] for i in run["items"]]
+            rows=[["الشهر",run["payroll_month"],"الحالة",run["status"]],["الرقم الوظيفي","الموظف","المسمى","الدرجة","الأساسي","البدلات","العمل الإضافي","بيع الإجازات","البونص","الراتب الإجمالي","الاستقطاعات","قسط السلفة","أسباب التعديلات","الصافي"]]
+            rows += [[i["employee_no"],i["employee_name"],i["job_title"],i["job_grade"],f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["overtime"]:.2f}',f'{i["leave_sale"]:.2f}',f'{i["bonus"]:.2f}',f'{i["gross"]:.2f}',f'{i["deductions"]:.2f}',f'{i["advance"]:.2f}'," | ".join(f"{a['kind']}: {a['reason']} ({a['amount']:.2f})" for a in i.get("adjustments",[])),f'{i["net"]:.2f}'] for i in run["items"]]
             self.send_csv(f'payroll-{run["payroll_month"]}.csv',rows)
 
         def api_my_payslips(self) -> None:
@@ -10454,6 +10737,156 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "payroll_net": None,
                 })
             values["as_of"]=now_iso(); return values
+
+        def department_report_payload(self, user: dict[str, Any]) -> dict[str, Any]:
+            if not self.has_privileged_people_access(user, "employee.view") or not has_permission(self.db, user, "attendance.view"):
+                raise APIError(403, "التقرير القسمي التفصيلي متاح للإدارة المخولة ببيانات الموظفين والحضور فقط.", "forbidden")
+            if not self.has_privileged_people_access(user, "salary.view"):
+                raise APIError(403, "عرض مبالغ السلف والخصومات يتطلب صلاحية الرواتب.", "forbidden", {"permission": "salary.view"})
+            department_id = as_int(self.query.get("department_id"), "department_id", 1)
+            department = self.db.execute("SELECT id,name FROM departments WHERE id=?", (department_id,)).fetchone()
+            if department is None:
+                raise APIError(404, "القسم غير موجود.", "not_found")
+            today = local_now().date()
+            date_from = parse_date(self.query.get("date_from", f"{today.year}-01-01"), "date_from")
+            date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to")
+            if date_from > date_to:
+                raise APIError(400, "تاريخ البداية يجب ألا يكون بعد تاريخ النهاية.", "invalid_date_range")
+            if date_to > today or (date_to - date_from).days > 366:
+                raise APIError(422, "فترة التقرير يجب ألا تتجاوز سنة وألا تنتهي في المستقبل.", "validation_error")
+            employees = self.db.execute(
+                """SELECT e.id,e.employee_no,e.full_name,e.job_title
+                     FROM employees e WHERE e.department_id=?
+                       AND (e.hire_date IS NULL OR e.hire_date<=?)
+                       AND (e.termination_date IS NULL OR e.termination_date>=?)
+                     ORDER BY e.full_name""",
+                (department_id, date_to.isoformat(), date_from.isoformat()),
+            ).fetchall()
+            employee_ids = [int(row["id"]) for row in employees]
+            by_id: dict[int, dict[str, Any]] = {
+                int(row["id"]): {
+                    "employee_id": int(row["id"]), "employee_no": row["employee_no"],
+                    "employee_name": row["full_name"], "job_title": row["job_title"],
+                    "leave_days": 0.0, "absence_days": 0, "advance_cents": 0,
+                    "advance_remaining_cents": 0, "deductions_cents": 0,
+                    "violation_count": 0, "early_exit_days": 0, "early_exit_minutes": 0,
+                    "net_work_minutes": 0, "excess_48h_minutes": 0, "months_over_48h": 0,
+                    "monthly_work": [],
+                }
+                for row in employees
+            }
+            if employee_ids:
+                attendance_payload = self.attendance_range_payload(user)
+                monthly_minutes: dict[tuple[int, str], int] = {}
+                for item in attendance_payload["items"]:
+                    employee_id = int(item["employee_id"])
+                    if employee_id not in by_id:
+                        continue
+                    record = by_id[employee_id]
+                    if item.get("day_status") == "absent":
+                        record["absence_days"] += 1
+                    early = int(item.get("early_minutes") or 0)
+                    if early:
+                        record["early_exit_days"] += 1
+                        record["early_exit_minutes"] += early
+                    net = int(item.get("net_minutes") or 0)
+                    record["net_work_minutes"] += net
+                    month = str(item["work_date"])[:7]
+                    monthly_minutes[(employee_id, month)] = monthly_minutes.get((employee_id, month), 0) + net
+                threshold_minutes = 48 * 60
+                for (employee_id, month), minutes in sorted(monthly_minutes.items()):
+                    excess = max(0, minutes - threshold_minutes)
+                    by_id[employee_id]["monthly_work"].append({"month": month, "minutes": minutes, "excess_minutes": excess})
+                    by_id[employee_id]["excess_48h_minutes"] += excess
+                    if excess:
+                        by_id[employee_id]["months_over_48h"] += 1
+                placeholders = ",".join("?" for _ in employee_ids)
+                leave_rows = self.db.execute(
+                    f"""SELECT lr.employee_id,lr.start_date,lr.end_date
+                           FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                          WHERE lr.employee_id IN ({placeholders}) AND lr.status='approved'
+                            AND lt.code<>'work_permission' AND lr.start_date<=? AND lr.end_date>=?""",
+                    (*employee_ids, date_to.isoformat(), date_from.isoformat()),
+                ).fetchall()
+                for leave in leave_rows:
+                    start = max(date_from, date.fromisoformat(leave["start_date"]))
+                    end = min(date_to, date.fromisoformat(leave["end_date"]))
+                    by_id[int(leave["employee_id"])]["leave_days"] += leave_days_excluding_public_holidays(self.db, start, end)
+                for action in self.db.execute(
+                    f"""SELECT employee_id,COUNT(*) AS count FROM employee_actions
+                          WHERE employee_id IN ({placeholders}) AND action_type='violation' AND status<>'cancelled'
+                            AND action_date BETWEEN ? AND ? GROUP BY employee_id""",
+                    (*employee_ids, date_from.isoformat(), date_to.isoformat()),
+                ).fetchall():
+                    by_id[int(action["employee_id"])]["violation_count"] = int(action["count"] or 0)
+                for advance in self.db.execute(
+                    f"""SELECT a.employee_id,COALESCE(SUM(a.amount_cents),0) AS total,
+                               COALESCE(SUM((SELECT COALESCE(SUM(ai.amount_cents),0) FROM advance_installments ai WHERE ai.advance_id=a.id AND ai.status='scheduled')),0) AS remaining
+                          FROM advances a WHERE a.employee_id IN ({placeholders})
+                            AND a.status IN ('submitted','approved','completed')
+                            AND (
+                              substr(a.created_at,1,10) BETWEEN ? AND ?
+                              OR EXISTS (
+                                SELECT 1 FROM advance_installments period_ai
+                                 WHERE period_ai.advance_id=a.id AND period_ai.due_month BETWEEN ? AND ?
+                              )
+                            )
+                          GROUP BY a.employee_id""",
+                    (*employee_ids, date_from.isoformat(), date_to.isoformat(),
+                     date_from.strftime("%Y-%m"), date_to.strftime("%Y-%m")),
+                ).fetchall():
+                    record = by_id[int(advance["employee_id"])]
+                    record["advance_cents"] = int(advance["total"] or 0)
+                    record["advance_remaining_cents"] = int(advance["remaining"] or 0)
+                for deduction in self.db.execute(
+                    f"""SELECT i.employee_id,COALESCE(SUM(i.deductions_cents),0) AS total
+                           FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id
+                          WHERE i.employee_id IN ({placeholders}) AND r.status IN ('approved','paid')
+                            AND r.payroll_month BETWEEN ? AND ?
+                          GROUP BY i.employee_id""",
+                    (*employee_ids, date_from.strftime("%Y-%m"), date_to.strftime("%Y-%m")),
+                ).fetchall():
+                    by_id[int(deduction["employee_id"])]["deductions_cents"] = int(deduction["total"] or 0)
+            items = list(by_id.values())
+            for item in items:
+                for key in ("advance_cents", "advance_remaining_cents", "deductions_cents"):
+                    item[key.removesuffix("_cents")] = cents_value(item[key])
+                item["leave_days"] = round(float(item["leave_days"]), 2)
+            totals = {
+                "employees": len(items),
+                "leave_days": round(sum(float(item["leave_days"]) for item in items), 2),
+                "absence_days": sum(int(item["absence_days"]) for item in items),
+                "advance_cents": sum(int(item["advance_cents"]) for item in items),
+                "deductions_cents": sum(int(item["deductions_cents"]) for item in items),
+                "violation_count": sum(int(item["violation_count"]) for item in items),
+                "early_exit_minutes": sum(int(item["early_exit_minutes"]) for item in items),
+                "excess_48h_minutes": sum(int(item["excess_48h_minutes"]) for item in items),
+            }
+            totals["advance"] = cents_value(totals["advance_cents"])
+            totals["deductions"] = cents_value(totals["deductions_cents"])
+            return {
+                "department": dict(department), "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+                "monthly_required_hours": 48, "items": items, "totals": totals, "issued_at": now_iso(),
+            }
+
+        def api_department_report(self) -> None:
+            user = self.require_permission("report.view")
+            payload = self.department_report_payload(user)
+            with self.db:
+                audit(self.db, user["id"], "report.department_generate", "department", payload["department"]["id"], {"date_from": payload["date_from"], "date_to": payload["date_to"], "employee_count": len(payload["items"])})
+            self.send_json(200, payload)
+
+        def api_department_report_csv(self) -> None:
+            user = self.require_permission("report.view")
+            payload = self.department_report_payload(user)
+            rows = [["القسم", payload["department"]["name"], "من", payload["date_from"], "إلى", payload["date_to"]], [
+                "الرقم الوظيفي", "الموظف", "المسمى", "أيام الإجازة", "أيام الغياب", "إجمالي السلف", "المتبقي من السلف",
+                "الخصومات", "المخالفات", "أيام الخروج المبكر", "دقائق الخروج المبكر", "صافي دقائق العمل", "الدقائق فوق 48 ساعة شهرياً",
+            ]]
+            rows.extend([[item["employee_no"], item["employee_name"], item["job_title"], item["leave_days"], item["absence_days"], item["advance"], item["advance_remaining"], item["deductions"], item["violation_count"], item["early_exit_days"], item["early_exit_minutes"], item["net_work_minutes"], item["excess_48h_minutes"]] for item in payload["items"]])
+            with self.db:
+                audit(self.db, user["id"], "report.department_export", "department", payload["department"]["id"], {"date_from": payload["date_from"], "date_to": payload["date_to"]})
+            self.send_csv(f"department-report-{payload['department']['id']}-{payload['date_from']}-{payload['date_to']}.csv", rows)
 
         def api_report_summary(self) -> None:
             user = self.require_permission("report.view"); self.send_json(200,{"summary":self.report_summary(user)})
