@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r15")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r16")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -4440,7 +4440,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r15", index)
+        self.assertIn("build=20261030-production-r16", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4938,7 +4938,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261030-production-r15", index)
+        self.assertIn("build=20261030-production-r16", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -5042,6 +5042,15 @@ class HRAPIEndToEndTests(unittest.TestCase):
         }, expected=201)["employee"]
         pending = hr.request("GET", f"/api/payroll/runs/{replacement['id']}")["run"]
         self.assertGreaterEqual(int(pending["coverage"]["pending_add_count"]), 1)
+        self.assertEqual(
+            int(pending["coverage"]["current_total_files"]),
+            int(pending["coverage"]["current_included_count"])
+            + int(pending["coverage"]["current_excluded_count"]),
+        )
+        self.assertEqual(
+            int(pending["coverage"]["current_total_files"]),
+            int(replacement["coverage"]["total_files"]) + 1,
+        )
         sync_response = hr.request("POST", f"/api/payroll/runs/{replacement['id']}/sync", {
             "revision": pending["revision"],
         })

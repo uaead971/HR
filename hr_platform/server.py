@@ -10784,7 +10784,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 eligible_ids={int(item["id"]) for item in current_coverage["included"]}
                 result["coverage"]["pending_add_count"] = len(eligible_ids-member_ids)
                 result["coverage"]["changed_eligibility_count"] = len(member_ids-eligible_ids)
+                result["coverage"]["current_total_files"] = current_coverage["total_files"]
                 result["coverage"]["current_included_count"] = len(eligible_ids)
+                result["coverage"]["current_excluded_count"] = current_coverage["excluded_count"]
+                result["coverage"]["current_excluded"] = current_coverage["excluded"]
                 for item in items:
                     if int(item["employee_id"]) not in eligible_ids:
                         item["warnings"].append({
