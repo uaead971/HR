@@ -309,7 +309,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261008-production-r9")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r10")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -470,7 +470,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         ):
             self.assertIn(f'<option value="{value}" data-i18n-option>{arabic}</option>', index)
             self.assertIn(f"'{arabic}':'{english}'", i18n)
-        self.assertIn('option:not([value=""]):not([data-i18n-option])', i18n)
+        # Option labels are user-interface copy and must remain translatable.
+        # Only values explicitly marked as user/domain data are preserved.
+        self.assertNotIn('option:not([value=""]):not([data-i18n-option])', i18n)
+        self.assertIn('[data-i18n-preserve]', i18n)
 
         self.assertIn('id="visualOverlayValue" for="visualOverlayRange" aria-live="polite" aria-atomic="true"', index)
         self.assertIn('id="visualOverlayRange"', index)
@@ -4431,7 +4434,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("$('#userRole').textContent=tr(roleLabels[user.role]||user.role)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261008-production-r9", index)
+        self.assertIn("build=20261030-production-r10", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4589,6 +4592,17 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(final["hr_note"], "مطابق للسياسة")
         self.assertEqual(final["finance_note"], "اعتماد مالي نهائي")
 
+        root = Path(__file__).parents[1]
+        index = (root / "index.html").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        i18n = (root / "i18n.js").read_text(encoding="utf-8")
+        purchases_nav = index.index('href="#purchases" data-page="purchases"')
+        payroll_group = index.index('<span class="nav-label">الرواتب والمزايا</span>')
+        self.assertLess(purchases_nav, payroll_group)
+        self.assertIn('id="myPurchaseShortcut"', index)
+        self.assertIn('#myPurchaseShortcut', app)
+        self.assertIn("'طلب مشتريات':'Purchase request'", i18n)
+
     def test_82_historical_payroll_includes_former_staff_overtime_and_leave_sale(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         suffix = uuid.uuid4().hex[:8]
@@ -4708,6 +4722,55 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertGreater(item["leave_sale_cents"], 0)
         self.assertEqual(approved["payroll_item_id"], item["id"])
         self.assertEqual(item["gross_cents"], item["contract_gross_cents"] + item["leave_sale_cents"])
+
+    def test_85_payroll_policy_snapshot_proration_reimbursements_and_bilingual_explanation(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"PRORATE-{suffix}", "full_name": f"موظف تجزئة {suffix}",
+            "email": f"prorate-{suffix}@demo.ae", "hire_date": "2046-06-16",
+            "basic_salary": 3000, "housing_allowance": 600,
+        }, expected=201)["employee"]
+        run = hr.request("POST", "/api/payroll/runs", {
+            "payroll_month": "2046-06", "period_start": "2046-06-01", "period_end": "2046-06-30",
+            "input_cutoff_date": "2046-06-25", "payment_date": "2046-06-30",
+            "day_divisor_policy": "fixed_30", "monthly_hours": 240,
+            "prorate_scope": "basic_allowances", "employee_insurance_rate": 5,
+            "employee_tax_rate": 0, "employer_contribution_rate": 10,
+        }, expected=201)["run"]
+        item = next(row for row in run["items"] if row["employee_id"] == employee["id"])
+        self.assertEqual(run["workflow_stage"], "calculated")
+        self.assertEqual(run["policy_snapshot"]["day_divisor_policy"], "fixed_30")
+        self.assertEqual(run["policy_snapshot"]["employee_insurance_rate"], 5)
+        self.assertEqual(item["entitlement_days"], 15)
+        self.assertEqual(item["proration_deduction"], 1800)
+        self.assertEqual(item["insurance"], 75)
+        self.assertTrue(any(warning["code"] == "partial_service" for warning in item["warnings"]))
+        self.assertEqual(item["calculation"]["formula_version"], "payroll-v2")
+
+        run = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "commission", "amount": 200, "reason": "عمولة شهرية موثقة",
+            "employee_id": employee["id"],
+        }, expected=201)["run"]
+        run = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "reimbursement", "amount": 100, "reason": "تعويض مصروفات مهمة عمل",
+            "employee_id": employee["id"],
+        }, expected=201)["run"]
+        item = next(row for row in run["items"] if row["employee_id"] == employee["id"])
+        self.assertEqual(item["commission"], 200)
+        self.assertEqual(item["reimbursement"], 100)
+        self.assertEqual(item["net"], item["gross"] - item["total_deductions"] + 100)
+        self.assertEqual(item["employer_cost"], 2250)
+
+        root = Path(__file__).parents[1]
+        i18n = (root / "i18n.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn('#employeesRows td:not(:last-child)', i18n)
+        self.assertNotIn('option:not([value=""]):not([data-i18n-option])', i18n)
+        self.assertIn("Each payroll run stores an immutable snapshot", i18n)
+        self.assertIn("ماذا يعني الاسم الأحمر؟", index)
+        self.assertIn("employeeComplianceNote", app)
 
 
 if __name__ == "__main__":

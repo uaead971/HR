@@ -1958,6 +1958,48 @@ def initialize_database(db_path: Path) -> None:
                     "base_deductions_cents": "INTEGER NOT NULL DEFAULT 0",
                     "overtime_cents": "INTEGER NOT NULL DEFAULT 0",
                     "leave_sale_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "department_name": "TEXT NOT NULL DEFAULT ''",
+                    "branch_name": "TEXT NOT NULL DEFAULT ''",
+                    "hire_date": "TEXT",
+                    "termination_date": "TEXT",
+                    "period_days": "INTEGER NOT NULL DEFAULT 0",
+                    "divisor_days": "REAL NOT NULL DEFAULT 30",
+                    "entitlement_days": "REAL NOT NULL DEFAULT 0",
+                    "working_days": "INTEGER NOT NULL DEFAULT 0",
+                    "attendance_days": "INTEGER NOT NULL DEFAULT 0",
+                    "absence_days": "REAL NOT NULL DEFAULT 0",
+                    "unpaid_leave_days": "REAL NOT NULL DEFAULT 0",
+                    "late_minutes": "INTEGER NOT NULL DEFAULT 0",
+                    "overtime_minutes": "INTEGER NOT NULL DEFAULT 0",
+                    "commission_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "retroactive_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "reimbursement_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "employer_contribution_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "proration_deduction_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "absence_deduction_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "unpaid_leave_deduction_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "insurance_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "tax_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "calculation_json": "TEXT NOT NULL DEFAULT '{}'",
+                },
+                "payroll_runs": {
+                    "workflow_stage": "TEXT NOT NULL DEFAULT 'calculated' CHECK (workflow_stage IN ('draft','collecting','calculated','needs_review','ready_approval','approved','posted','bank_file_created','paid','closed'))",
+                    "period_start": "TEXT NOT NULL DEFAULT ''",
+                    "period_end": "TEXT NOT NULL DEFAULT ''",
+                    "input_cutoff_date": "TEXT",
+                    "payment_date": "TEXT",
+                    "day_divisor_policy": "TEXT NOT NULL DEFAULT 'fixed_30' CHECK (day_divisor_policy IN ('fixed_30','actual_days','working_days'))",
+                    "monthly_hours": "INTEGER NOT NULL DEFAULT 240 CHECK (monthly_hours BETWEEN 1 AND 744)",
+                    "prorate_scope": "TEXT NOT NULL DEFAULT 'basic_allowances' CHECK (prorate_scope IN ('basic','basic_allowances'))",
+                    "deduct_absence": "INTEGER NOT NULL DEFAULT 0 CHECK (deduct_absence IN (0,1))",
+                    "employee_insurance_rate": "REAL NOT NULL DEFAULT 0 CHECK (employee_insurance_rate BETWEEN 0 AND 100)",
+                    "employee_tax_rate": "REAL NOT NULL DEFAULT 0 CHECK (employee_tax_rate BETWEEN 0 AND 100)",
+                    "employer_contribution_rate": "REAL NOT NULL DEFAULT 0 CHECK (employer_contribution_rate BETWEEN 0 AND 100)",
+                    "policy_snapshot_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "posted_at": "TEXT",
+                    "bank_file_created_at": "TEXT",
+                    "closed_at": "TEXT",
+                    "locked_at": "TEXT",
                 },
                 "leave_sale_requests": {
                     "payout_month": "TEXT",
@@ -1969,6 +2011,49 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # Expand payroll adjustment components without losing historical
+            # bonuses, deductions or their audit reasons from older databases.
+            payroll_adjustment_schema = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='payroll_adjustments'"
+            ).fetchone()
+            if payroll_adjustment_schema and "commission" not in str(payroll_adjustment_schema["sql"]):
+                db.execute("""CREATE TABLE payroll_adjustments_v61 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    payroll_item_id INTEGER NOT NULL,
+                    employee_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL CHECK (kind IN ('bonus','commission','retroactive','reimbursement','deduction','violation','lateness')),
+                    amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+                    reason TEXT NOT NULL,
+                    created_by INTEGER,
+                    system_generated INTEGER NOT NULL DEFAULT 0 CHECK (system_generated IN (0,1)),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (run_id) REFERENCES payroll_runs(id) ON DELETE CASCADE,
+                    FOREIGN KEY (payroll_item_id) REFERENCES payroll_items(id) ON DELETE CASCADE,
+                    FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+                )""")
+                db.execute("""INSERT INTO payroll_adjustments_v61(
+                    id,run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at
+                ) SELECT id,run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at
+                    FROM payroll_adjustments""")
+                db.execute("DROP TABLE payroll_adjustments")
+                db.execute("ALTER TABLE payroll_adjustments_v61 RENAME TO payroll_adjustments")
+                db.execute("CREATE INDEX IF NOT EXISTS idx_payroll_adjustments_item ON payroll_adjustments(payroll_item_id,id)")
+            # Legacy runs were monthly even though they did not store their
+            # explicit period. Preserve that meaning before exposing the new
+            # configurable period fields.
+            legacy_runs = db.execute(
+                "SELECT id,payroll_month FROM payroll_runs WHERE period_start='' OR period_end=''"
+            ).fetchall()
+            for legacy_run in legacy_runs:
+                legacy_year, legacy_month = map(int, str(legacy_run["payroll_month"]).split("-"))
+                legacy_start = date(legacy_year, legacy_month, 1)
+                legacy_next = date(legacy_year + (legacy_month == 12), 1 if legacy_month == 12 else legacy_month + 1, 1)
+                db.execute(
+                    "UPDATE payroll_runs SET period_start=?,period_end=?,payment_date=COALESCE(payment_date,?) WHERE id=?",
+                    (legacy_start.isoformat(), (legacy_next - timedelta(days=1)).isoformat(), (legacy_next - timedelta(days=1)).isoformat(), legacy_run["id"]),
+                )
             # Expiry notifications created by older versions must immediately
             # inherit the same administrative visibility rules as new alerts.
             db.execute(
@@ -2955,6 +3040,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
                (SELECT ed.issued_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_start_on,
                (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
                (SELECT MIN(ed.expires_on) FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL) AS nearest_document_expiry,
+               (SELECT ed.title FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL ORDER BY ed.expires_on,ed.id LIMIT 1) AS nearest_document_title,
                b.license_expires_on AS branch_license_expires_on,
                e.created_at,e.updated_at,
                (SELECT COUNT(*) FROM employee_documents ed WHERE ed.employee_id=e.id) AS document_count,
@@ -2991,7 +3077,8 @@ def organization_employee_query() -> str:
                e.manager_id,m.full_name AS manager_name,
                e.hire_date,e.active,e.updated_at,
                (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
-               (SELECT MIN(ed.expires_on) FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL) AS nearest_document_expiry
+               (SELECT MIN(ed.expires_on) FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL) AS nearest_document_expiry,
+               (SELECT ed.title FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL ORDER BY ed.expires_on,ed.id LIMIT 1) AS nearest_document_title
         FROM employees e
         LEFT JOIN departments d ON d.id=e.department_id
         LEFT JOIN branches b ON b.id=e.branch_id
@@ -3012,7 +3099,7 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
     data["employment_status"] = "active" if data["active"] else "terminated"
     data.update(expiry_compliance(
         (data.get("contract_end_on"), "عقد العمل"),
-        (data.get("nearest_document_expiry"), "وثيقة الموظف"),
+        (data.get("nearest_document_expiry"), data.get("nearest_document_title") or "وثيقة الموظف"),
         (data.get("passport_expires_on"), "جواز السفر"),
         (data.get("emirates_id_expires_on"), "الهوية الإماراتية"),
     ))
@@ -4422,7 +4509,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for employee in employees:
                 employee.update(expiry_compliance(
                     (employee.get("contract_end_on"), "عقد العمل"),
-                    (employee.get("nearest_document_expiry"), "وثيقة الموظف"),
+                    (employee.get("nearest_document_expiry"), employee.get("nearest_document_title") or "وثيقة الموظف"),
                     (employee.get("passport_expires_on"), "جواز السفر"),
                     (employee.get("emirates_id_expires_on"), "الهوية الإماراتية"),
                 ))
@@ -4571,7 +4658,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     effective_manager_id = None
                 employee.update(expiry_compliance(
                     (employee.get("contract_end_on"), "عقد العمل"),
-                    (employee.get("nearest_document_expiry"), "وثيقة الموظف"),
+                    (employee.get("nearest_document_expiry"), employee.get("nearest_document_title") or "وثيقة الموظف"),
                     (employee.get("passport_expires_on"), "جواز السفر"),
                     (employee.get("emirates_id_expires_on"), "الهوية الإماراتية"),
                 ))
@@ -10320,15 +10407,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(404, "عنصر مسير الراتب غير موجود.", "not_found")
             totals = self.db.execute(
                 """SELECT COALESCE(SUM(CASE WHEN kind='bonus' THEN amount_cents ELSE 0 END),0) AS bonus,
+                          COALESCE(SUM(CASE WHEN kind='commission' THEN amount_cents ELSE 0 END),0) AS commission,
+                          COALESCE(SUM(CASE WHEN kind='retroactive' THEN amount_cents ELSE 0 END),0) AS retroactive,
+                          COALESCE(SUM(CASE WHEN kind='reimbursement' THEN amount_cents ELSE 0 END),0) AS reimbursement,
                           COALESCE(SUM(CASE WHEN kind IN ('deduction','violation','lateness') THEN amount_cents ELSE 0 END),0) AS deductions
                      FROM payroll_adjustments WHERE payroll_item_id=?""",
                 (item_id,),
             ).fetchone()
             bonus = int(totals["bonus"] or 0)
+            commission = int(totals["commission"] or 0)
+            retroactive = int(totals["retroactive"] or 0)
+            reimbursement = int(totals["reimbursement"] or 0)
             deductions = int(item["base_deductions_cents"] or 0) + int(totals["deductions"] or 0)
             gross = (
                 int(item["basic_cents"]) + int(item["allowances_cents"])
-                + int(item["overtime_cents"] or 0) + int(item["leave_sale_cents"] or 0) + bonus
+                + int(item["overtime_cents"] or 0) + int(item["leave_sale_cents"] or 0)
+                + bonus + commission + retroactive
             )
             total_deductions = deductions + int(item["advance_cents"])
             if total_deductions > gross:
@@ -10342,15 +10436,36 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "total_deductions": cents_value(total_deductions),
                     },
                 )
-            net = gross - total_deductions
-            self.db.execute("UPDATE payroll_items SET bonus_cents=?,deductions_cents=?,net_cents=? WHERE id=?", (bonus, deductions, net, item_id))
+            net = gross - total_deductions + reimbursement
+            calculation = parse_json_text(item["calculation_json"], {})
+            calculation["totals"] = {
+                "gross_cents": gross,
+                "deductions_cents": total_deductions,
+                "reimbursements_cents": reimbursement,
+                "net_cents": net,
+                "employer_cost_cents": max(0,gross-int(item["proration_deduction_cents"] or 0)-int(item["absence_deduction_cents"] or 0)-int(item["unpaid_leave_deduction_cents"] or 0)) + reimbursement + int(item["employer_contribution_cents"] or 0),
+            }
+            self.db.execute(
+                """UPDATE payroll_items
+                      SET bonus_cents=?,commission_cents=?,retroactive_cents=?,reimbursement_cents=?,
+                          deductions_cents=?,net_cents=?,calculation_json=? WHERE id=?""",
+                (bonus, commission, retroactive, reimbursement, deductions, net, json_text(calculation), item_id),
+            )
 
         def payroll_item_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             item = dict(row)
-            for key in ("basic_cents", "allowances_cents", "overtime_cents", "leave_sale_cents", "bonus_cents", "base_deductions_cents", "deductions_cents", "advance_cents", "net_cents"):
+            for key in (
+                "basic_cents", "allowances_cents", "overtime_cents", "leave_sale_cents", "bonus_cents",
+                "commission_cents", "retroactive_cents", "reimbursement_cents", "employer_contribution_cents",
+                "proration_deduction_cents", "absence_deduction_cents", "unpaid_leave_deduction_cents",
+                "insurance_cents", "tax_cents", "base_deductions_cents", "deductions_cents", "advance_cents", "net_cents",
+            ):
                 item[key.removesuffix("_cents")] = cents_value(item[key])
             contract_gross_cents = int(item["basic_cents"]) + int(item["allowances_cents"])
-            gross_cents = contract_gross_cents + int(item["overtime_cents"]) + int(item["leave_sale_cents"]) + int(item["bonus_cents"])
+            gross_cents = (
+                contract_gross_cents + int(item["overtime_cents"]) + int(item["leave_sale_cents"])
+                + int(item["bonus_cents"]) + int(item["commission_cents"]) + int(item["retroactive_cents"])
+            )
             total_deductions_cents = int(item["deductions_cents"]) + int(item["advance_cents"])
             item["contract_gross_cents"] = contract_gross_cents
             item["contract_gross"] = cents_value(contract_gross_cents)
@@ -10358,6 +10473,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             item["gross"] = cents_value(gross_cents)
             item["total_deductions_cents"] = total_deductions_cents
             item["total_deductions"] = cents_value(total_deductions_cents)
+            item["employer_cost_cents"] = max(0,gross_cents-int(item["proration_deduction_cents"])-int(item["absence_deduction_cents"])-int(item["unpaid_leave_deduction_cents"])) + int(item["reimbursement_cents"]) + int(item["employer_contribution_cents"])
+            item["employer_cost"] = cents_value(item["employer_cost_cents"])
+            item["calculation"] = parse_json_text(item.get("calculation_json"), {})
+            item["warnings"] = list(item["calculation"].get("warnings") or [])
+            if int(item["net_cents"]) <= 0:
+                item["warnings"].append({"code": "non_positive_net", "ar": "صافي الراتب صفري أو سالب.", "en": "Net pay is zero or negative."})
+            if item.get("payroll_month"):
+                previous = self.db.execute(
+                    """SELECT pi.net_cents,r.payroll_month FROM payroll_items pi
+                         JOIN payroll_runs r ON r.id=pi.run_id
+                        WHERE pi.employee_id=? AND r.payroll_month<? AND r.status IN ('approved','paid')
+                        ORDER BY r.payroll_month DESC LIMIT 1""",
+                    (item["employee_id"], item["payroll_month"]),
+                ).fetchone()
+                if previous and int(previous["net_cents"] or 0) > 0:
+                    change = abs(int(item["net_cents"]) - int(previous["net_cents"])) / int(previous["net_cents"])
+                    if change >= 0.25:
+                        item["warnings"].append({"code": "large_net_change", "ar": "تغير صافي الراتب ٢٥٪ أو أكثر عن آخر مسير معتمد.", "en": "Net pay changed by 25% or more from the latest approved run."})
             exclude_month = str(item.get("payroll_month") or "") if item.get("status") in {"approved", "paid"} else None
             summary = self.advance_schedule_summary(int(item["employee_id"]), exclude_month or None)
             item["advance_label"] = "سلفة" if int(item["advance_cents"]) > 0 else ""
@@ -10374,19 +10507,34 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
             rows=self.db.execute("SELECT * FROM payroll_items WHERE run_id=? ORDER BY employee_name",(run_id,)).fetchall()
             items=[]
-            totals={"basic_cents":0,"allowances_cents":0,"overtime_cents":0,"leave_sale_cents":0,"bonus_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0}
+            totals={
+                "basic_cents":0,"allowances_cents":0,"overtime_cents":0,"leave_sale_cents":0,"bonus_cents":0,
+                "commission_cents":0,"retroactive_cents":0,"reimbursement_cents":0,"employer_contribution_cents":0,
+                "proration_deduction_cents":0,"absence_deduction_cents":0,"unpaid_leave_deduction_cents":0,
+                "insurance_cents":0,"tax_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0,
+            }
             for row in rows:
-                item=self.payroll_item_payload(row)
+                item=self.payroll_item_payload(dict(row)|{"payroll_month":run["payroll_month"],"status":run["status"]})
                 for key in totals: totals[key]+=int(item[key])
                 items.append(item)
             result=dict(run)|{"items":items,"employee_count":len(items)}
+            result["policy_snapshot"] = parse_json_text(result.get("policy_snapshot_json"), {})
             for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
             result["contract_gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
             result["contract_gross"] = cents_value(result["contract_gross_cents"])
-            result["gross_cents"] = result["contract_gross_cents"] + totals["overtime_cents"] + totals["leave_sale_cents"] + totals["bonus_cents"]
+            result["gross_cents"] = result["contract_gross_cents"] + totals["overtime_cents"] + totals["leave_sale_cents"] + totals["bonus_cents"] + totals["commission_cents"] + totals["retroactive_cents"]
             result["gross"] = cents_value(result["gross_cents"])
             result["total_deductions_cents"] = totals["deductions_cents"] + totals["advance_cents"]
             result["total_deductions"] = cents_value(result["total_deductions_cents"])
+            result["employer_cost_cents"] = sum(int(item["employer_cost_cents"]) for item in items)
+            result["employer_cost"] = cents_value(result["employer_cost_cents"])
+            result["warnings"] = [dict(warning, employee_id=item["employee_id"], employee_name=item["employee_name"]) for item in items for warning in item.get("warnings", [])]
+            history = self.db.execute(
+                """SELECT h.*,u.display_name AS actor_name FROM payroll_run_history h
+                     LEFT JOIN users u ON u.id=h.actor_user_id WHERE h.run_id=? ORDER BY h.id""",
+                (run_id,),
+            ).fetchall()
+            result["history"] = [dict(entry) for entry in history]
             return result
 
         def api_payroll_runs_get(self) -> None:
@@ -10395,6 +10543,91 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "مسيرات الرواتب متاحة للإدارة المخولة فقط.", "forbidden")
             rows=self.db.execute("SELECT r.*,(SELECT COUNT(*) FROM payroll_items i WHERE i.run_id=r.id) AS employee_count,(SELECT COALESCE(SUM(net_cents),0) FROM payroll_items i WHERE i.run_id=r.id) AS net_cents FROM payroll_runs r ORDER BY payroll_month DESC").fetchall()
             self.send_json(200,{"items":[dict(r)|{"net":cents_value(r["net_cents"])} for r in rows]})
+
+        @staticmethod
+        def payroll_prorated_cents(amount_cents: int, days: float, divisor: float) -> int:
+            if amount_cents <= 0 or days <= 0 or divisor <= 0:
+                return 0
+            value = Decimal(amount_cents) * Decimal(str(days)) / Decimal(str(divisor))
+            return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+        def payroll_period_facts(self, employee_id: int, period_start: date, period_end: date, hire_date: str | None, termination_date: str | None) -> dict[str, Any]:
+            employed_start = max(period_start, date.fromisoformat(hire_date) if hire_date else period_start)
+            employed_end = min(period_end, date.fromisoformat(termination_date) if termination_date else period_end)
+            service_dates: list[date] = []
+            if employed_start <= employed_end:
+                cursor = employed_start
+                while cursor <= employed_end:
+                    service_dates.append(cursor)
+                    cursor += timedelta(days=1)
+            leave_rows = self.db.execute(
+                """SELECT lr.start_date,lr.end_date,lr.hours,lt.paid
+                     FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id
+                    WHERE lr.employee_id=? AND lr.status='approved'
+                      AND lr.end_date>=? AND lr.start_date<=?""",
+                (employee_id, period_start.isoformat(), period_end.isoformat()),
+            ).fetchall()
+            paid_leave_dates: set[date] = set()
+            unpaid_leave_dates: set[date] = set()
+            for leave in leave_rows:
+                # Hourly permissions remain attendance relief and must never
+                # be converted into a full unpaid payroll day.
+                if float(leave["hours"] or 0) > 0:
+                    continue
+                leave_start = max(employed_start, date.fromisoformat(leave["start_date"]))
+                leave_end = min(employed_end, date.fromisoformat(leave["end_date"]))
+                cursor = leave_start
+                target = paid_leave_dates if bool(leave["paid"]) else unpaid_leave_dates
+                while cursor <= leave_end:
+                    target.add(cursor)
+                    cursor += timedelta(days=1)
+            working_dates: list[date] = []
+            full_period_working_dates: list[date] = []
+            cursor = period_start
+            while cursor <= period_end:
+                shift = self.shift_for_employee(employee_id, cursor)
+                is_workday = bool(shift and cursor.weekday() in set(shift.get("working_days") or []))
+                if is_workday:
+                    full_period_working_dates.append(cursor)
+                    if cursor in service_dates:
+                        working_dates.append(cursor)
+                cursor += timedelta(days=1)
+            attendance_rows = self.db.execute(
+                """SELECT work_date FROM attendance WHERE employee_id=? AND decision='accepted'
+                      AND check_in_at IS NOT NULL AND work_date BETWEEN ? AND ?""",
+                (employee_id, period_start.isoformat(), period_end.isoformat()),
+            ).fetchall()
+            attendance_dates = {date.fromisoformat(row["work_date"]) for row in attendance_rows}
+            absence_cutoff = min(period_end, local_now().date())
+            absence_dates = [
+                workday for workday in working_dates
+                if workday <= absence_cutoff and workday not in attendance_dates
+                and workday not in paid_leave_dates and workday not in unpaid_leave_dates
+            ]
+            if period_start.strftime("%Y-%m") == period_end.strftime("%Y-%m"):
+                late_minutes = self.monthly_lateness_summary(employee_id, period_start.strftime("%Y-%m"))["unexcused_minutes"]
+            else:
+                late_minutes = 0
+            pending_overtime = int(self.db.execute(
+                """SELECT COUNT(*) FROM overtime_requests WHERE employee_id=? AND status IN ('draft','submitted')
+                      AND work_date BETWEEN ? AND ?""",
+                (employee_id, period_start.isoformat(), period_end.isoformat()),
+            ).fetchone()[0])
+            fallback_full_workdays = sum(1 for offset in range((period_end-period_start).days+1) if (period_start+timedelta(days=offset)).weekday() < 5)
+            fallback_service_workdays = sum(1 for workday in service_dates if workday.weekday() < 5)
+            return {
+                "service_days": len(service_dates),
+                "working_days": len(working_dates),
+                "full_period_working_days": len(full_period_working_dates) or fallback_full_workdays,
+                "service_working_days": len(working_dates) or fallback_service_workdays,
+                "attendance_days": len(attendance_dates & set(working_dates)),
+                "absence_days": len(absence_dates),
+                "unpaid_leave_days": len(unpaid_leave_dates),
+                "unpaid_leave_working_days": len(unpaid_leave_dates & set(working_dates)),
+                "late_minutes": int(late_minutes),
+                "pending_overtime": pending_overtime,
+                "full_period_employment": employed_start == period_start and employed_end == period_end,
+            }
 
         def api_payroll_runs_post(self) -> None:
             user=self.require_permission("payroll.manage"); data=self.read_json(); month=str(data.get("payroll_month",data.get("month","")))
@@ -10410,29 +10643,143 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if deductions and not deduction_reason:
                 raise APIError(422,"سبب الخصم مطلوب.","validation_error",{"field":"deduction_reason"})
             year_value, month_value = map(int, month.split("-"))
-            payroll_month_start = date(year_value, month_value, 1).isoformat()
+            default_month_start = date(year_value, month_value, 1)
             next_month = date(year_value + (1 if month_value == 12 else 0), 1 if month_value == 12 else month_value + 1, 1)
-            payroll_month_end = (next_month - timedelta(days=1)).isoformat()
+            default_month_end = next_month - timedelta(days=1)
+            period_start = parse_date(data.get("period_start") or default_month_start.isoformat(), "period_start")
+            period_end = parse_date(data.get("period_end") or default_month_end.isoformat(), "period_end")
+            if period_start > period_end or period_start.strftime("%Y-%m") != month or period_end.strftime("%Y-%m") != month:
+                raise APIError(422,"فترة المسير يجب أن تقع داخل شهر المسير وبترتيب صحيح.","validation_error",{"field":"period_start"})
+            input_cutoff = parse_date(data["input_cutoff_date"], "input_cutoff_date") if data.get("input_cutoff_date") else period_end
+            payment_date = parse_date(data["payment_date"], "payment_date") if data.get("payment_date") else period_end
+            day_divisor_policy = str(data.get("day_divisor_policy") or "fixed_30")
+            if day_divisor_policy not in {"fixed_30","actual_days","working_days"}:
+                raise APIError(422,"سياسة معامل أيام الشهر غير صالحة.","validation_error",{"field":"day_divisor_policy"})
+            monthly_hours = as_int(data.get("monthly_hours",240),"monthly_hours",1,744)
+            prorate_scope = str(data.get("prorate_scope") or "basic_allowances")
+            if prorate_scope not in {"basic","basic_allowances"}:
+                raise APIError(422,"نطاق التجزئة غير صالح.","validation_error",{"field":"prorate_scope"})
+            deduct_absence = bool(data.get("deduct_absence",False))
+            employee_insurance_rate = as_float(data.get("employee_insurance_rate",0),"employee_insurance_rate",0,100)
+            employee_tax_rate = as_float(data.get("employee_tax_rate",0),"employee_tax_rate",0,100)
+            employer_contribution_rate = as_float(data.get("employer_contribution_rate",0),"employer_contribution_rate",0,100)
+            payroll_month_start = period_start.isoformat()
+            payroll_month_end = period_end.isoformat()
             stamp=now_iso()
             if self.db.execute("SELECT 1 FROM payroll_runs WHERE payroll_month=?",(month,)).fetchone(): raise APIError(409,"يوجد مسير لهذا الشهر.","duplicate_payroll_run")
             employees=self.db.execute(
                 employee_query(True)+" WHERE (e.hire_date IS NULL OR e.hire_date<=?) AND (e.termination_date IS NULL OR e.termination_date>=?) ORDER BY e.full_name",
                 (payroll_month_end,payroll_month_start),
             ).fetchall()
-            policy=self.db.execute("SELECT late_deduction_enabled,late_threshold_minutes,late_deduction_unit_minutes,late_penalty_days_per_unit,overtime_multiplier FROM organization WHERE id=1").fetchone()
+            policy=self.db.execute("SELECT late_deduction_enabled,late_threshold_minutes,late_deduction_unit_minutes,late_penalty_days_per_unit,overtime_multiplier,currency,timezone FROM organization WHERE id=1").fetchone()
+            policy_snapshot = {
+                "country": "AE", "currency": str(policy["currency"] if policy else "AED"),
+                "timezone": str(policy["timezone"] if policy else "Asia/Dubai"),
+                "period_start": payroll_month_start, "period_end": payroll_month_end,
+                "input_cutoff_date": input_cutoff.isoformat(), "payment_date": payment_date.isoformat(),
+                "day_divisor_policy": day_divisor_policy, "monthly_hours": monthly_hours,
+                "prorate_scope": prorate_scope, "deduct_absence": deduct_absence,
+                "employee_insurance_rate": employee_insurance_rate, "employee_tax_rate": employee_tax_rate,
+                "employer_contribution_rate": employer_contribution_rate,
+                "overtime_multiplier": float(policy["overtime_multiplier"] if policy else 1.25),
+                "rounding": "half_up_to_cent", "captured_at": stamp,
+            }
             with self.db:
-                cur=self.db.execute("INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES(?,?,?,?)",(month,user["id"],stamp,stamp)); run_id=int(cur.lastrowid)
+                cur=self.db.execute(
+                    """INSERT INTO payroll_runs(
+                           payroll_month,workflow_stage,period_start,period_end,input_cutoff_date,payment_date,
+                           day_divisor_policy,monthly_hours,prorate_scope,deduct_absence,
+                           employee_insurance_rate,employee_tax_rate,employer_contribution_rate,policy_snapshot_json,
+                           created_by,created_at,updated_at
+                       ) VALUES(?,'calculated',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (month,payroll_month_start,payroll_month_end,input_cutoff.isoformat(),payment_date.isoformat(),
+                     day_divisor_policy,monthly_hours,prorate_scope,1 if deduct_absence else 0,
+                     employee_insurance_rate,employee_tax_rate,employer_contribution_rate,json_text(policy_snapshot),
+                     user["id"],stamp,stamp),
+                ); run_id=int(cur.lastrowid)
+                self.db.execute(
+                    "INSERT INTO payroll_run_history(run_id,from_stage,to_stage,actor_user_id,note,created_at) VALUES(?,NULL,'calculated',?,'',?)",
+                    (run_id,user["id"],stamp),
+                )
                 for employee in employees:
                     basic=money_cents(employee["basic_salary"] or employee["salary"] or 0,"basic_salary")
                     employee_allowances=money_cents(salary_breakdown_from_row(employee)["allowances_total"],"allowances")
+                    total_allowances=employee_allowances+allowances
+                    facts=self.payroll_period_facts(
+                        int(employee["id"]),period_start,period_end,employee["hire_date"],employee["termination_date"],
+                    )
+                    period_days=(period_end-period_start).days+1
+                    divisor_days=(
+                        30.0 if day_divisor_policy=="fixed_30"
+                        else float((default_month_end-default_month_start).days+1) if day_divisor_policy=="actual_days"
+                        else float(max(1,facts["full_period_working_days"]))
+                    )
+                    service_units=float(facts["service_working_days"] if day_divisor_policy=="working_days" else facts["service_days"])
+                    unpaid_units=float(facts["unpaid_leave_working_days"] if day_divisor_policy=="working_days" else facts["unpaid_leave_days"])
+                    absence_units=float(facts["absence_days"])
+                    proration_basis=basic+(total_allowances if prorate_scope=="basic_allowances" else 0)
+                    if facts["full_period_employment"]:
+                        proration_deduction=0
+                    else:
+                        earned=self.payroll_prorated_cents(proration_basis,min(service_units,divisor_days),divisor_days)
+                        proration_deduction=max(0,proration_basis-earned)
+                    unpaid_leave_deduction=min(
+                        proration_basis-proration_deduction,
+                        self.payroll_prorated_cents(proration_basis,unpaid_units,divisor_days),
+                    )
+                    absence_deduction=0
+                    if deduct_absence:
+                        absence_deduction=min(
+                            max(0,proration_basis-proration_deduction-unpaid_leave_deduction),
+                            self.payroll_prorated_cents(proration_basis,absence_units,divisor_days),
+                        )
                     overtime_minutes=int(self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND status='approved' AND work_date BETWEEN ? AND ?",(employee["id"],payroll_month_start,payroll_month_end)).fetchone()[0] or 0)
                     overtime_multiplier=Decimal(str(policy["overtime_multiplier"] if policy else 1.25))
-                    overtime_cents=int((Decimal(basic)*Decimal(overtime_minutes)*overtime_multiplier/Decimal(14400)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+                    overtime_cents=int((Decimal(basic)*Decimal(overtime_minutes)*overtime_multiplier/(Decimal(monthly_hours)*Decimal(60))).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
                     leave_sales=self.db.execute("SELECT id,amount_cents FROM leave_sale_requests WHERE employee_id=? AND status='approved' AND payroll_item_id IS NULL AND COALESCE(payout_month,substr(decided_at,1,7),substr(created_at,1,7))=? ORDER BY id",(employee["id"],month)).fetchall()
                     leave_sale_cents=sum(int(sale["amount_cents"] or 0) for sale in leave_sales)
                     installment=self.db.execute("SELECT COALESCE(SUM(ai.amount_cents),0) FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id WHERE a.employee_id=? AND a.status='approved' AND ai.due_month=? AND ai.status='scheduled'",(employee["id"],month)).fetchone()[0]
-                    total_allowances=employee_allowances+allowances
-                    item_cur=self.db.execute("INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,basic_cents,allowances_cents,overtime_cents,leave_sale_cents,bonus_cents,base_deductions_cents,deductions_cents,advance_cents,net_cents) VALUES(?,?,?,?,?,?,?,?,?,?,0,0,0,?,?)",(run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],basic,total_allowances,overtime_cents,leave_sale_cents,int(installment),max(0,basic+total_allowances+overtime_cents+leave_sale_cents-int(installment))))
+                    eligible_basic=max(0,basic-self.payroll_prorated_cents(basic,proration_deduction/max(1,proration_basis)*divisor_days if proration_basis else 0,divisor_days))
+                    insurance_cents=int((Decimal(eligible_basic)*Decimal(str(employee_insurance_rate))/Decimal(100)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+                    taxable=max(0,basic+total_allowances+overtime_cents+leave_sale_cents-proration_deduction-unpaid_leave_deduction-absence_deduction-insurance_cents)
+                    tax_cents=int((Decimal(taxable)*Decimal(str(employee_tax_rate))/Decimal(100)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+                    employer_contribution_cents=int((Decimal(eligible_basic)*Decimal(str(employer_contribution_rate))/Decimal(100)).quantize(Decimal("1"),rounding=ROUND_HALF_UP))
+                    base_deductions=proration_deduction+unpaid_leave_deduction+absence_deduction+insurance_cents+tax_cents
+                    warnings=[]
+                    if facts["pending_overtime"]:
+                        warnings.append({"code":"pending_overtime","ar":"يوجد عمل إضافي غير معتمد داخل الفترة.","en":"Unapproved overtime exists within the period.","count":facts["pending_overtime"]})
+                    if not facts["full_period_employment"]:
+                        warnings.append({"code":"partial_service","ar":"طُبقت تجزئة الراتب بسبب بداية أو نهاية الخدمة خلال الفترة.","en":"Salary proration was applied because service started or ended during the period."})
+                    calculation={
+                        "formula_version":"payroll-v2","rounding":"half_up_to_cent",
+                        "inputs":{"basic_cents":basic,"allowances_cents":total_allowances,"service_units":service_units,"divisor_days":divisor_days,"unpaid_units":unpaid_units,"absence_units":absence_units,"overtime_minutes":overtime_minutes,"overtime_multiplier":float(overtime_multiplier)},
+                        "formulas":{
+                            "proration":"basis - (basis × service units ÷ divisor)",
+                            "overtime":"basic salary ÷ monthly hours × approved overtime hours × multiplier",
+                            "net":"gross earnings - deductions - advance instalment + reimbursements",
+                        },
+                        "warnings":warnings,
+                    }
+                    initial_gross=basic+total_allowances+overtime_cents+leave_sale_cents
+                    if base_deductions+int(installment)>initial_gross:
+                        raise APIError(422,f"إجمالي استقطاعات {employee['full_name']} يتجاوز راتبه الإجمالي.","payroll_deductions_exceed_gross",{"employee_id":int(employee["id"])})
+                    item_cur=self.db.execute(
+                        """INSERT INTO payroll_items(
+                               run_id,employee_id,employee_no,employee_name,job_title,job_grade,department_name,branch_name,
+                               hire_date,termination_date,period_days,divisor_days,entitlement_days,working_days,attendance_days,
+                               absence_days,unpaid_leave_days,late_minutes,overtime_minutes,basic_cents,allowances_cents,
+                               overtime_cents,leave_sale_cents,employer_contribution_cents,proration_deduction_cents,
+                               absence_deduction_cents,unpaid_leave_deduction_cents,insurance_cents,tax_cents,
+                               base_deductions_cents,deductions_cents,advance_cents,net_cents,calculation_json
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],
+                         employee["department_name"] or "",employee["branch_name"] or "",employee["hire_date"],employee["termination_date"],
+                         period_days,divisor_days,max(0,service_units-unpaid_units),facts["working_days"],facts["attendance_days"],
+                         facts["absence_days"],facts["unpaid_leave_days"],facts["late_minutes"],overtime_minutes,basic,total_allowances,
+                         overtime_cents,leave_sale_cents,employer_contribution_cents,proration_deduction,absence_deduction,
+                         unpaid_leave_deduction,insurance_cents,tax_cents,base_deductions,base_deductions,int(installment),
+                         initial_gross-base_deductions-int(installment),json_text(calculation)),
+                    )
                     item_id=int(item_cur.lastrowid)
                     if leave_sales:
                         sale_ids=[int(sale["id"]) for sale in leave_sales]
@@ -10472,8 +10819,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if run["status"]!="draft":
                 raise APIError(409,"لا يمكن تعديل البنود بعد إرسال المسير للمراجعة.","payroll_locked")
             data=self.read_json(); kind=str(data.get("kind") or "").strip().lower()
-            if kind not in {"bonus","deduction","violation"}:
-                raise APIError(422,"نوع التعديل يجب أن يكون بونص أو خصماً أو مخالفة.","validation_error",{"field":"kind"})
+            if kind not in {"bonus","commission","retroactive","reimbursement","deduction","violation"}:
+                raise APIError(422,"نوع التعديل يجب أن يكون استحقاقاً أو تعويض مصروف أو خصماً موثقاً.","validation_error",{"field":"kind"})
             amount=money_cents(data.get("amount"),"amount")
             if amount<=0:
                 raise APIError(422,"قيمة التعديل يجب أن تكون أكبر من صفر.","validation_error",{"field":"amount"})
@@ -10526,32 +10873,87 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_payroll_transition(self, run_id: int) -> None:
             data=self.read_json(); target=str(data.get("status",data.get("action",""))); row=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
             if not row: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
-            allowed={"draft":"review","review":"approved","approved":"paid"}
-            if allowed.get(row["status"])!=target: raise APIError(409,"انتقال حالة المسير غير صالح.","invalid_status")
-            permission={"review":"payroll.manage","approved":"payroll.approve","paid":"payroll.pay"}[target]; user=self.require_permission(permission)
+            stage_alias={"review":"ready_approval"}
+            target_stage=stage_alias.get(target,target)
+            current_stage=str(row["workflow_stage"] or row["status"] or "draft")
+            allowed_stages={
+                "draft":{"collecting","calculated","needs_review","ready_approval"},
+                "collecting":{"calculated","needs_review","ready_approval"},
+                "calculated":{"needs_review","ready_approval"},
+                "needs_review":{"calculated","ready_approval"},
+                "ready_approval":{"approved"},
+                "approved":{"posted","bank_file_created","paid"},
+                "posted":{"bank_file_created","paid"},
+                "bank_file_created":{"paid"},
+                "paid":{"closed"},
+                "closed":set(),
+            }
+            if target_stage not in allowed_stages.get(current_stage,set()):
+                # Runs migrated from the earlier four-state workflow retain
+                # the same safe transitions even if no history row exists.
+                legacy_allowed={"draft":"ready_approval","review":"approved","approved":"paid"}
+                if legacy_allowed.get(row["status"])!=target_stage:
+                    raise APIError(409,"انتقال حالة المسير غير صالح.","invalid_status")
+            permission=(
+                "payroll.approve" if target_stage=="approved"
+                else "payroll.pay" if target_stage in {"posted","bank_file_created","paid","closed"}
+                else "payroll.manage"
+            ); user=self.require_permission(permission)
             if not self.has_privileged_people_access(user,"employee.view"): raise APIError(403,"اعتماد المسيرات متاح للإدارة المخولة فقط.","forbidden")
-            if target=="approved" and int(row["created_by"] or 0)==int(user["id"]):
+            if target_stage=="approved" and int(row["created_by"] or 0)==int(user["id"]):
                 raise APIError(409,"لا يجوز لمن أنشأ مسير الرواتب أن يعتمد المسير نفسه. يلزم معتمد آخر.","payroll_self_approval_forbidden")
-            if target=="paid" and int(row["approved_by"] or 0)==int(user["id"]):
+            if target_stage=="paid" and int(row["approved_by"] or 0)==int(user["id"]):
                 raise APIError(409,"لا يجوز لمعتمد المسير نفسه تنفيذ خطوة الصرف. يلزم مستخدم مخول آخر.","payroll_self_payment_forbidden")
             stamp=now_iso(); extra={}
-            if target=="approved": extra={"approved_by":user["id"],"approved_at":stamp}
-            if target=="paid": extra={"paid_by":user["id"],"paid_at":stamp}
-            values={"status":target,"updated_at":stamp}|extra
+            if target_stage=="approved": extra={"approved_by":user["id"],"approved_at":stamp}
+            if target_stage=="posted": extra={"posted_at":stamp}
+            if target_stage=="bank_file_created": extra={"bank_file_created_at":stamp}
+            if target_stage=="paid": extra={"paid_by":user["id"],"paid_at":stamp}
+            if target_stage=="closed": extra={"closed_at":stamp}
+            status=(
+                "review" if target_stage=="ready_approval"
+                else "approved" if target_stage in {"approved","posted","bank_file_created"}
+                else "paid" if target_stage in {"paid","closed"}
+                else "draft"
+            )
+            values={"status":status,"workflow_stage":target_stage,"updated_at":stamp}|extra
+            if target_stage in {"ready_approval","approved","posted","bank_file_created","paid","closed"}:
+                values["locked_at"]=row["locked_at"] or stamp
             with self.db:
                 self.db.execute("UPDATE payroll_runs SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),run_id))
-                if target=="paid":
+                self.db.execute(
+                    "INSERT INTO payroll_run_history(run_id,from_stage,to_stage,actor_user_id,note,created_at) VALUES(?,?,?,?,?,?)",
+                    (run_id,current_stage,target_stage,user["id"],optional_text(data,"note",1000),stamp),
+                )
+                if target_stage=="paid":
                     self.db.execute("UPDATE advance_installments SET status='paid',payroll_item_id=(SELECT pi.id FROM payroll_items pi WHERE pi.run_id=? AND pi.employee_id=(SELECT a.employee_id FROM advances a WHERE a.id=advance_installments.advance_id)) WHERE due_month=? AND status='scheduled' AND advance_id IN (SELECT id FROM advances WHERE status='approved')",(run_id,row["payroll_month"]))
                     self.db.execute("UPDATE advances SET status='completed',updated_at=? WHERE status='approved' AND NOT EXISTS (SELECT 1 FROM advance_installments ai WHERE ai.advance_id=advances.id AND ai.status='scheduled')",(stamp,))
-                audit(self.db,user["id"],f"payroll.{target}","payroll_run",run_id)
+                audit(self.db,user["id"],f"payroll.{target_stage}","payroll_run",run_id,{"from_stage":current_stage,"to_stage":target_stage})
             self.send_json(200,{"run":self.payroll_payload(run_id)})
 
         def api_payroll_csv(self, run_id: int) -> None:
             user=self.require_permission("salary.view")
             if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"تصدير المسيرات متاح للإدارة المخولة فقط.","forbidden")
             run=self.payroll_payload(run_id)
-            rows=[["الشهر",run["payroll_month"],"الحالة",run["status"]],["الرقم الوظيفي","الموظف","المسمى","الدرجة","الأساسي","البدلات","العمل الإضافي","بيع الإجازات","البونص","الراتب الإجمالي","الاستقطاعات","قسط السلفة","أسباب التعديلات","الصافي"]]
-            rows += [[i["employee_no"],i["employee_name"],i["job_title"],i["job_grade"],f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["overtime"]:.2f}',f'{i["leave_sale"]:.2f}',f'{i["bonus"]:.2f}',f'{i["gross"]:.2f}',f'{i["deductions"]:.2f}',f'{i["advance"]:.2f}'," | ".join(f"{a['kind']}: {a['reason']} ({a['amount']:.2f})" for a in i.get("adjustments",[])),f'{i["net"]:.2f}'] for i in run["items"]]
+            rows=[
+                ["الشهر / Month",run["payroll_month"],"الحالة / Status",run["workflow_stage"]],
+                ["الفترة / Period",run["period_start"],run["period_end"],"تاريخ الدفع / Payment date",run["payment_date"]],
+                ["الرقم الوظيفي / Employee no.","الموظف / Employee","القسم / Department","المسمى / Job title","الدرجة / Grade",
+                 "أيام الاستحقاق / Entitlement days","الأساسي / Basic","البدلات / Allowances","العمل الإضافي / Overtime",
+                 "بيع الإجازات / Leave cash-out","البونص / Bonus","العمولات / Commission","أثر رجعي / Retroactive",
+                 "إجمالي الاستحقاقات / Gross earnings","تجزئة الراتب / Proration","غياب / Absence","إجازة بدون راتب / Unpaid leave",
+                 "تأمين / Insurance","ضريبة / Tax","استقطاعات أخرى / Other deductions","قسط السلفة / Advance instalment",
+                 "تعويض مصروفات / Reimbursements","الصافي / Net pay","تكلفة صاحب العمل / Employer cost","أسباب التعديلات / Adjustment reasons"],
+            ]
+            rows += [[
+                i["employee_no"],i["employee_name"],i["department_name"],i["job_title"],i["job_grade"],f'{float(i["entitlement_days"]):.2f}',
+                f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["overtime"]:.2f}',f'{i["leave_sale"]:.2f}',f'{i["bonus"]:.2f}',
+                f'{i["commission"]:.2f}',f'{i["retroactive"]:.2f}',f'{i["gross"]:.2f}',f'{i["proration_deduction"]:.2f}',
+                f'{i["absence_deduction"]:.2f}',f'{i["unpaid_leave_deduction"]:.2f}',f'{i["insurance"]:.2f}',f'{i["tax"]:.2f}',
+                f'{max(0,i["deductions"]-i["proration_deduction"]-i["absence_deduction"]-i["unpaid_leave_deduction"]-i["insurance"]-i["tax"]):.2f}',
+                f'{i["advance"]:.2f}',f'{i["reimbursement"]:.2f}',f'{i["net"]:.2f}',f'{i["employer_cost"]:.2f}',
+                " | ".join(f"{a['kind']}: {a['reason']} ({a['amount']:.2f})" for a in i.get("adjustments",[])),
+            ] for i in run["items"]]
             self.send_csv(f'payroll-{run["payroll_month"]}.csv',rows)
 
         def api_my_payslips(self) -> None:

@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261008-production-r9">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261030-production-r10">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -84,6 +84,7 @@
         <span class="nav-label">الرئيسية</span>
       <a href="#dashboard" data-page="dashboard" data-permission="dashboard.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg></i><span>لوحة القيادة</span></a>
       <a href="#my-space" data-page="my-space"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-home"></use></svg></i><span>مساحتي</span></a>
+      <a href="#purchases" data-page="purchases"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-documents"></use></svg></i><span>المشتريات</span></a>
       <span class="nav-label">التواصل السريع</span>
       <a href="#notifications" data-page="notifications"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-bell"></use></svg></i><span>الإشعارات الداخلية</span><em id="navUnread" hidden>0</em></a>
       <a href="#communications" data-page="communications" data-permission="communications.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-mail"></use></svg></i><span>البريد المؤسسي</span></a>
@@ -101,7 +102,6 @@
         <a href="#payroll" data-page="payroll"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg></i><span>الرواتب والقسائم</span></a>
         <a href="#certificate-verification" data-page="certificate-verification" data-permission="salary_certificate.verify"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-certificate"></use></svg></i><span>التحقق من الشهادات</span></a>
         <a href="#advances" data-page="advances"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-loan"></use></svg></i><span>السلف والأقساط</span></a>
-        <a href="#purchases" data-page="purchases"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-documents"></use></svg></i><span>المشتريات</span></a>
         <span class="nav-label">الأداء والتطوير</span>
         <a href="#evaluations" data-page="evaluations"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-target"></use></svg></i><span>التقييم السنوي</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="recruitment" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-recruitment"></use></svg></i><span>التوظيف</span></a>
@@ -145,7 +145,7 @@
       </section>
 
       <section class="page active" id="my-space">
-        <div class="page-head"><div><span class="eyebrow">الخدمة الذاتية</span><h1 id="welcomeTitle">مرحباً</h1><p>كل ما يخص يومك الوظيفي في مساحة آمنة واحدة.</p></div><button class="primary" data-punch="in">تسجيل دخول</button></div>
+        <div class="page-head"><div><span class="eyebrow">الخدمة الذاتية</span><h1 id="welcomeTitle">مرحباً</h1><p>كل ما يخص يومك الوظيفي في مساحة آمنة واحدة.</p></div><div class="button-row"><button class="secondary" id="myPurchaseShortcut" type="button" data-goto="purchases"><svg class="ui-icon" aria-hidden="true"><use href="#icon-documents"></use></svg><span>طلب مشتريات</span></button><button class="primary" data-punch="in">تسجيل دخول</button></div></div>
         <div class="metric-grid" id="myMetrics"></div>
         <div class="content-grid wide-side">
           <article class="card"><div class="section-head"><div><h2>بطاقتي الوظيفية</h2><p>تستخدم هوية المؤسسة وبيانات ملفك المعتمدة.</p></div><button class="secondary" id="myCardButton">عرض وطباعة البطاقة</button></div><div id="myCardSummary" class="employee-summary loading-block">جارٍ تحميل الملف…</div></article>
@@ -157,7 +157,7 @@
 
       <section class="page" id="employees">
         <div class="page-head"><div><span class="eyebrow">الأفراد</span><h1 id="employeesPageTitle">الموظفون والملفات</h1><p id="employeesPageDescription">ملف موحد، فرع ومناوبة وبطاقة عمل قابلة للطباعة.</p></div><div class="button-row"><button class="secondary" id="openEmployeeReport" type="button" data-permission="employee_report.view"><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg><span>تقرير موظف شامل</span></button><button class="primary" id="addEmployee" data-permission="employee.manage">+ إضافة موظف</button></div></div>
-        <article class="card"><div class="toolbar"><input id="employeeSearch" type="search" placeholder="ابحث بالاسم أو الرقم الوظيفي"><select id="employeeStatusFilter" aria-label="حالة الموظف"><option value="active">الموظفون الحاليون</option><option value="archive">أرشيف الموظفين</option></select><select id="employeeBranchFilter"><option value="">كل الفروع</option></select><button class="secondary" id="refreshEmployees">تحديث</button></div><div class="archive-guidance" id="employeeArchiveGuidance" hidden><b>أرشيف الموظفين</b><span>السجلات محفوظة ولا تُحذف. افتح الملف لمراجعة سبب وتاريخ انتهاء الخدمة أو بدء إعادة التوظيف.</span></div><div class="table-wrap"><table><thead id="employeesHead"><tr><th>الموظف</th><th>الرقم</th><th>المسمى</th><th>القسم</th><th>الفرع</th><th>المناوبة</th><th></th></tr></thead><tbody id="employeesRows"></tbody></table></div></article>
+        <article class="card"><div class="toolbar"><input id="employeeSearch" type="search" placeholder="ابحث بالاسم أو الرقم الوظيفي"><select id="employeeStatusFilter" aria-label="حالة الموظف"><option value="active">الموظفون الحاليون</option><option value="archive">أرشيف الموظفين</option></select><select id="employeeBranchFilter"><option value="">كل الفروع</option></select><button class="secondary" id="refreshEmployees">تحديث</button></div><div class="employee-compliance-legend"><span aria-hidden="true"></span><div><b>ماذا يعني الاسم الأحمر؟</b><small>يعني أن عقد العمل أو إحدى الوثائق الرسمية للموظف منتهية. يظهر السبب والتاريخ أسفل الاسم، ويمكن فتح الملف لتحديث الوثيقة.</small></div></div><div class="archive-guidance" id="employeeArchiveGuidance" hidden><b>أرشيف الموظفين</b><span>السجلات محفوظة ولا تُحذف. افتح الملف لمراجعة سبب وتاريخ انتهاء الخدمة أو بدء إعادة التوظيف.</span></div><div class="table-wrap"><table><thead id="employeesHead"><tr><th>الموظف</th><th>الرقم</th><th>المسمى</th><th>القسم</th><th>الفرع</th><th>المناوبة</th><th></th></tr></thead><tbody id="employeesRows"></tbody></table></div></article>
       </section>
 
       <section class="page employee-report-page" id="employee-report">
@@ -301,7 +301,9 @@
 
       <section class="page" id="payroll">
         <div class="page-head"><div><span class="eyebrow">التعويضات</span><h1 id="payrollTitle">مسيرات الرواتب والقسائم</h1><p>مسير محفوظ واعتماد متسلسل وقسيمة خاصة بكل موظف وتصدير CSV فعلي.</p></div><button class="primary" id="createPayroll" data-permission="payroll.manage">+ إنشاء مسير شهر</button></div>
-        <div class="metric-grid compact" id="payrollMetrics"></div><article class="card"><div id="payrollList" class="stack loading-block">جارٍ تحميل بيانات الرواتب…</div></article>
+        <div class="metric-grid compact" id="payrollMetrics"></div>
+        <article class="card payroll-method-card" data-permission="salary.view"><div class="section-head"><div><span class="eyebrow">منهجية الحساب</span><h2>كيف يُحتسب مسير الرواتب؟</h2><p>يحفظ كل مسير نسخة ثابتة من الفترة والسياسات والمدخلات والمعادلات حتى تبقى الشهور السابقة قابلة للمراجعة بعد تغير الرواتب أو الإعدادات.</p></div><span class="status">حساب مالي دقيق بالسنت</span></div><div class="payroll-formula-flow"><span><b>١</b>الأساسي والبدلات</span><i>+</i><span><b>٢</b>الإضافي والعمولات والبونص ومبيعات الإجازات</span><i>−</i><span><b>٣</b>التجزئة والغياب والتأخير والتأمين والضريبة والسلف</span><i>+</i><span><b>٤</b>تعويض المصروفات</span><i>=</i><span class="total"><b>٥</b>صافي الراتب</span></div><p class="payroll-method-note">التأمين والضريبة ومساهمة صاحب العمل لا تفترض نسباً قانونية ثابتة؛ تُدخل كنسب مؤرخة عند إنشاء المسير. المسير يُقفل عند إرساله للاعتماد ولا يتغير تلقائياً لاحقاً.</p></article>
+        <article class="card"><div id="payrollList" class="stack loading-block">جارٍ تحميل بيانات الرواتب…</div></article>
       </section>
 
       <section class="page" id="certificate-verification">
@@ -416,7 +418,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261008-production-r9"></script>
-  <script src="app.js?v=5.8.0&build=20261008-production-r9"></script>
+  <script src="i18n.js?v=5.8.0&build=20261030-production-r10"></script>
+  <script src="app.js?v=5.8.0&build=20261030-production-r10"></script>
 </body>
 </html>

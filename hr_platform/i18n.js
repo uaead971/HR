@@ -212,7 +212,7 @@
   });
 
   Object.assign(english, {
-    'المشتريات':'Purchases','الخدمة الذاتية والمالية':'Self-service & Finance','طلبات المشتريات':'Purchase Requests',
+    'المشتريات':'Purchases','طلب مشتريات':'Purchase request','الخدمة الذاتية والمالية':'Self-service & Finance','طلبات المشتريات':'Purchase Requests',
     'طلب موثق بفاتورة يمر على المسؤول المباشر ثم الموارد البشرية ثم مدير الحسابات للاعتماد النهائي.':'An invoice-backed request routed through the line manager, HR, and the accounts manager for final approval.',
     '+ طلب مشتريات':'+ Purchase request','سجل الطلبات ومسار الاعتماد':'Request Register & Approval Flow',
     'تظهر لك طلباتك والطلبات الواقعة في مرحلة اعتمادك الحالية.':'Shows your own requests and requests currently awaiting your approval.',
@@ -242,6 +242,82 @@
     'الراتب التعاقدي':'Contractual salary','سلفة شهرية:':'Monthly advance:','قسيمة راتب خاصة':'Private payslip'
   });
 
+  Object.assign(english, {
+    'ماذا يعني الاسم الأحمر؟':'Why is the employee name red?',
+    'يعني أن عقد العمل أو إحدى الوثائق الرسمية للموظف منتهية. يظهر السبب والتاريخ أسفل الاسم، ويمكن فتح الملف لتحديث الوثيقة.':'It means the employment contract or an official employee document has expired. The reason and date appear below the name; open the profile to update the document.',
+    'وثيقة الموظف':'Employee document','عقد العمل':'Employment contract','جواز السفر':'Passport','الهوية الإماراتية':'Emirates ID','منتهي':'Expired',
+    'منهجية الحساب':'Calculation methodology','كيف يُحتسب مسير الرواتب؟':'How is payroll calculated?',
+    'يحفظ كل مسير نسخة ثابتة من الفترة والسياسات والمدخلات والمعادلات حتى تبقى الشهور السابقة قابلة للمراجعة بعد تغير الرواتب أو الإعدادات.':'Each payroll run stores an immutable snapshot of its period, policies, inputs, and formulas so prior months remain auditable after salaries or settings change.',
+    'حساب مالي دقيق بالسنت':'Cent-accurate calculation','الأساسي والبدلات':'Basic salary and allowances',
+    'الإضافي والعمولات والبونص ومبيعات الإجازات':'Overtime, commission, bonus, and leave cash-out',
+    'التجزئة والغياب والتأخير والتأمين والضريبة والسلف':'Proration, absence, lateness, insurance, tax, and advances',
+    'تعويض المصروفات':'Expense reimbursements','صافي الراتب':'Net pay',
+    'التأمين والضريبة ومساهمة صاحب العمل لا تفترض نسباً قانونية ثابتة؛ تُدخل كنسب مؤرخة عند إنشاء المسير. المسير يُقفل عند إرساله للاعتماد ولا يتغير تلقائياً لاحقاً.':'Insurance, tax, and employer-contribution rates are never assumed. They are entered as effective rates when the run is created. The run is locked when submitted for approval and is not changed automatically later.',
+    'جمع البيانات':'Collecting inputs','تم الاحتساب':'Calculated','يحتاج إلى مراجعة':'Needs review','جاهز للاعتماد':'Ready for approval',
+    'مرحّل للمحاسبة':'Posted to accounting','ملف البنك منشأ':'Bank file created','مسير':'Payroll run','الفترة':'Period',
+    'الفترة وسياسة الحساب':'Period and calculation policy','شهر المسير':'Payroll month','بداية الفترة':'Period start','نهاية الفترة':'Period end',
+    'إغلاق المدخلات':'Input cutoff','تاريخ الدفع':'Payment date','معامل أيام الشهر':'Month-day divisor','٣٠ يوماً ثابتة':'Fixed 30 days',
+    'أيام الشهر الفعلية':'Actual calendar days','أيام العمل حسب المناوبة':'Scheduled working days','ساعات العمل الشهرية':'Monthly working hours',
+    'نطاق التجزئة':'Proration scope','الأساسي والبدلات الثابتة':'Basic salary and fixed allowances','الراتب الأساسي فقط':'Basic salary only',
+    'احتساب خصم الغياب من الأيام المجدولة بلا حضور أو إجازة معتمدة':'Deduct absence for scheduled days without attendance or approved leave',
+    'اترك خصم الغياب غير مفعل إلى أن تكتمل مراجعة سجل الحضور للشهر.':'Leave absence deductions disabled until the month’s attendance register has been reviewed.',
+    'النسب المؤرخة لهذا المسير':'Effective rates for this run','تأمين الموظف %':'Employee insurance %','ضريبة الموظف %':'Employee tax %',
+    'مساهمة صاحب العمل %':'Employer contribution %','لا يضع النظام نسباً قانونية تلقائياً؛ القيم الافتراضية صفر وتحفظ داخل نسخة سياسة هذا الشهر.':'The system does not assume statutory rates. Defaults are zero and the selected values are stored in this month’s policy snapshot.',
+    'مدخلات جماعية اختيارية':'Optional bulk inputs','بدل جماعي':'Bulk allowance','بونص جماعي':'Bulk bonus','خصم جماعي':'Bulk deduction',
+    'سيُجلب كل موظف كان على رأس العمل في أي جزء من الفترة، وتُحفظ معادلات التجزئة والحضور والإضافي ومبيعات الإجازات والسلف داخل المسير.':'Every employee active during any part of the period is included. Proration, attendance, overtime, leave cash-out, and advance formulas are stored in the run.',
+    'احتساب وإنشاء المسير':'Calculate and create payroll','جارٍ احتساب المسير…':'Calculating payroll…',
+    'تم احتساب مسير الرواتب وحفظ السياسات والمعادلات والمدخلات':'Payroll was calculated and its policies, formulas, and inputs were saved.',
+    'معامل الأيام':'Day divisor','ساعة شهرياً':'hours per month','العمولات والأثر الرجعي والبونص':'Commission, retroactive pay, and bonus',
+    'تكلفة صاحب العمل':'Employer cost','إضافة استحقاق أو خصم أو تعويض فردي أو جماعي':'Add individual or bulk earning, deduction, or reimbursement',
+    'القسم والمسمى':'Department and job title','أيام الاستحقاق':'Entitlement days','الإضافي ومبيعات الإجازات':'Overtime and leave cash-out',
+    'الاستحقاقات المتغيرة':'Variable earnings','تفصيل الاستقطاعات':'Deduction breakdown','الصافي والتكلفة':'Net pay and employer cost',
+    'عمل':'Work','حضور':'Attendance','غياب':'Absence','بدون راتب':'Unpaid leave','أساسي':'Basic','بدلات':'Allowances','إضافي':'Overtime',
+    'بيع إجازات':'Leave cash-out','بونص':'Bonus','عمولة':'Commission','أثر رجعي':'Retroactive pay','تجزئة':'Proration','إجازة بدون راتب':'Unpaid leave',
+    'تأمين':'Insurance','ضريبة':'Tax','سجل حالات المسير':'Payroll status history','إزالة':'Remove',
+    'إضافة بند إلى مسير':'Add a payroll item','موظف واحد':'One employee','جميع موظفي المسير':'All payroll employees','نوع البند':'Item type',
+    'خصم آخر':'Other deduction','خصم مخالفة':'Violation deduction','المبلغ لكل موظف':'Amount per employee',
+    'سبب واضح يظهر في القسيمة والتصدير وسجل التدقيق':'A clear reason shown on the payslip, export, and audit log',
+    'حفظ البند وإعادة الاحتساب':'Save item and recalculate','إجمالي الاستقطاعات والسلف':'Total deductions and advances',
+    'الراتب الأساسي':'Basic salary','مساهمة صاحب العمل':'Employer contribution','الرصيد المتبقي':'Remaining balance',
+    'تفاصيل البنود':'Item details','يخصم هذا القسط حتى انتهاء جدول السداد.':'This instalment is deducted until the repayment schedule ends.',
+    'القسط التالي':'Next instalment','لا يوجد قسط سلفة مستحق لهذا الشهر؛ صافي الراتب هو الإجمالي بعد الاستقطاعات النظامية.':'No advance instalment is due this month; net pay reflects the applicable deductions.',
+    'العمل الإضافي المعتمد':'Approved overtime','العمولات':'Commission','الأثر الرجعي':'Retroactive pay','تجزئة الراتب':'Salary proration',
+    'خصم الغياب':'Absence deduction','خصم الإجازة بدون راتب':'Unpaid-leave deduction','التأمين والضريبة':'Insurance and tax',
+    'شرح الحساب':'Calculation explanation','صافي الراتب = إجمالي الاستحقاقات − الاستقطاعات − قسط السلفة + تعويض المصروفات.':'Net pay = gross earnings − deductions − advance instalment + expense reimbursements.',
+    'طباعة القسيمة':'Print payslip'
+  });
+
+  Object.assign(english, {
+    'العربية':'Arabic','الموظفون الحاليون':'Current employees','أرشيف الموظفين':'Employee archive',
+    'السجلات محفوظة ولا تُحذف. افتح الملف لمراجعة سبب وتاريخ انتهاء الخدمة أو بدء إعادة التوظيف.':'Records are retained and never deleted. Open a profile to review the termination date and reason or begin rehiring.',
+    'أنواع الإجازات والترخيص':'Leave and permission types','قائمة الأنواع المهيأة في النظام، بما فيها الترخيص المدفوع خلال ساعات العمل بحد أقصى ساعتين.':'Configured leave types, including paid permission during working hours for up to two hours.',
+    'سياسة المؤسسة':'Organization policy','إدارة الرسائل المرسلة':'Manage sent messages','تحديث السجل':'Refresh register','الرسالة':'Message','الجمهور':'Audience',
+    'تحديث من قاعدة البيانات':'Refresh from database','المصدر: قاعدة بيانات الموظفين والأقسام':'Source: employee and department database',
+    'يفتحها مسؤول الموارد البشرية ويعتمدها أو يرفضها مع حفظ القرار.':'HR opens, approves, or rejects each request, and the decision is retained.',
+    'جارٍ تحميل الطلبات…':'Loading requests…','سجل تدقيق محفوظ ولا يتضمن خيار حذف لأي شهادة.':'A retained audit log with no option to delete certificates.',
+    'الحساب النظامي':'Statutory calculation','حاسبة مكافأة نهاية الخدمة':'End-of-service benefit calculator',
+    'الحساب على آخر راتب أساسي فقط، مع استبعاد الإجازات بدون راتب. الحد الأعلى النظامي للمكافأة هو أجر سنتين ولا يجوز أن تتجاوزه.':'Calculated from the latest basic salary only, excluding unpaid leave. The statutory cap is two years of wages and cannot be exceeded.',
+    'تاريخ نهاية الخدمة':'Service end date','احتساب المكافأة':'Calculate benefit','اختر الموظف ثم اضغط احتساب المكافأة.':'Select an employee, then calculate the benefit.',
+    'جارٍ تحميل مؤشرات المكتبة…':'Loading library indicators…','أنشئ مكتبات حسب الحاجة أو عطّل مكتبة مع بقاء مستنداتها محفوظة.':'Create libraries as needed or disable a library while retaining its documents.',
+    'جارٍ تحميل المكتبات…':'Loading libraries…','المكتبة':'Library','تظهر شارة المصدر لتمييز وثيقة المكتبة عن الوثيقة المحفوظة في ملف الموظف.':'A source badge distinguishes a library document from one stored in an employee profile.',
+    'المستند':'Document','جارٍ تحميل مستندات المكتبة…':'Loading library documents…','الخصومات':'Deductions',
+    'إنشاء حسابات الموظفين':'Create employee accounts','ملفات الموظفين التي أُنشئت بلا حساب تظهر هنا. أنشئ الحساب لاحقاً من البريد المسجل وكلمة مرور تختارها.':'Employee profiles created without an account appear here. Create an account later using the registered email and a password you choose.',
+    'جارٍ تحميل الملفات بلا حساب…':'Loading profiles without accounts…','يُسند إليه الإشراف النهائي على رؤساء الأقسام والموظفين غير المرتبطين بمسؤول مباشر.':'Provides final oversight of department heads and employees without a line manager.',
+    'سياسة التأخير بدون إذن':'Unexcused lateness policy','التنبيه والخصم المباشر':'Warning and automatic deduction',
+    'يُحسب التأخير الشهري بعد طرح الاستئذانات المعتمدة والظروف الجوية والطوارئ.':'Monthly lateness is calculated after approved permissions, weather events, and emergencies are excluded.',
+    'تفعيل الخصم المباشر':'Enable automatic deduction','إرسال التنبيه بعد (دقيقة)':'Send warning after (minutes)','السماح الشهري قبل الخصم (دقيقة)':'Monthly allowance before deduction (minutes)',
+    'وحدة التأخير الإضافية (دقيقة)':'Additional lateness unit (minutes)','تُحسب كل وحدة إضافية بدأت بعد حد السماح.':'Each additional unit started after the allowance is counted.',
+    'أيام الأجر المخصومة لكل وحدة':'Wage days deducted per unit','قيمة اليوم = الأجر التعاقدي الشهري ÷ ٣٠.':'Daily value = monthly contractual wage ÷ 30.',
+    'مثال: عند سماح ٦٠ دقيقة ووحدة ٦٠ دقيقة، أي تجاوز يبدأ وحدة خصم؛ وتظهر تفاصيل الخصم وسببه في مسير الراتب.':'Example: with a 60-minute allowance and 60-minute unit, any excess starts a deduction unit. The amount and reason appear in payroll.',
+    'حفظ سياسة التأخير':'Save lateness policy','الدرجات الوظيفية وسلم الرواتب':'Job grades and salary scale',
+    'كل درجة تحتوي على الراتب الأساسي الشهري للمستويات A وB وC وD. عند اختيار الدرجة والحرف في ملف الموظف يُحتسب الراتب الأساسي من هذا السلم.':'Each grade contains the monthly basic salary for levels A, B, C, and D. Selecting a grade and level in the employee profile determines the basic salary from this scale.',
+    'مرجع قابل للربط بالقسم والموظف، مع إمكانية التعديل أو الإيقاف أو الحذف عند عدم وجود ارتباطات.':'A reference that can be linked to departments and employees, and edited, disabled, or deleted when unused.',
+    'أنواع الإجازات وسياسة الرصيد':'Leave types and balance policy','+ نوع إجازة':'+ Leave type','جارٍ تحميل أنواع الإجازات…':'Loading leave types…',
+    'العطل الرسمية المستثناة من الرصيد':'Public holidays excluded from leave balance','أضف التواريخ المعتمدة سنوياً؛ لا تُحتسب هذه الأيام ضمن طلب الإجازة السنوية.':'Add approved annual dates; these days are not counted against annual leave requests.',
+    'اسم العطلة':'Holiday name','إضافة عطلة':'Add holiday','جارٍ تحميل تقويم العطل…':'Loading holiday calendar…',
+    'حالة الموظف':'Employee status','الاسم أو الرقم الوظيفي':'Name or employee number','تقويم الحضور الشهري':'Monthly attendance calendar','مثال: اليوم الوطني':'Example: National Day'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();
@@ -257,7 +333,7 @@
     return result;
   }
   function shouldPreserve(element) {
-    return Boolean(element && element.closest('[data-i18n-preserve],.org-name,.org-legal-name,#userName,#userRole,.event small,.distribution-row,#employeesRows td:not(:last-child),option:not([value=""]):not([data-i18n-option]),[dir="ltr"]:not(html),.employee-cell,.work-card-person,.organization-person,.employee-card-photo'));
+    return Boolean(element && element.closest('[data-i18n-preserve],.org-name,.org-legal-name,#userName,#userRole,.event small,.distribution-row,[dir="ltr"]:not(html),.employee-cell b,.employee-cell small,.work-card-person,.organization-person,.employee-card-photo'));
   }
   function translateTextNode(node) {
     const parent = node.parentElement;
