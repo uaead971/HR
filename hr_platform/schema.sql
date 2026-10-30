@@ -895,7 +895,7 @@ CREATE INDEX IF NOT EXISTS idx_employee_custody_photos_stage ON employee_custody
 
 CREATE TABLE IF NOT EXISTS payroll_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  payroll_month TEXT NOT NULL UNIQUE,
+  payroll_month TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','review','approved','paid')),
   workflow_stage TEXT NOT NULL DEFAULT 'calculated' CHECK (workflow_stage IN ('draft','collecting','calculated','needs_review','ready_approval','approved','posted','bank_file_created','paid','closed')),
   period_start TEXT NOT NULL DEFAULT '',
@@ -925,11 +925,17 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
   cancelled_at TEXT,
   cancelled_by INTEGER,
   cancel_reason TEXT NOT NULL DEFAULT '',
+  coverage_snapshot_json TEXT NOT NULL DEFAULT '{}',
   FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
   FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (paid_by) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (cancelled_by) REFERENCES users(id) ON DELETE SET NULL
 );
+
+-- A cancelled run is an immutable audit record and must not prevent a
+-- replacement for the same month.  At most one *active* run can exist.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_runs_active_month
+  ON payroll_runs(payroll_month) WHERE cancelled_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS payroll_items (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1003,6 +1009,8 @@ CREATE TABLE IF NOT EXISTS payroll_run_history (
   to_stage TEXT NOT NULL,
   actor_user_id INTEGER,
   note TEXT NOT NULL DEFAULT '',
+  note_code TEXT NOT NULL DEFAULT '',
+  note_data_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   FOREIGN KEY (run_id) REFERENCES payroll_runs(id) ON DELETE CASCADE,
   FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL

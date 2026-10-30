@@ -346,6 +346,52 @@
     'صيغة الشهر المطلوبة YYYY-MM، مثال 2026-10.':'Use YYYY-MM, for example 2026-10.'
   });
 
+  Object.assign(english, {
+    'أرشفة هذا المستند؟ سيبقى محفوظاً ويمكن العثور عليه من فلتر الأرشيف.':'Archive this document? It will remain retained and searchable through the archive filter.',
+    'أشهر':'months','أيام الراحة الخاصة بالموظف':'Employee-specific rest days','إجمالي الملفات':'Total employee files',
+    'إلغاء مسير الرواتب':'Cancel payroll run','احتفظ النظام بقيم الإعداد أدناه. افتح المسير الحالي أو اتخذ إجراءً إدارياً ثم أعد المحاولة.':'Your setup values are preserved below. Open the active run or take an administrative action, then try again.',
+    'اكتملت مزامنة الموظفين والسلف: أضيف {count} موظف.':'Employee and advance sync completed: {count} employee(s) added.',
+    'الأساسي':'Basic','الاستلام':'Received','البونص':'Bonus','التسليم':'Returned','الحقل':'Field','الخام':'Raw',
+    'السبب مطلوب ويُحفظ في سجل التدقيق.':'A reason is required and will be retained in the audit trail.',
+    'السلفة':'Advance','العهدة':'Custody item','المدير العام — أعلى الهيكل':'General Manager — top of the hierarchy',
+    'المستبعدون':'Excluded','المشمولون':'Included','الموظفون':'Employees','بانتظار المزامنة أو المراجعة':'Pending sync or review',
+    'تأخير معوّض باستئذان':'Lateness covered by approved permission','تاريخ التسليم':'Return date',
+    'تظهر فقط الحسابات النشطة المخولة باعتماد الإجازات أو العمل الإضافي.':'Only active accounts authorized to approve leave or overtime are shown.',
+    'تعارض شهر المسير':'Payroll month conflict','تعذر تنفيذ العملية.':'The action could not be completed.','تعذر قراءة الصورة.':'The image could not be read.',
+    'تعيين حالي يحتاج تحديث':'Current assignment needs updating','تغطية الموظفين':'Employee coverage',
+    'تغيرت أهلية بعض الصفوف بعد الإنشاء؛ احتفظ النظام بها للمراجعة ولم يحذف أي تعديل يدوي.':'Some rows changed eligibility after creation. They were retained for review and no manual edits were removed.',
+    'تم تعويض':'Covered','تُراجع كل ملفات الموظفين مقابل مدد الخدمة الفعلية في فترة المسير.':'Every employee file is reconciled against actual service periods within this payroll period.',
+    'جارٍ البحث في المكتبة وملفات الموظفين…':'Searching the library and employee files…','حالة الاستلام':'Condition on receipt','حالة التسليم':'Condition on return',
+    'حضور · التأخير معوّض':'Present · lateness covered','حضور · ظرف طارئ معتمد':'Present · approved emergency',
+    'حفظ اللغات':'Save languages','رمز الخطأ':'Error code','سبب الإجراء':'Reason for action','سبب البونص':'Bonus reason',
+    'سحب الاعتماد وإعادة المسير للمسودة':'Revoke approval and return to draft','عرض الموظفين المستبعدين وأسباب الاستبعاد':'Show excluded employees and reasons',
+    'عند الاختيار تتقدم هذه الأيام على أيام راحة المناوبة لهذا الموظف فقط.':'When selected, these days override the shift rest days for this employee only.',
+    'غير المعوّض':'Not covered','فتح المسير':'Open payroll','فتح المسير الحالي':'Open active payroll',
+    'لا توجد مسيرات. أنشئ أول مسير شهري.':'No payroll runs yet. Create the first monthly run.','لا توجد ملفات مستبعدة من هذه الفترة.':'No employee files are excluded from this period.',
+    'مثال: تم التسليم بحالة جيدة':'Example: returned in good condition','مثال: عقد الموظف محمد موثق من العمل والعمال':'Example: Mohammed’s employment contract is documented by the labour authority',
+    'مزامنة الموظفين والسلف':'Sync eligible employees and advances','مسؤول الاعتماد (الموارد البشرية)':'Final approver (HR)','مستند':'Document',
+    'مطابقة الأهلية':'Eligibility reconciliation','من {from} حتى {to}':'From {from} to {to}','منصب المؤسسة':'Organization position',
+    'موظف / مسؤول قسم حسب التعيين':'Employee / department manager according to assignment','نتيجة':'Result',
+    'هذا منصب هيكلي فقط؛ صلاحيات الدخول تبقى ضمن التصنيفات الأربعة.':'This is an organizational position only; sign-in permissions remain within the four account roles.',
+    'يظهر للموظف تاريخ بداية العقد ونهايته ومدته فقط. محتوى العقد محفوظ للموارد البشرية أو من يملك صلاحية مستندات الموظفين.':'Employees see only the contract start date, end date, and duration. Contract content remains restricted to HR and authorized document managers.',
+    'يمكن البحث لاحقاً باسم الموظف أو رقمه الوظيفي.':'You can search later by employee name or number.','يوجد مسير نشط لهذا الشهر.':'An active payroll run already exists for this month.','يوماً':'days',
+    'سيُفتح المسير للتعديل مع الاحتفاظ بسجل الاعتماد السابق.':'The run will reopen for editing while its prior approval history is retained.',
+    'سيبقى المسير الملغى محفوظاً للتدقيق ويمكن إنشاء مسير بديل للشهر نفسه.':'The cancelled run will remain available for audit, and a replacement can be created for the same month.',
+    'تأكيد سحب الاعتماد':'Confirm approval revocation','تأكيد إلغاء المسير':'Confirm payroll cancellation',
+    'تم إلغاء مسير الرواتب مع الاحتفاظ بسجل التدقيق':'Payroll run cancelled; its audit history was retained.',
+    'تم سحب الاعتماد وإعادة المسير للمراجعة':'Approval revoked and payroll returned for review.',
+    'جارٍ مزامنة الموظفين والسلف…':'Syncing eligible employees and advances…','التالي':'Next',
+    'انتهت الجلسة. سجل الدخول مجدداً.':'Your session has expired. Sign in again.','يجب تغيير كلمة المرور المؤقتة أولاً.':'You must change the temporary password first.',
+    'لا يمكن تعديل المسير بعد قفله.':'This payroll run is locked and cannot be edited.','عُدّل المسير من مستخدم آخر. حدّث الصفحة ثم أعد المحاولة.':'This payroll run was changed by another user. Refresh and try again.',
+    'توجد أقساط سلفة مستحقة غير مرتبطة. استخدم مزامنة الموظفين والسلف أولاً.':'Due advance instalments are not linked. Sync eligible employees and advances before continuing.',
+    'تتجاوز الاستقطاعات إجمالي الراتب.':'Deductions exceed gross pay.','لا يمكن لمن أنشأ المسير اعتماده.':'The payroll preparer cannot approve the same run.',
+    'لا يمكن لمعتمد المسير تنفيذ الصرف.':'The payroll approver cannot execute payment for the same run.','ليست لديك صلاحية تنفيذ هذا الإجراء.':'You do not have permission to perform this action.',
+    'تحقق من الحقول المطلوبة والقيم المدخلة.':'Check the required fields and entered values.','لا يمكن تنفيذ الإجراء في الحالة الحالية.':'This action is not available in the current status.',
+    'يتجاوز مبلغ السلفة حد السياسة.':'The advance amount exceeds the policy limit.','يوجد طلب سلفة نشط بالفعل.':'An active advance request already exists.',
+    'قسط السلفة يتجاوز إجمالي الراتب؛ زد مدة السداد.':'The advance instalment exceeds gross salary; increase the repayment term.','لا يمكن حذف بند محسوب آلياً.':'A system-calculated item cannot be deleted.',
+    'حدث خطأ غير متوقع.':'An unexpected error occurred.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

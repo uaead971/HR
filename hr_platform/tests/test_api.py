@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r14")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r15")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -4438,9 +4438,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("syncSessionPermissions", app)
         self.assertIn("if(!state.user)return;setAttendanceDefaultRange()", app)
         self.assertIn("#userName,#userRole", i18n)
-        self.assertIn("$('#userRole').textContent=tr(roleLabels[user.role]||user.role)", app)
+        self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r14", index)
+        self.assertIn("build=20261030-production-r15", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4938,7 +4938,301 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261030-production-r14", index)
+        self.assertIn("build=20261030-production-r15", index)
+
+    def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        month = "2095-05"
+        stamp = hr_server.now_iso()
+
+        future = admin.request("POST", "/api/employees", {
+            "employee_no": "PAY-FUTURE-2095", "full_name": "Future Payroll Employee",
+            "email": "pay-future-2095@demo.ae", "job_title": "Tester", "salary": 4000,
+            "hire_date": "2095-06-01", "create_user": False,
+        }, expected=201)["employee"]
+        ended = admin.request("POST", "/api/employees", {
+            "employee_no": "PAY-ENDED-2095", "full_name": "Ended Payroll Employee",
+            "email": "pay-ended-2095@demo.ae", "job_title": "Tester", "salary": 4000,
+            "hire_date": "2094-01-01", "create_user": False,
+        }, expected=201)["employee"]
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute(
+                "UPDATE employees SET active=0,termination_date='2095-04-30',updated_at=? WHERE id=?",
+                (stamp, ended["id"]),
+            )
+            employee_id = int(db.execute(
+                """SELECT id FROM employees WHERE active=1 AND salary>=100
+                     AND (hire_date IS NULL OR hire_date<='2095-05-31')
+                     AND (termination_date IS NULL OR termination_date>='2095-05-01')
+                     ORDER BY id LIMIT 1"""
+            ).fetchone()[0])
+            admin_id = int(db.execute("SELECT id FROM users WHERE email='admin@demo.ae'").fetchone()[0])
+            advance_id = int(db.execute(
+                """INSERT INTO advances(employee_id,amount_cents,months,reason,status,decided_by,decided_at,created_at,updated_at)
+                   VALUES(?,10000,1,'Payroll link test','approved',?,?,?,?)""",
+                (employee_id, admin_id, stamp, stamp, stamp),
+            ).lastrowid)
+            installment_id = int(db.execute(
+                "INSERT INTO advance_installments(advance_id,installment_no,due_month,amount_cents,status) VALUES(?,1,?,10000,'scheduled')",
+                (advance_id, month),
+            ).lastrowid)
+
+        created = hr.request("POST", "/api/payroll/runs", {"payroll_month": month}, expected=201)["run"]
+        run_id = int(created["id"])
+        exclusions = {item["employee_id"]: item["reason_code"] for item in created["coverage"]["excluded"]}
+        self.assertEqual(exclusions[future["id"]], "service_starts_after_period")
+        self.assertEqual(exclusions[ended["id"]], "service_ended_before_period")
+        linked = next(item for item in created["items"] if int(item["employee_id"]) == employee_id)
+        self.assertEqual(linked["advance"], 100)
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            self.assertEqual(int(db.execute(
+                "SELECT payroll_item_id FROM advance_installments WHERE id=?", (installment_id,)
+            ).fetchone()[0]), int(linked["id"]))
+
+        conflict = hr.request("POST", "/api/payroll/runs", {"payroll_month": month}, expected=409)
+        self.assertEqual(conflict["code"], "payroll_month_conflict")
+        self.assertEqual(int(conflict["details"]["existing_run_id"]), run_id)
+        self.assertEqual(conflict["details"]["allowed_actions"], ["open"])
+        hr.request("POST", f"/api/payroll/runs/{run_id}/transition", {
+            "status": "cancel", "note": "HR may not cancel",
+        }, expected=403)
+        cancelled = admin.request("POST", f"/api/payroll/runs/{run_id}/transition", {
+            "status": "cancel", "note": "Replace after reconciliation",
+        })["run"]
+        self.assertEqual(cancelled["status"], "cancelled")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            self.assertIsNone(db.execute(
+                "SELECT payroll_item_id FROM advance_installments WHERE id=?", (installment_id,)
+            ).fetchone()[0])
+
+        replacement = hr.request("POST", "/api/payroll/runs", {"payroll_month": month}, expected=201)["run"]
+        self.assertNotEqual(replacement["id"], run_id)
+        first = replacement["items"][0]
+        saved = hr.request("PATCH", f"/api/payroll/runs/{replacement['id']}/items", {
+            "revision": replacement["revision"],
+            "rows": [{
+                "employee_id": first["employee_id"], "variable_allowance": 0,
+                "bonus": 175, "bonus_reason": "Individual performance bonus",
+                "manual_deduction": 0,
+            }],
+        })["run"]
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            admin_id = int(db.execute("SELECT id FROM users WHERE email='admin@demo.ae'").fetchone()[0])
+            second_advance_id = int(db.execute(
+                """INSERT INTO advances(employee_id,amount_cents,months,reason,status,decided_by,decided_at,created_at,updated_at)
+                   VALUES(?,2500,1,'Payroll sync count test','approved',?,?,?,?)""",
+                (first["employee_id"], admin_id, stamp, stamp, stamp),
+            ).lastrowid)
+            db.execute(
+                "INSERT INTO advance_installments(advance_id,installment_no,due_month,amount_cents,status) VALUES(?,1,?,2500,'scheduled')",
+                (second_advance_id, month),
+            )
+            expected_linked_installments = int(db.execute(
+                """SELECT COUNT(*) FROM advance_installments ai JOIN advances a ON a.id=ai.advance_id
+                     WHERE ai.due_month=? AND ai.status='scheduled' AND a.status='approved'
+                       AND a.employee_id IN (SELECT employee_id FROM payroll_items WHERE run_id=?)""",
+                (month, replacement["id"]),
+            ).fetchone()[0])
+        newcomer = admin.request("POST", "/api/employees", {
+            "employee_no": "PAY-NEW-2095", "full_name": "Newly Eligible Employee",
+            "email": "pay-new-2095@demo.ae", "job_title": "Tester", "salary": 5000,
+            "hire_date": "2095-05-15", "create_user": False,
+        }, expected=201)["employee"]
+        pending = hr.request("GET", f"/api/payroll/runs/{replacement['id']}")["run"]
+        self.assertGreaterEqual(int(pending["coverage"]["pending_add_count"]), 1)
+        sync_response = hr.request("POST", f"/api/payroll/runs/{replacement['id']}/sync", {
+            "revision": pending["revision"],
+        })
+        self.assertEqual(sync_response["linked_installments"], expected_linked_installments)
+        synced = sync_response["run"]
+        self.assertIn(newcomer["id"], {item["employee_id"] for item in synced["items"]})
+        preserved = next(item for item in synced["items"] if item["employee_id"] == first["employee_id"])
+        self.assertEqual(preserved["editable"]["bonus"], 175)
+        self.assertEqual(preserved["editable"]["bonus_reason"], "Individual performance bonus")
+        system_history = {entry["note_code"]: entry for entry in synced["history"] if entry["note_code"]}
+        self.assertTrue({"payroll_created", "batch_saved", "eligibility_sync"}.issubset(system_history))
+        self.assertEqual(system_history["eligibility_sync"]["note"], "")
+        self.assertIn("Eligibility and advance sync", system_history["eligibility_sync"]["note_en"])
+        self.assertNotRegex(system_history["eligibility_sync"]["note_en"], r"[\u0600-\u06ff]")
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            ordinary_actor_id = hr_server.seed_user(
+                db, "ordinary-system-name-2095@demo.ae", "Ordinary@12345",
+                "مدير النظام", "employee", None,
+            )
+            db.execute(
+                """INSERT INTO payroll_run_history(
+                       run_id,from_stage,to_stage,actor_user_id,note,created_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (replacement["id"], "calculated", "calculated", ordinary_actor_id,
+                 "ملاحظة كتبها المستخدم حرفياً", stamp),
+            )
+        refreshed = hr.request("GET", f"/api/payroll/runs/{replacement['id']}")["run"]
+        ordinary_entry = next(
+            entry for entry in refreshed["history"]
+            if entry["actor_name"] == "مدير النظام" and not entry["actor_is_super_admin"]
+        )
+        self.assertEqual(ordinary_entry["note"], "ملاحظة كتبها المستخدم حرفياً")
+        self.assertEqual(ordinary_entry["note_code"], "")
+
+        cancelled_history = admin.request("GET", f"/api/payroll/runs/{run_id}")["run"]["history"]
+        cancellation_entry = next(entry for entry in cancelled_history if entry["to_stage"] == "cancelled")
+        self.assertTrue(cancellation_entry["actor_is_super_admin"])
+        self.assertEqual(cancellation_entry["note"], "Replace after reconciliation")
+        self.assertEqual(cancellation_entry["note_code"], "")
+        historical = admin.request("GET", "/api/payroll/runs")["items"]
+        matching = [item for item in historical if item["payroll_month"] == month]
+        self.assertEqual(len(matching), 2)
+        self.assertEqual(sum(item["status"] == "cancelled" for item in matching), 1)
+
+
+class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
+    def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        helper = app.split("function updateUserRole", 1)[1].split("\n", 1)[0]
+        self.assertIn("delete element.dataset.i18nOriginal", helper)
+        self.assertIn("element.dataset.i18nOriginal=source", helper)
+        self.assertIn("source=roleLabels[user?.role]||user?.role||'—'", helper)
+        self.assertNotIn("displayUserName", helper)
+        self.assertIn("updateUserRole(user)", app)
+        self.assertIn("updateUserRole(state.user)", app)
+        self.assertNotIn("$('#userRole').textContent=tr(roleLabels", app)
+
+        english = dict(re.findall(r"'([^']+)':'([^']*)'", translations))
+        persisted_role_source = "مدير النظام"
+        rendered_role = english[persisted_role_source]
+        self.assertEqual(rendered_role, "System Administrator")
+        # A second login must replace both the visible value and the persisted
+        # i18n source before the next global translation pass.
+        persisted_role_source = "مسؤول مباشر"
+        rendered_role = english[persisted_role_source]
+        self.assertEqual(rendered_role, "Line Manager")
+        self.assertNotEqual(rendered_role, "System Administrator")
+
+    def test_legacy_month_unique_migrates_without_losing_children(self):
+        with tempfile.TemporaryDirectory(prefix="payroll-migration-") as directory:
+            db_path = Path(directory) / "legacy.sqlite3"
+            schema = (Path(__file__).parents[1] / "schema.sql").read_text(encoding="utf-8")
+            schema = schema.replace(
+                "payroll_month TEXT NOT NULL,\n  status TEXT NOT NULL DEFAULT 'draft'",
+                "payroll_month TEXT NOT NULL UNIQUE,\n  status TEXT NOT NULL DEFAULT 'draft'",
+                1,
+            )
+            schema = schema.replace(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_payroll_runs_active_month\n  ON payroll_runs(payroll_month) WHERE cancelled_at IS NULL;",
+                "",
+                1,
+            )
+            with contextlib.closing(hr_server.open_db(db_path)) as db:
+                db.executescript(schema)
+                user_id = hr_server.seed_user(db, "legacy-payroll@demo.ae", "Legacy@12345", "Legacy", "admin", None)
+                stamp = hr_server.now_iso()
+                run_id = int(db.execute(
+                    "INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES('2080-01',?,?,?)",
+                    (user_id, stamp, stamp),
+                ).lastrowid)
+                history_id = int(db.execute(
+                    "INSERT INTO payroll_run_history(run_id,to_stage,actor_user_id,note,created_at) VALUES(?,'calculated',?,'legacy',?)",
+                    (run_id, user_id, stamp),
+                ).lastrowid)
+                db.commit()
+                hr_server.migrate_payroll_runs_active_month(db)
+                self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+                hr_server.migrate_payroll_runs_active_month(db)
+                self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+                self.assertEqual(int(db.execute(
+                    "SELECT run_id FROM payroll_run_history WHERE id=?", (history_id,)
+                ).fetchone()[0]), run_id)
+                db.execute("UPDATE payroll_runs SET cancelled_at=? WHERE id=?", (stamp, run_id))
+                replacement_id = int(db.execute(
+                    "INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES('2080-01',?,?,?)",
+                    (user_id, stamp, stamp),
+                ).lastrowid)
+                self.assertNotEqual(replacement_id, run_id)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    db.execute(
+                        "INSERT INTO payroll_runs(payroll_month,created_by,created_at,updated_at) VALUES('2080-01',?,?,?)",
+                        (user_id, stamp, stamp),
+                    )
+
+    def test_payroll_ui_has_complete_english_keys_and_no_prompt_financial_actions(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        literal_keys = set(re.findall(r"\btr\(\s*'((?:\\.|[^'\\])*)'", app))
+        translated_keys = set(re.findall(r"(?:^|[,\n])\s*'((?:\\.|[^'\\])*)'\s*:", translations, re.M))
+        missing_arabic = sorted(
+            key for key in literal_keys
+            if re.search(r"[\u0600-\u06ff]", key) and key not in translated_keys
+        )
+        self.assertEqual(missing_arabic, [])
+        self.assertNotRegex(app, r"prompt\(tr\('اكتب سبب (?:إعادة المسير|إلغاء المسير)")
+        self.assertIn("function payrollAdminActionModal", app)
+        self.assertIn("name=\"reason\" rows=\"4\" maxlength=\"1000\" required", app)
+        self.assertIn("data-payroll-sync", app)
+        self.assertIn("renderPayrollConflict(form,error)", app)
+        self.assertIn("function displayUserName(user)", app)
+        self.assertIn("(user.is_super_admin||user.actor_is_super_admin)", app)
+        self.assertIn("displayUserName(entry)", app)
+        self.assertIn("function payrollHistoryNote(entry)", app)
+        self.assertIn("function payrollAdjustmentReason(adjustment)", app)
+        self.assertIn("data-i18n-preserve> · ${esc(payrollHistoryNote(entry))}", app)
+        self.assertIn("data-i18n-preserve>${esc(payrollAdjustmentReason(a))}", app)
+        self.assertIn("payrollWorkspace.replaceChildren()", app)
+        self.assertIn("state.currentPayrollRun=null", app)
+        self.assertIn("$('#createPayroll').addEventListener('click',()=>payrollSetupWorkspace())", app)
+        self.assertNotIn("$('#createPayroll').addEventListener('click',payrollSetupWorkspace)", app)
+        self.assertNotIn("body:{status:'review',note:'إرسال المسير للتدقيق والاعتماد'}", app)
+        self.assertNotIn("payrollWorkspaceTransition('approved','اعتماد نهائي بعد التدقيق')", app)
+        self.assertIn("except sqlite3.IntegrityError as exc:", (root / "server.py").read_text(encoding="utf-8"))
+        self.assertIn("payroll_month_conflict_details(month,user)", (root / "server.py").read_text(encoding="utf-8"))
+        for arabic, english in {
+            "تغطية الموظفين": "Employee coverage",
+            "مزامنة الموظفين والسلف": "Sync eligible employees and advances",
+            "سحب الاعتماد وإعادة المسير للمسودة": "Revoke approval and return to draft",
+            "إلغاء مسير الرواتب": "Cancel payroll run",
+            "يوجد مسير نشط لهذا الشهر.": "An active payroll run already exists for this month.",
+        }.items():
+            self.assertIn(f"'{arabic}':'{english}'", translations)
+
+    def test_payroll_system_note_localization_preserves_user_text(self):
+        sync = hr_server.payroll_history_note_fields({
+            "note": "", "note_code": "eligibility_sync",
+            "note_data_json": '{"count":2,"linked":1}',
+            "actor_is_super_admin": 0,
+        })
+        self.assertEqual(sync["note_ar"], "مزامنة الأهلية والسلف: أضيف 2 موظف، وربط 1 قسط.")
+        self.assertEqual(sync["note_en"], "Eligibility and advance sync: 2 employee(s) added and 1 instalment(s) linked.")
+        self.assertNotRegex(sync["note_en"], r"[\u0600-\u06ff]")
+
+        custom = hr_server.payroll_history_note_fields({
+            "note": "ملاحظة مخصصة من المستخدم", "note_code": "",
+            "note_data_json": "{}", "actor_is_super_admin": 0,
+        })
+        self.assertEqual(custom["note"], "ملاحظة مخصصة من المستخدم")
+        self.assertEqual(custom["note_code"], "")
+        self.assertEqual(custom["note_en"], "")
+
+        automatic = hr_server.payroll_adjustment_reason_fields({
+            "kind": "lateness", "system_generated": 1,
+            "reason": "خصم تأخير تلقائي: 35 دقيقة بدون إذن، بعد سماح 10 دقيقة، 1 يوم من الأجر التعاقدي",
+        })
+        self.assertEqual(automatic["reason_code"], "automatic_lateness_deduction")
+        self.assertIn("35 unexcused minute(s)", automatic["reason_en"])
+        self.assertNotRegex(automatic["reason_en"], r"[\u0600-\u06ff]")
+
+        manual = hr_server.payroll_adjustment_reason_fields({
+            "kind": "lateness", "system_generated": 0,
+            "reason": "سبب يدوي يبقى كما هو",
+        })
+        self.assertEqual(manual, {
+            "kind": "lateness", "system_generated": 0,
+            "reason": "سبب يدوي يبقى كما هو",
+        })
 
 
 if __name__ == "__main__":
