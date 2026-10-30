@@ -921,9 +921,14 @@ CREATE TABLE IF NOT EXISTS payroll_runs (
   bank_file_created_at TEXT,
   closed_at TEXT,
   locked_at TEXT,
+  revision INTEGER NOT NULL DEFAULT 1,
+  cancelled_at TEXT,
+  cancelled_by INTEGER,
+  cancel_reason TEXT NOT NULL DEFAULT '',
   FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE RESTRICT,
   FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL,
-  FOREIGN KEY (paid_by) REFERENCES users(id) ON DELETE SET NULL
+  FOREIGN KEY (paid_by) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (cancelled_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS payroll_items (
@@ -949,6 +954,7 @@ CREATE TABLE IF NOT EXISTS payroll_items (
   overtime_minutes INTEGER NOT NULL DEFAULT 0,
   basic_cents INTEGER NOT NULL,
   allowances_cents INTEGER NOT NULL DEFAULT 0,
+  variable_allowance_cents INTEGER NOT NULL DEFAULT 0,
   overtime_cents INTEGER NOT NULL DEFAULT 0,
   leave_sale_cents INTEGER NOT NULL DEFAULT 0,
   bonus_cents INTEGER NOT NULL DEFAULT 0,
@@ -976,7 +982,7 @@ CREATE TABLE IF NOT EXISTS payroll_adjustments (
   run_id INTEGER NOT NULL,
   payroll_item_id INTEGER NOT NULL,
   employee_id INTEGER NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('bonus','commission','retroactive','reimbursement','deduction','violation','lateness')),
+  kind TEXT NOT NULL CHECK (kind IN ('allowance','bonus','commission','retroactive','reimbursement','deduction','violation','lateness')),
   amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
   reason TEXT NOT NULL,
   created_by INTEGER,

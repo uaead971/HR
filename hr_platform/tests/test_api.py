@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import base64
 import http.client
+import io
 import re
 import contextlib
 import sqlite3
@@ -11,6 +13,7 @@ import unittest
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 from datetime import date, datetime, timedelta
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -309,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r11")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r14")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -4437,7 +4440,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("$('#userRole').textContent=tr(roleLabels[user.role]||user.role)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r11", index)
+        self.assertIn("build=20261030-production-r14", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4778,6 +4781,164 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("Each payroll run stores an immutable snapshot", i18n)
         self.assertIn("ماذا يعني الاسم الأحمر؟", index)
         self.assertIn("employeeComplianceNote", app)
+
+    def test_86_payroll_workspace_batch_revision_excel_return_and_cancel(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            self.assertTrue({"revision", "cancelled_at", "cancelled_by", "cancel_reason"}.issubset({row["name"] for row in db.execute("PRAGMA table_info(payroll_runs)")}))
+            self.assertIn("variable_allowance_cents", {row["name"] for row in db.execute("PRAGMA table_info(payroll_items)")})
+            self.assertIn("'allowance'", db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='payroll_adjustments'").fetchone()["sql"])
+
+        run = hr.request("POST", "/api/payroll/runs", {"payroll_month": "2047-07"}, expected=201)["run"]
+        employee = run["items"][0]
+        original_revision = run["revision"]
+        invalid = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": original_revision,
+            "rows": [
+                {"employee_id": employee["employee_id"], "variable_allowance": 99, "allowance_reason": "علاوة اختبار"},
+                {"employee_id": run["items"][1]["employee_id"], "bonus": 10, "bonus_reason": ""},
+            ],
+        }, expected=422)
+        self.assertEqual(invalid["code"], "validation_error")
+        unchanged = hr.request("GET", f"/api/payroll/runs/{run['id']}")["run"]
+        self.assertEqual(unchanged["revision"], original_revision)
+        self.assertEqual(next(item for item in unchanged["items"] if item["employee_id"] == employee["employee_id"])["variable_allowance"], 0)
+
+        duplicate = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": original_revision,
+            "rows": [{"employee_id": employee["employee_id"]}, {"employee_id": employee["employee_id"]}],
+        }, expected=422)
+        self.assertEqual(duplicate["code"], "payroll_duplicate_employee")
+        unknown = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": original_revision, "rows": [{"employee_no": "UNKNOWN-PAYROLL"}],
+        }, expected=422)
+        self.assertEqual(unknown["code"], "payroll_unknown_employee")
+
+        saved = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": original_revision,
+            "rows": [{
+                "employee_id": employee["employee_id"], "variable_allowance": 125.50,
+                "allowance_reason": "علاوة مسؤولية", "bonus": 80, "bonus_reason": "إنجاز شهري",
+                "manual_deduction": 15.25, "deduction_reason": "خصم موثق",
+            }],
+        })["run"]
+        self.assertEqual(saved["revision"], original_revision + 1)
+        saved_item = next(item for item in saved["items"] if item["employee_id"] == employee["employee_id"])
+        self.assertEqual(saved_item["variable_allowance"], 125.5)
+        self.assertEqual(saved_item["bonus"], 80)
+        self.assertEqual(saved_item["manual_deduction"], 15.25)
+        self.assertEqual(saved_item["editable"]["allowance_reason"], "علاوة مسؤولية")
+        stale = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": original_revision, "rows": [{"employee_id": employee["employee_id"]}],
+        }, expected=409)
+        self.assertEqual(stale["code"], "payroll_revision_conflict")
+
+        headers, workbook = hr.raw_request(f"/api/payroll/runs/{run['id']}/template.xlsx")
+        self.assertIn("spreadsheetml.sheet", headers["Content-Type"])
+        self.assertTrue(workbook.startswith(b"PK"))
+        with zipfile.ZipFile(io.BytesIO(workbook)) as archive:
+            self.assertIn("xl/worksheets/sheet1.xml", archive.namelist())
+            sheet = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            self.assertIn("Variable Allowance / علاوة إضافية", sheet)
+            self.assertIn("Allowance Reason / سبب العلاوة", sheet)
+            self.assertIn("Manual Deduction / الخصم اليدوي", sheet)
+            names = archive.namelist()
+            contents = {name: archive.read(name) for name in names}
+        sheet = re.sub(r'(<c r="J3"[^>]*><v>)[^<]*(</v></c>)', r'\g<1>321.00\2', sheet)
+        sheet = re.sub(r'(<c r="K3"[^>]*><is><t[^>]*>)[^<]*(</t></is></c>)', r'\g<1>Excel allowance\2', sheet)
+        contents["xl/worksheets/sheet1.xml"] = sheet.encode("utf-8")
+        edited = io.BytesIO()
+        with zipfile.ZipFile(edited, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name in names: archive.writestr(name, contents[name])
+        imported = hr.request("POST", f"/api/payroll/runs/{run['id']}/import.xlsx", {
+            "revision": saved["revision"], "file_name": "payroll.xlsx",
+            "data_url": "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + base64.b64encode(edited.getvalue()).decode("ascii"),
+        })
+        self.assertEqual(imported["imported_rows"], len(saved["items"]))
+        first = imported["run"]["items"][0]
+        self.assertEqual(first["variable_allowance"], 321)
+        self.assertEqual(first["editable"]["allowance_reason"], "Excel allowance")
+
+        review = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})["run"]
+        locked = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": review["revision"], "rows": [{"employee_id": employee["employee_id"]}],
+        }, expected=409)
+        self.assertEqual(locked["code"], "payroll_locked")
+        blocked = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"}, expected=409)
+        self.assertEqual(blocked["code"], "payroll_self_approval_forbidden")
+        approved = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"})["run"]
+        self.assertEqual(approved["status"], "approved")
+        self.assertTrue(hr_server.is_system_admin({"role": "admin", "is_super_admin": 0}))
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute("UPDATE users SET is_super_admin=0 WHERE email='admin@demo.ae'")
+        try:
+            returned = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "return", "note": "مراجعة بدل الموظف"})["run"]
+            self.assertEqual(returned["workflow_stage"], "needs_review")
+            self.assertEqual(returned["status"], "draft")
+            cancelled = admin.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "cancel", "note": "إلغاء بعد التدقيق"})["run"]
+        finally:
+            with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+                db.execute("UPDATE users SET is_super_admin=1 WHERE email='admin@demo.ae'")
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["workflow_stage"], "cancelled")
+        self.assertEqual(cancelled["cancel_reason"], "إلغاء بعد التدقيق")
+        immutable = hr.request("PATCH", f"/api/payroll/runs/{run['id']}/items", {
+            "revision": cancelled["revision"], "rows": [{"employee_id": employee["employee_id"]}],
+        }, expected=409)
+        self.assertEqual(immutable["code"], "payroll_locked")
+
+        hr_approval_run = admin.request("POST", "/api/payroll/runs", {"payroll_month": "2047-08"}, expected=201)["run"]
+        admin.request("POST", f"/api/payroll/runs/{hr_approval_run['id']}/transition", {"status": "review"})
+        self.assertEqual(hr.request("POST", f"/api/payroll/runs/{hr_approval_run['id']}/transition", {"status": "approved"})["run"]["status"], "approved")
+
+        manager_account = next(item for item in admin.request("GET", "/api/admin/users")["items"] if item["email"] == "manager@demo.ae")
+        admin.request("PATCH", f"/api/admin/users/{manager_account['id']}/permissions", {
+            "overrides": [{"permission": permission, "granted": True} for permission in ("employee.view", "salary.view", "payroll.approve")],
+        })
+        finance = self.client("manager@demo.ae", "Manager@12345")
+        finance_run = hr.request("POST", "/api/payroll/runs", {"payroll_month": "2047-09"}, expected=201)["run"]
+        hr.request("POST", f"/api/payroll/runs/{finance_run['id']}/transition", {"status": "review"})
+        self.assertEqual(finance.request("POST", f"/api/payroll/runs/{finance_run['id']}/transition", {"status": "approved"})["run"]["status"], "approved")
+
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('id="payrollWorkspace"', index)
+        self.assertIn("payrollSetupWorkspace", app)
+        self.assertIn("/items`,{method:'PATCH'", app)
+        self.assertIn("/import.xlsx", app)
+        self.assertIn("admin=isSystemAdminUi()", app)
+        self.assertIn("icon('chevron','payroll-back-icon')", app)
+        self.assertIn("tr('تعذر قراءة ملف Excel.')", app)
+        self.assertIn("const payrollLocaleState=capturePayrollLocaleState()", app)
+        self.assertIn("if(payrollLocaleState)restorePayrollLocaleState(payrollLocaleState)", app)
+        self.assertIn("view:'setup',values:payrollSetupValues(setup)", app)
+        self.assertIn("rows:payrollRowsPayload(),dirty:state.payrollDirty", app)
+        self.assertIn("state.payrollDirty=Boolean(snapshot.dirty)", app)
+        self.assertIn("function payrollSetupWorkspace(savedValues=null)", app)
+        self.assertIn("restorePayrollSetupValues(form,savedValues)", app)
+        self.assertIn("input.type='text'", app)
+        self.assertIn("input.pattern='[0-9]{4}-(0[1-9]|1[0-2])'", app)
+        self.assertIn("payrollMonth=digits(month.value).trim()", app)
+        self.assertIn("payroll_month:payrollMonth", app)
+        self.assertIn(".payroll-sheet", styles)
+        self.assertIn(".payroll-back-icon", styles)
+        self.assertIn("englishByLatinKey", translations)
+        self.assertIn("englishTranslation(source)", translations)
+        for arabic, english in {
+            "العودة إلى المسيرات": "Back to payroll runs",
+            "إنشاء مسير رواتب شهري": "Create monthly payroll run",
+            "٣٠ يوماً ثابتة": "Fixed 30 days",
+            "علاوة إضافية": "Variable allowance",
+            "اكتب الشهر بصيغة YYYY-MM بالأرقام الإنجليزية.": "Enter the month as YYYY-MM using Latin digits.",
+        }.items():
+            self.assertIn(f"'{arabic}':'{english}'", translations)
+            self.assertIn(f"tr('{arabic}')", app)
+        self.assertIn("'حفظ المسودة':'Save draft'", translations)
+        self.assertIn("build=20261030-production-r14", index)
 
 
 if __name__ == "__main__":

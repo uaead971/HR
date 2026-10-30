@@ -318,6 +318,34 @@
     'حالة الموظف':'Employee status','الاسم أو الرقم الوظيفي':'Name or employee number','تقويم الحضور الشهري':'Monthly attendance calendar','مثال: اليوم الوطني':'Example: National Day'
   });
 
+  Object.assign(english, {
+    'مسير محفوظ واعتماد متسلسل وقسيمة خاصة بكل موظف وتصدير CSV وExcel فعلي.':'Persistent payroll runs, sequential approval, private payslips, and real CSV/Excel exports.',
+    'العودة إلى المسيرات':'Back to payroll runs','إعداد مسير جديد':'New payroll setup','إنشاء مسير رواتب شهري':'Create monthly payroll run',
+    'حدد فترة الحساب والسياسات أولاً، ثم راجع مبالغ كل موظف في ورقة العمل.':'Set the calculation period and policies first, then review every employee in the worksheet.',
+    'لم يُنشأ بعد':'Not created yet','ستُنشأ مسودة قابلة للحفظ والتدقيق دون اعتماد. تُدخل العلاوة والبونص والخصم لكل موظف في الخطوة التالية.':'A draft will be created for saving and review without approval. Enter each employee’s allowance, bonus, and deduction in the next step.',
+    'احتساب المسودة':'Calculate draft','جارٍ احتساب المسودة…':'Calculating draft…','تم احتساب مسودة مسير الرواتب':'Payroll draft calculated',
+    'مساحة عمل الرواتب':'Payroll workspace','محفوظ':'Saved','حفظ المسودة':'Save draft','إرسال للتدقيق':'Submit for review',
+    'الاعتماد النهائي':'Final approval','إرجاع لمعد المسير':'Return to preparer','إلغاء المسير':'Cancel payroll run',
+    'مسودة':'Draft','تدقيق':'Review','معتمد':'Approved','مدفوع':'Paid','ملغى':'Cancelled','العلاوات والبونص':'Allowances & bonus',
+    'خصومات النظام':'System deductions','الخصومات والسلف':'Deductions & advances','صافي الرواتب':'Net payroll','التحذيرات':'Warnings',
+    'بحث الموظفين':'Search employees','الاسم أو الرقم الوظيفي':'Name or employee number','كل الأقسام':'All departments',
+    'تنزيل ملف Excel':'Download Excel','اختيار ملف Excel':'Choose Excel file','استيراد Excel':'Import Excel','لم يتم اختيار ملف':'No file selected',
+    'تعديل متقدم':'Advanced adjustment','الخلايا الخضراء قابلة للتعديل. المبالغ لا تُحفظ إلا عند الضغط على حفظ المسودة.':'Green cells are editable. Amounts are saved only when you press Save draft.',
+    'عرض التدقيق للقراءة فقط؛ راجع المبالغ والأسباب قبل الاعتماد.':'Read-only review view; check all amounts and reasons before approval.',
+    'البدلات التعاقدية':'Contractual allowances','علاوة إضافية':'Variable allowance','سبب العلاوة':'Allowance reason',
+    'خصم يدوي':'Manual deduction','سبب الخصم':'Deduction reason','الإجمالي':'Gross','التدقيق':'Review','ملاحظات المسير':'Payroll notes',
+    'سجل التدقيق':'Audit trail','لا يوجد سجل بعد.':'No history yet.','تغييرات غير محفوظة':'Unsaved changes','جارٍ الحفظ…':'Saving…',
+    'تم حفظ مسودة مسير الرواتب':'Payroll draft saved','تم إرسال المسير للتدقيق':'Payroll sent for review','جارٍ استيراد Excel…':'Importing Excel…',
+    'جارٍ تحميل مساحة عمل الرواتب…':'Loading payroll workspace…','لديك تغييرات غير محفوظة. هل تريد مغادرة مساحة العمل؟':'You have unsaved changes. Leave the workspace?',
+    'هل راجعت جميع المبالغ والأسباب وتريد اعتماد المسير نهائياً؟':'Have you reviewed all amounts and reasons and want to approve the payroll?',
+    'تأكيد وسم المسير مدفوعاً؟':'Confirm marking this payroll run as paid?','اكتب سبب إعادة المسير لمعدّه:':'Enter the reason for returning the payroll to its preparer:',
+    'اكتب سبب إلغاء المسير:':'Enter the payroll cancellation reason:','إلغاء المسير نهائي ولا يحذف سجل التدقيق. هل تريد المتابعة؟':'Cancellation is final and preserves the audit trail. Continue?',
+    'سيستبدل ملف Excel التغييرات غير المحفوظة. هل تريد المتابعة؟':'The Excel file will replace unsaved changes. Continue?',
+    'تعذر قراءة ملف Excel.':'Could not read the Excel file.',
+    'اكتب الشهر بصيغة YYYY-MM بالأرقام الإنجليزية.':'Enter the month as YYYY-MM using Latin digits.',
+    'صيغة الشهر المطلوبة YYYY-MM، مثال 2026-10.':'Use YYYY-MM, for example 2026-10.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();
@@ -332,8 +360,15 @@
       .replace(/[٠-٩]/g, digit => String('٠١٢٣٤٥٦٧٨٩'.indexOf(digit)))
       .replace(/[۰-۹]/g, digit => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(digit)));
   }
+  const englishByLatinKey = Object.fromEntries(
+    Object.entries(english).map(([key,value]) => [normalize(latinDigits(key)),value])
+  );
+  function englishTranslation(value) {
+    const normalized = normalize(value);
+    return english[normalized] || englishByLatinKey[normalize(latinDigits(normalized))];
+  }
   function translate(value, params) {
-    let result = locale === 'en' ? (english[normalize(value)] || value) : value;
+    let result = locale === 'en' ? (englishTranslation(value) || value) : value;
     if (params) Object.keys(params).forEach(key => { result = String(result).replace(new RegExp(`\\{${key}\\}`, 'g'), params[key]); });
     return latinDigits(result);
   }
@@ -353,7 +388,7 @@
     if (node.nodeValue !== next) node.nodeValue = next;
   }
   function replaceText(source) {
-    const exact = english[normalize(source)];
+    const exact = englishTranslation(source);
     if (exact) return latinDigits(source.replace(normalize(source), exact));
     const latinSource = latinDigits(source);
     const normalized = normalize(latinSource);
@@ -367,6 +402,7 @@
       [/^مرحباً، (.+)$/, 'Welcome, $1'],
       [/^(\d+(?:\.\d+)?) يوم$/, '$1 days'],
       [/^(\d+) موظف$/, '$1 employees'],
+      [/^تم استيراد (\d+) صفاً من Excel$/, 'Imported $1 rows from Excel'],
       [/^من (\d+(?:\.\d+)?)$/, 'of $1'],
       [/^تقييم (\d+)$/, 'Review $1'],
       [/^تم الإفصاح في (.+)$/, 'Disclosed on $1'],
@@ -402,7 +438,7 @@
     const role = document.querySelector('#userRole');
     if (role && normalize(role.textContent) && normalize(role.textContent) !== '—') {
       if (!role.dataset.i18nOriginal) role.dataset.i18nOriginal = role.textContent;
-      const next = locale === 'en' ? latinDigits(english[normalize(role.dataset.i18nOriginal)] || role.dataset.i18nOriginal) : latinDigits(role.dataset.i18nOriginal);
+      const next = locale === 'en' ? latinDigits(englishTranslation(role.dataset.i18nOriginal) || role.dataset.i18nOriginal) : latinDigits(role.dataset.i18nOriginal);
       if (role.textContent !== next) role.textContent = next;
     }
   }

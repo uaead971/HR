@@ -25,6 +25,8 @@ import io
 import struct
 import zlib
 import unicodedata
+import zipfile
+import xml.etree.ElementTree as ET
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, time, timedelta, timezone
 from email.utils import formatdate
@@ -36,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
+from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -48,6 +51,7 @@ SESSION_HOURS = 12
 MAX_JSON_BYTES = 3_200_000
 MAX_IMAGE_BYTES = 1_500_000
 MAX_VISUAL_IDENTITY_IMAGE_BYTES = 1_350_000
+MAX_PAYROLL_XLSX_BYTES = 1_500_000
 PBKDF2_ROUNDS = 310_000
 PASSWORD_RESET_MINUTES = 30
 WORK_PERMISSION_MAX_REQUESTS = 2
@@ -1955,6 +1959,7 @@ def initialize_database(db_path: Path) -> None:
                 "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
                 "payroll_items": {
                     "bonus_cents": "INTEGER NOT NULL DEFAULT 0",
+                    "variable_allowance_cents": "INTEGER NOT NULL DEFAULT 0",
                     "base_deductions_cents": "INTEGER NOT NULL DEFAULT 0",
                     "overtime_cents": "INTEGER NOT NULL DEFAULT 0",
                     "leave_sale_cents": "INTEGER NOT NULL DEFAULT 0",
@@ -2000,6 +2005,10 @@ def initialize_database(db_path: Path) -> None:
                     "bank_file_created_at": "TEXT",
                     "closed_at": "TEXT",
                     "locked_at": "TEXT",
+                    "revision": "INTEGER NOT NULL DEFAULT 1",
+                    "cancelled_at": "TEXT",
+                    "cancelled_by": "INTEGER",
+                    "cancel_reason": "TEXT NOT NULL DEFAULT ''",
                 },
                 "leave_sale_requests": {
                     "payout_month": "TEXT",
@@ -2016,13 +2025,13 @@ def initialize_database(db_path: Path) -> None:
             payroll_adjustment_schema = db.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='payroll_adjustments'"
             ).fetchone()
-            if payroll_adjustment_schema and "commission" not in str(payroll_adjustment_schema["sql"]):
+            if payroll_adjustment_schema and "'allowance'" not in str(payroll_adjustment_schema["sql"]):
                 db.execute("""CREATE TABLE payroll_adjustments_v61 (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     run_id INTEGER NOT NULL,
                     payroll_item_id INTEGER NOT NULL,
                     employee_id INTEGER NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('bonus','commission','retroactive','reimbursement','deduction','violation','lateness')),
+                    kind TEXT NOT NULL CHECK (kind IN ('allowance','bonus','commission','retroactive','reimbursement','deduction','violation','lateness')),
                     amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
                     reason TEXT NOT NULL,
                     created_by INTEGER,
@@ -3411,10 +3420,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/payroll/runs", self.api_payroll_runs_get),
                     ("POST", r"/api/payroll/runs", self.api_payroll_runs_post),
                     ("GET", r"/api/payroll/runs/(\d+)", self.api_payroll_run_get),
+                    ("PATCH", r"/api/payroll/runs/(\d+)/items", self.api_payroll_items_patch),
                     ("POST", r"/api/payroll/runs/(\d+)/adjustments", self.api_payroll_adjustment_post),
                     ("DELETE", r"/api/payroll/adjustments/(\d+)", self.api_payroll_adjustment_delete),
                     ("POST", r"/api/payroll/runs/(\d+)/transition", self.api_payroll_transition),
                     ("GET", r"/api/payroll/runs/(\d+)/export\.csv", self.api_payroll_csv),
+                    ("GET", r"/api/payroll/runs/(\d+)/template\.xlsx", self.api_payroll_xlsx),
+                    ("POST", r"/api/payroll/runs/(\d+)/import\.xlsx", self.api_payroll_xlsx_import),
                     ("GET", r"/api/me/payslips", self.api_my_payslips),
                     ("GET", r"/api/payslips/(\d+)", self.api_payslip_get),
                     ("GET", r"/api/advances", self.api_advances_get),
@@ -3480,6 +3492,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             raw = ("\ufeff" + buffer.getvalue()).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(raw)
+
+        def send_download(self, filename: str, mime_type: str, raw: bytes) -> None:
+            self.send_response(200)
+            self.send_header("Content-Type", mime_type)
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
@@ -10406,7 +10427,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not item:
                 raise APIError(404, "عنصر مسير الراتب غير موجود.", "not_found")
             totals = self.db.execute(
-                """SELECT COALESCE(SUM(CASE WHEN kind='bonus' THEN amount_cents ELSE 0 END),0) AS bonus,
+                """SELECT COALESCE(SUM(CASE WHEN kind='allowance' THEN amount_cents ELSE 0 END),0) AS variable_allowance,
+                          COALESCE(SUM(CASE WHEN kind='bonus' THEN amount_cents ELSE 0 END),0) AS bonus,
                           COALESCE(SUM(CASE WHEN kind='commission' THEN amount_cents ELSE 0 END),0) AS commission,
                           COALESCE(SUM(CASE WHEN kind='retroactive' THEN amount_cents ELSE 0 END),0) AS retroactive,
                           COALESCE(SUM(CASE WHEN kind='reimbursement' THEN amount_cents ELSE 0 END),0) AS reimbursement,
@@ -10414,6 +10436,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                      FROM payroll_adjustments WHERE payroll_item_id=?""",
                 (item_id,),
             ).fetchone()
+            variable_allowance = int(totals["variable_allowance"] or 0)
             bonus = int(totals["bonus"] or 0)
             commission = int(totals["commission"] or 0)
             retroactive = int(totals["retroactive"] or 0)
@@ -10422,7 +10445,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             gross = (
                 int(item["basic_cents"]) + int(item["allowances_cents"])
                 + int(item["overtime_cents"] or 0) + int(item["leave_sale_cents"] or 0)
-                + bonus + commission + retroactive
+                + variable_allowance + bonus + commission + retroactive
             )
             total_deductions = deductions + int(item["advance_cents"])
             if total_deductions > gross:
@@ -10447,15 +10470,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             }
             self.db.execute(
                 """UPDATE payroll_items
-                      SET bonus_cents=?,commission_cents=?,retroactive_cents=?,reimbursement_cents=?,
+                      SET variable_allowance_cents=?,bonus_cents=?,commission_cents=?,retroactive_cents=?,reimbursement_cents=?,
                           deductions_cents=?,net_cents=?,calculation_json=? WHERE id=?""",
-                (bonus, commission, retroactive, reimbursement, deductions, net, json_text(calculation), item_id),
+                (variable_allowance, bonus, commission, retroactive, reimbursement, deductions, net, json_text(calculation), item_id),
             )
 
         def payroll_item_payload(self, row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
             item = dict(row)
             for key in (
-                "basic_cents", "allowances_cents", "overtime_cents", "leave_sale_cents", "bonus_cents",
+                "basic_cents", "allowances_cents", "variable_allowance_cents", "overtime_cents", "leave_sale_cents", "bonus_cents",
                 "commission_cents", "retroactive_cents", "reimbursement_cents", "employer_contribution_cents",
                 "proration_deduction_cents", "absence_deduction_cents", "unpaid_leave_deduction_cents",
                 "insurance_cents", "tax_cents", "base_deductions_cents", "deductions_cents", "advance_cents", "net_cents",
@@ -10464,7 +10487,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             contract_gross_cents = int(item["basic_cents"]) + int(item["allowances_cents"])
             gross_cents = (
                 contract_gross_cents + int(item["overtime_cents"]) + int(item["leave_sale_cents"])
-                + int(item["bonus_cents"]) + int(item["commission_cents"]) + int(item["retroactive_cents"])
+                + int(item["variable_allowance_cents"]) + int(item["bonus_cents"]) + int(item["commission_cents"]) + int(item["retroactive_cents"])
             )
             total_deductions_cents = int(item["deductions_cents"]) + int(item["advance_cents"])
             item["contract_gross_cents"] = contract_gross_cents
@@ -10500,6 +10523,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if item.get("id"):
                 adjustments = self.db.execute("SELECT * FROM payroll_adjustments WHERE payroll_item_id=? ORDER BY id", (item["id"],)).fetchall()
                 item["adjustments"] = [dict(value) | {"amount": cents_value(value["amount_cents"]), "system_generated": bool(value["system_generated"])} for value in adjustments]
+                editable: dict[str, Any] = {}
+                for kind, amount_key, reason_key in (
+                    ("allowance", "variable_allowance", "allowance_reason"),
+                    ("bonus", "bonus", "bonus_reason"),
+                    ("deduction", "manual_deduction", "deduction_reason"),
+                ):
+                    manual = [value for value in adjustments if value["kind"] == kind and not bool(value["system_generated"])]
+                    editable[amount_key] = cents_value(sum(int(value["amount_cents"]) for value in manual))
+                    editable[reason_key] = " | ".join(str(value["reason"]) for value in manual)
+                item["editable"] = editable
+                item["manual_deduction_cents"] = sum(int(value["amount_cents"]) for value in adjustments if value["kind"] == "deduction" and not bool(value["system_generated"]))
+                item["manual_deduction"] = cents_value(item["manual_deduction_cents"])
+                item["gross_without_inline_cents"] = gross_cents - int(item["variable_allowance_cents"]) - int(item["bonus_cents"])
+                item["deductions_without_inline_cents"] = int(item["deductions_cents"]) - int(item["manual_deduction_cents"])
             return item
 
         def payroll_payload(self, run_id: int) -> dict[str, Any]:
@@ -10508,7 +10545,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             rows=self.db.execute("SELECT * FROM payroll_items WHERE run_id=? ORDER BY employee_name",(run_id,)).fetchall()
             items=[]
             totals={
-                "basic_cents":0,"allowances_cents":0,"overtime_cents":0,"leave_sale_cents":0,"bonus_cents":0,
+                "basic_cents":0,"allowances_cents":0,"variable_allowance_cents":0,"overtime_cents":0,"leave_sale_cents":0,"bonus_cents":0,
                 "commission_cents":0,"retroactive_cents":0,"reimbursement_cents":0,"employer_contribution_cents":0,
                 "proration_deduction_cents":0,"absence_deduction_cents":0,"unpaid_leave_deduction_cents":0,
                 "insurance_cents":0,"tax_cents":0,"deductions_cents":0,"advance_cents":0,"net_cents":0,
@@ -10518,11 +10555,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 for key in totals: totals[key]+=int(item[key])
                 items.append(item)
             result=dict(run)|{"items":items,"employee_count":len(items)}
+            if result.get("cancelled_at"):
+                result["status"] = "cancelled"
+                result["workflow_stage"] = "cancelled"
             result["policy_snapshot"] = parse_json_text(result.get("policy_snapshot_json"), {})
             for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
             result["contract_gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
             result["contract_gross"] = cents_value(result["contract_gross_cents"])
-            result["gross_cents"] = result["contract_gross_cents"] + totals["overtime_cents"] + totals["leave_sale_cents"] + totals["bonus_cents"] + totals["commission_cents"] + totals["retroactive_cents"]
+            result["gross_cents"] = result["contract_gross_cents"] + totals["variable_allowance_cents"] + totals["overtime_cents"] + totals["leave_sale_cents"] + totals["bonus_cents"] + totals["commission_cents"] + totals["retroactive_cents"]
             result["gross"] = cents_value(result["gross_cents"])
             result["total_deductions_cents"] = totals["deductions_cents"] + totals["advance_cents"]
             result["total_deductions"] = cents_value(result["total_deductions_cents"])
@@ -10542,7 +10582,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not self.has_privileged_people_access(user, "salary.view"):
                 raise APIError(403, "مسيرات الرواتب متاحة للإدارة المخولة فقط.", "forbidden")
             rows=self.db.execute("SELECT r.*,(SELECT COUNT(*) FROM payroll_items i WHERE i.run_id=r.id) AS employee_count,(SELECT COALESCE(SUM(net_cents),0) FROM payroll_items i WHERE i.run_id=r.id) AS net_cents FROM payroll_runs r ORDER BY payroll_month DESC").fetchall()
-            self.send_json(200,{"items":[dict(r)|{"net":cents_value(r["net_cents"])} for r in rows]})
+            payload=[]
+            for row in rows:
+                item=dict(row)|{"net":cents_value(row["net_cents"])}
+                if item.get("cancelled_at"):
+                    item["status"]="cancelled"; item["workflow_stage"]="cancelled"
+                payload.append(item)
+            self.send_json(200,{"items":payload})
 
         @staticmethod
         def payroll_prorated_cents(amount_cents: int, days: float, divisor: float) -> int:
@@ -10809,6 +10855,88 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"مسيرات الرواتب متاحة للإدارة المخولة فقط.","forbidden")
             self.send_json(200,{"run":self.payroll_payload(run_id)})
 
+        def payroll_batch_rows(self, run: sqlite3.Row, data: dict[str, Any]) -> list[dict[str, Any]]:
+            revision=as_int(data.get("revision"),"revision",1)
+            if revision!=int(run["revision"] or 1):
+                raise APIError(409,"تم تعديل المسير من مستخدم آخر. حدّث الصفحة قبل الحفظ.","payroll_revision_conflict",{"current_revision":int(run["revision"] or 1)})
+            raw_rows=data.get("rows")
+            if not isinstance(raw_rows,list) or not raw_rows or len(raw_rows)>10000:
+                raise APIError(422,"صفوف المسير غير صالحة.","validation_error",{"field":"rows"})
+            members=self.db.execute("SELECT * FROM payroll_items WHERE run_id=?",(run["id"],)).fetchall()
+            by_id={int(row["employee_id"]):row for row in members}
+            by_no={str(row["employee_no"]):row for row in members}
+            seen:set[int]=set(); validated=[]
+            for index,value in enumerate(raw_rows,1):
+                if not isinstance(value,dict):
+                    raise APIError(422,f"الصف {index} غير صالح.","validation_error",{"row":index})
+                member=None
+                if value.get("employee_id") not in (None,""):
+                    try: member=by_id.get(int(value["employee_id"]))
+                    except (TypeError,ValueError): member=None
+                elif value.get("employee_no") not in (None,""):
+                    member=by_no.get(str(value["employee_no"]).strip())
+                if member is None:
+                    raise APIError(422,f"الموظف في الصف {index} غير موجود في هذا المسير.","payroll_unknown_employee",{"row":index,"employee_no":value.get("employee_no")})
+                employee_id=int(member["employee_id"])
+                if employee_id in seen:
+                    raise APIError(422,f"الموظف {member['employee_no']} مكرر في الملف.","payroll_duplicate_employee",{"row":index,"employee_no":member["employee_no"]})
+                seen.add(employee_id)
+                allowance=money_cents(value.get("variable_allowance",0),f"rows[{index}].variable_allowance")
+                bonus=money_cents(value.get("bonus",0),f"rows[{index}].bonus")
+                manual_deduction=money_cents(value.get("manual_deduction",0),f"rows[{index}].manual_deduction")
+                allowance_reason=optional_text(value,"allowance_reason",500)
+                bonus_reason=optional_text(value,"bonus_reason",500)
+                deduction_reason=optional_text(value,"deduction_reason",500)
+                for amount,reason,field,label in (
+                    (allowance,allowance_reason,"allowance_reason","سبب العلاوة الإضافية"),
+                    (bonus,bonus_reason,"bonus_reason","سبب البونص"),
+                    (manual_deduction,deduction_reason,"deduction_reason","سبب الخصم"),
+                ):
+                    if amount>0 and not reason:
+                        raise APIError(422,f"{label} مطلوب للموظف {member['employee_name']}.","validation_error",{"row":index,"employee_id":employee_id,"field":field})
+                other=self.db.execute(
+                    """SELECT
+                         COALESCE(SUM(CASE WHEN kind IN ('commission','retroactive') THEN amount_cents ELSE 0 END),0) AS other_gross,
+                         COALESCE(SUM(CASE WHEN kind IN ('violation','lateness') OR (kind='deduction' AND system_generated=1) THEN amount_cents ELSE 0 END),0) AS other_deductions
+                       FROM payroll_adjustments WHERE payroll_item_id=?""",(member["id"],),
+                ).fetchone()
+                gross=(int(member["basic_cents"])+int(member["allowances_cents"])+int(member["overtime_cents"] or 0)+int(member["leave_sale_cents"] or 0)+int(other["other_gross"] or 0)+allowance+bonus)
+                deductions=int(member["base_deductions_cents"] or 0)+int(other["other_deductions"] or 0)+manual_deduction+int(member["advance_cents"] or 0)
+                if deductions>gross:
+                    raise APIError(422,f"إجمالي استقطاعات {member['employee_name']} يتجاوز راتبه الإجمالي.","payroll_deductions_exceed_gross",{"row":index,"employee_id":employee_id,"gross":cents_value(gross),"total_deductions":cents_value(deductions)})
+                validated.append({"item":member,"employee_id":employee_id,"variable_allowance_cents":allowance,"allowance_reason":allowance_reason,"bonus_cents":bonus,"bonus_reason":bonus_reason,"manual_deduction_cents":manual_deduction,"deduction_reason":deduction_reason})
+            return validated
+
+        def apply_payroll_batch(self, run: sqlite3.Row, user: dict[str, Any], data: dict[str, Any], source: str="workspace") -> dict[str, Any]:
+            rows=self.payroll_batch_rows(run,data); stamp=now_iso(); revision=int(run["revision"] or 1)
+            with self.db:
+                updated=self.db.execute("UPDATE payroll_runs SET revision=revision+1,updated_at=? WHERE id=? AND revision=? AND cancelled_at IS NULL",(stamp,run["id"],revision))
+                if updated.rowcount!=1:
+                    raise APIError(409,"تم تعديل المسير من مستخدم آخر. حدّث الصفحة قبل الحفظ.","payroll_revision_conflict")
+                for value in rows:
+                    item=value["item"]
+                    self.db.execute("DELETE FROM payroll_adjustments WHERE payroll_item_id=? AND system_generated=0 AND kind IN ('allowance','bonus','deduction')",(item["id"],))
+                    for kind,amount_key,reason_key in (("allowance","variable_allowance_cents","allowance_reason"),("bonus","bonus_cents","bonus_reason"),("deduction","manual_deduction_cents","deduction_reason")):
+                        amount=int(value[amount_key])
+                        if amount:
+                            self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,?,?,?,?,0,?)",(run["id"],item["id"],value["employee_id"],kind,amount,value[reason_key],user["id"],stamp))
+                    self.recalculate_payroll_item(int(item["id"]))
+                note=f"حفظ {len(rows)} صفاً من {'Excel' if source=='xlsx' else 'مساحة عمل المسير'}"
+                self.db.execute("INSERT INTO payroll_run_history(run_id,from_stage,to_stage,actor_user_id,note,created_at) VALUES(?,?,?,?,?,?)",(run["id"],run["workflow_stage"],run["workflow_stage"],user["id"],note,stamp))
+                audit(self.db,user["id"],"payroll.items_batch_update","payroll_run",run["id"],{"row_count":len(rows),"source":source,"revision_from":revision,"revision_to":revision+1})
+            return self.payroll_payload(int(run["id"]))
+
+        def api_payroll_items_patch(self, run_id: int) -> None:
+            user=self.require_permission("payroll.manage")
+            if not self.has_privileged_people_access(user,"employee.view"):
+                raise APIError(403,"إدارة المسيرات متاحة للإدارة المخولة فقط.","forbidden")
+            run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
+            if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
+            if run["cancelled_at"] or run["status"]!="draft" or str(run["workflow_stage"]) not in {"draft","collecting","calculated","needs_review"}:
+                raise APIError(409,"المسير مقفل ولا يقبل التعديل.","payroll_locked")
+            data=self.read_json()
+            self.send_json(200,{"run":self.apply_payroll_batch(run,user,data)})
+
         def api_payroll_adjustment_post(self, run_id: int) -> None:
             user=self.require_permission("payroll.manage")
             if not self.has_privileged_people_access(user,"employee.view"):
@@ -10816,10 +10944,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
             if not run:
                 raise APIError(404,"مسير الرواتب غير موجود.","not_found")
-            if run["status"]!="draft":
+            if run["status"]!="draft" or run["cancelled_at"]:
                 raise APIError(409,"لا يمكن تعديل البنود بعد إرسال المسير للمراجعة.","payroll_locked")
             data=self.read_json(); kind=str(data.get("kind") or "").strip().lower()
-            if kind not in {"bonus","commission","retroactive","reimbursement","deduction","violation"}:
+            if kind not in {"allowance","bonus","commission","retroactive","reimbursement","deduction","violation"}:
                 raise APIError(422,"نوع التعديل يجب أن يكون استحقاقاً أو تعويض مصروف أو خصماً موثقاً.","validation_error",{"field":"kind"})
             amount=money_cents(data.get("amount"),"amount")
             if amount<=0:
@@ -10849,33 +10977,64 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 for item in items:
                     cursor=self.db.execute("INSERT INTO payroll_adjustments(run_id,payroll_item_id,employee_id,kind,amount_cents,reason,created_by,system_generated,created_at) VALUES(?,?,?,?,?,?,?,0,?)",(run_id,item["id"],item["employee_id"],kind,amount,reason,user["id"],stamp))
                     adjustment_ids.append(int(cursor.lastrowid)); self.recalculate_payroll_item(int(item["id"]))
-                self.db.execute("UPDATE payroll_runs SET updated_at=? WHERE id=?",(stamp,run_id))
+                self.db.execute("UPDATE payroll_runs SET updated_at=?,revision=revision+1 WHERE id=?",(stamp,run_id))
                 audit(self.db,user["id"],"payroll.adjustment_add","payroll_run",run_id,{"kind":kind,"amount_cents":amount,"reason":reason,"scope":scope,"employee_count":len(items),"adjustment_ids":adjustment_ids})
             self.send_json(201,{"run":self.payroll_payload(run_id),"adjustment_count":len(adjustment_ids)})
 
         def api_payroll_adjustment_delete(self, adjustment_id: int) -> None:
             user=self.require_permission("payroll.manage")
-            row=self.db.execute("""SELECT a.*,r.status FROM payroll_adjustments a
+            row=self.db.execute("""SELECT a.*,r.status,r.cancelled_at FROM payroll_adjustments a
                                   JOIN payroll_runs r ON r.id=a.run_id WHERE a.id=?""",(adjustment_id,)).fetchone()
             if not row:
                 raise APIError(404,"بند التعديل غير موجود.","not_found")
-            if row["status"]!="draft":
+            if row["status"]!="draft" or row["cancelled_at"]:
                 raise APIError(409,"لا يمكن تعديل البنود بعد إرسال المسير للمراجعة.","payroll_locked")
             if bool(row["system_generated"]):
                 raise APIError(409,"البند المحسوب آلياً من سياسة التأخير لا يُحذف يدوياً؛ صحح الحضور أو السياسة ثم أعد إنشاء المسير.","system_adjustment_protected")
             with self.db:
                 self.db.execute("DELETE FROM payroll_adjustments WHERE id=?",(adjustment_id,))
                 self.recalculate_payroll_item(int(row["payroll_item_id"]))
-                self.db.execute("UPDATE payroll_runs SET updated_at=? WHERE id=?",(now_iso(),row["run_id"]))
+                self.db.execute("UPDATE payroll_runs SET updated_at=?,revision=revision+1 WHERE id=?",(now_iso(),row["run_id"]))
                 audit(self.db,user["id"],"payroll.adjustment_delete","payroll_adjustment",adjustment_id,{"run_id":row["run_id"],"kind":row["kind"],"amount_cents":row["amount_cents"],"reason":row["reason"]})
             self.send_json(200,{"run":self.payroll_payload(int(row["run_id"]))})
 
         def api_payroll_transition(self, run_id: int) -> None:
             data=self.read_json(); target=str(data.get("status",data.get("action",""))); row=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
             if not row: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
-            stage_alias={"review":"ready_approval"}
+            stage_alias={"review":"ready_approval","return":"needs_review","cancel":"cancelled"}
             target_stage=stage_alias.get(target,target)
             current_stage=str(row["workflow_stage"] or row["status"] or "draft")
+            if row["cancelled_at"]:
+                raise APIError(409,"مسير الرواتب ملغى ولا يمكن تغييره.","payroll_cancelled")
+            if target_stage in {"needs_review","cancelled"} and target in {"return","cancel","cancelled"}:
+                user=self.current_user(True); assert user is not None
+                if not is_system_admin(user):
+                    raise APIError(403,"إرجاع أو إلغاء مسير الرواتب متاح لمسؤول النظام فقط.","forbidden")
+                note=optional_text(data,"note",1000) or optional_text(data,"reason",1000)
+                if not note:
+                    raise APIError(422,"سبب الإرجاع أو الإلغاء مطلوب.","validation_error",{"field":"note"})
+                stamp=now_iso()
+                if target_stage=="cancelled":
+                    if current_stage in {"paid","closed"} or row["status"]=="paid":
+                        raise APIError(409,"لا يمكن إلغاء مسير مدفوع أو مغلق.","invalid_status")
+                    with self.db:
+                        self.db.execute("UPDATE payroll_runs SET status='draft',cancelled_at=?,cancelled_by=?,cancel_reason=?,locked_at=?,updated_at=?,revision=revision+1 WHERE id=?",(stamp,user["id"],note,stamp,stamp,run_id))
+                        self.db.execute("UPDATE leave_sale_requests SET payroll_item_id=NULL,payout_month=NULL,updated_at=? WHERE payroll_item_id IN (SELECT id FROM payroll_items WHERE run_id=?)",(stamp,run_id))
+                        self.db.execute("INSERT INTO payroll_run_history(run_id,from_stage,to_stage,actor_user_id,note,created_at) VALUES(?,?,?,?,?,?)",(run_id,current_stage,"cancelled",user["id"],note,stamp))
+                        if int(row["created_by"] or 0)!=int(user["id"]):
+                            create_internal_notification(self.db,int(user["id"]),[int(row["created_by"])],"تم إلغاء مسير الرواتب",f"أُلغي مسير {row['payroll_month']}. السبب: {note}")
+                        audit(self.db,user["id"],"payroll.cancelled","payroll_run",run_id,{"from_stage":current_stage,"reason":note})
+                else:
+                    if current_stage not in {"ready_approval","approved","posted","bank_file_created"}:
+                        raise APIError(409,"لا يمكن إرجاع المسير من حالته الحالية.","invalid_status")
+                    with self.db:
+                        self.db.execute("""UPDATE payroll_runs SET status='draft',workflow_stage='needs_review',approved_by=NULL,approved_at=NULL,
+                               posted_at=NULL,bank_file_created_at=NULL,locked_at=NULL,updated_at=?,revision=revision+1 WHERE id=?""",(stamp,run_id))
+                        self.db.execute("INSERT INTO payroll_run_history(run_id,from_stage,to_stage,actor_user_id,note,created_at) VALUES(?,?,?,?,?,?)",(run_id,current_stage,"needs_review",user["id"],note,stamp))
+                        if int(row["created_by"] or 0)!=int(user["id"]):
+                            create_internal_notification(self.db,int(user["id"]),[int(row["created_by"])],"أعيد مسير الرواتب للتعديل",f"أعيد مسير {row['payroll_month']} للتعديل. الملاحظة: {note}")
+                        audit(self.db,user["id"],"payroll.returned","payroll_run",run_id,{"from_stage":current_stage,"reason":note})
+                self.send_json(200,{"run":self.payroll_payload(run_id)}); return
             allowed_stages={
                 "draft":{"collecting","calculated","needs_review","ready_approval"},
                 "collecting":{"calculated","needs_review","ready_approval"},
@@ -10900,6 +11059,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 else "payroll.manage"
             ); user=self.require_permission(permission)
             if not self.has_privileged_people_access(user,"employee.view"): raise APIError(403,"اعتماد المسيرات متاح للإدارة المخولة فقط.","forbidden")
+            if target_stage=="approved" and not self.has_privileged_people_access(user,"salary.view"):
+                raise APIError(403,"اعتماد المسيرات يتطلب صلاحية عرض الرواتب والبيانات الحساسة.","forbidden",{"permission":"salary.view"})
             if target_stage=="approved" and int(row["created_by"] or 0)==int(user["id"]):
                 raise APIError(409,"لا يجوز لمن أنشأ مسير الرواتب أن يعتمد المسير نفسه. يلزم معتمد آخر.","payroll_self_approval_forbidden")
             if target_stage=="paid" and int(row["approved_by"] or 0)==int(user["id"]):
@@ -10916,7 +11077,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 else "paid" if target_stage in {"paid","closed"}
                 else "draft"
             )
-            values={"status":status,"workflow_stage":target_stage,"updated_at":stamp}|extra
+            values={"status":status,"workflow_stage":target_stage,"updated_at":stamp,"revision":int(row["revision"] or 1)+1}|extra
             if target_stage in {"ready_approval","approved","posted","bank_file_created","paid","closed"}:
                 values["locked_at"]=row["locked_at"] or stamp
             with self.db:
@@ -10931,6 +11092,152 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 audit(self.db,user["id"],f"payroll.{target_stage}","payroll_run",run_id,{"from_stage":current_stage,"to_stage":target_stage})
             self.send_json(200,{"run":self.payroll_payload(run_id)})
 
+        @staticmethod
+        def payroll_xlsx_headers() -> list[str]:
+            return [
+                "Employee No / الرقم الوظيفي","Employee / الموظف","Department / القسم","Basic / الأساسي",
+                "Contractual Allowances / البدلات التعاقدية","Overtime / الإضافي","Leave Cash-out / بيع الإجازات",
+                "Advance / السلفة","System Deductions / الاستقطاعات النظامية","Variable Allowance / علاوة إضافية",
+                "Allowance Reason / سبب العلاوة","Bonus / البونص","Bonus Reason / سبب البونص",
+                "Manual Deduction / الخصم اليدوي","Deduction Reason / سبب الخصم","Gross / الإجمالي",
+                "Net / الصافي","Warnings / التحذيرات",
+            ]
+
+        @staticmethod
+        def xlsx_column(index: int) -> str:
+            value=""
+            while index:
+                index,remainder=divmod(index-1,26); value=chr(65+remainder)+value
+            return value
+
+        @staticmethod
+        def xlsx_text_cell(ref: str, value: Any, style: int=0) -> str:
+            text=xml_escape(str(value or ""))
+            return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{text}</t></is></c>'
+
+        @staticmethod
+        def xlsx_number_cell(ref: str, value: Any, style: int=0) -> str:
+            return f'<c r="{ref}" s="{style}"><v>{Decimal(str(value or 0)).quantize(Decimal("0.01"))}</v></c>'
+
+        def build_payroll_xlsx(self, run: dict[str, Any]) -> bytes:
+            headers=self.payroll_xlsx_headers(); editable={10,11,12,13,14,15}
+            instruction="Editable columns are highlighted / الأعمدة المظللة قابلة للتعديل. لا تغير الرقم الوظيفي أو عناوين الأعمدة."
+            rows=[f'<row r="1" ht="28" customHeight="1">{self.xlsx_text_cell("A1",instruction,3)}</row>']
+            header_cells="".join(self.xlsx_text_cell(f"{self.xlsx_column(index)}2",header,4) for index,header in enumerate(headers,1))
+            rows.append(f'<row r="2" ht="34" customHeight="1">{header_cells}</row>')
+            for row_index,item in enumerate(run["items"],3):
+                editable_values=item.get("editable") or {}
+                system_deductions=max(0,float(item["deductions"])-float(editable_values.get("manual_deduction") or 0))
+                warnings=" | ".join(str(w.get("en") or w.get("ar") or "") for w in item.get("warnings",[]))
+                values=[item["employee_no"],item["employee_name"],item["department_name"],item["basic"],item["allowances"],item["overtime"],item["leave_sale"],item["advance"],system_deductions,editable_values.get("variable_allowance",0),editable_values.get("allowance_reason",""),editable_values.get("bonus",0),editable_values.get("bonus_reason",""),editable_values.get("manual_deduction",0),editable_values.get("deduction_reason",""),item["gross"],item["net"],warnings]
+                cells=[]
+                for column,value in enumerate(values,1):
+                    ref=f"{self.xlsx_column(column)}{row_index}"; style=2 if column in editable else 1
+                    if column in {4,5,6,7,8,9,10,12,14,16,17}: cells.append(self.xlsx_number_cell(ref,value,style))
+                    else: cells.append(self.xlsx_text_cell(ref,value,style))
+                rows.append(f'<row r="{row_index}">{"".join(cells)}</row>')
+            widths=[16,28,22,14,20,14,17,14,20,18,30,14,30,18,30,16,16,32]
+            columns="".join(f'<col min="{i}" max="{i}" width="{width}" customWidth="1"/>' for i,width in enumerate(widths,1))
+            sheet=f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0" rightToLeft="1"><pane ySplit="2" xSplit="1" topLeftCell="B3" activePane="bottomRight" state="frozen"/></sheetView></sheetViews><cols>{columns}</cols><sheetData>{''.join(rows)}</sheetData><autoFilter ref="A2:R{max(2,len(run['items'])+2)}"/></worksheet>'''
+            styles='''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Aptos"/></font><font><b/><color rgb="FFFFFFFF"/><sz val="11"/><name val="Aptos"/></font></fonts><fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF1F4F2"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE5F3EC"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF6E8C8"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFD9E1DE"/></left><right style="thin"><color rgb="FFD9E1DE"/></right><top style="thin"><color rgb="FFD9E1DE"/></top><bottom style="thin"><color rgb="FFD9E1DE"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="5"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="4" fontId="0" fillId="2" borderId="1" xfId="0" applyFill="1" applyBorder="1"/><xf numFmtId="4" fontId="0" fillId="3" borderId="1" xfId="0" applyFill="1" applyBorder="1"/><xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1"/><xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1"><alignment wrapText="1" horizontal="center" vertical="center"/></xf></cellXfs></styleSheet>'''
+            parts={
+                "[Content_Types].xml":'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>''',
+                "_rels/.rels":'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>''',
+                "xl/workbook.xml":f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Payroll {xml_escape(str(run['payroll_month']))}" sheetId="1" r:id="rId1"/></sheets></workbook>''',
+                "xl/_rels/workbook.xml.rels":'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>''',
+                "xl/styles.xml":styles,"xl/worksheets/sheet1.xml":sheet,
+            }
+            buffer=io.BytesIO()
+            with zipfile.ZipFile(buffer,"w",zipfile.ZIP_DEFLATED) as archive:
+                for name,content in parts.items(): archive.writestr(name,content.encode("utf-8"))
+            return buffer.getvalue()
+
+        def api_payroll_xlsx(self, run_id: int) -> None:
+            user=self.require_permission("salary.view")
+            if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"تصدير المسيرات متاح للإدارة المخولة فقط.","forbidden")
+            run=self.payroll_payload(run_id); raw=self.build_payroll_xlsx(run)
+            self.send_download(f'payroll-{run["payroll_month"]}.xlsx',"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",raw)
+
+        @staticmethod
+        def payroll_xlsx_cell_value(cell: ET.Element, shared: list[str]) -> str:
+            ns="{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+            inline=cell.find(f"{ns}is")
+            if inline is not None: return "".join(node.text or "" for node in inline.iter(f"{ns}t"))
+            raw=cell.findtext(f"{ns}v",default="")
+            if cell.get("t")=="s":
+                try: return shared[int(raw)]
+                except (ValueError,IndexError): return ""
+            return raw
+
+        def parse_payroll_xlsx(self, raw: bytes, revision: int) -> dict[str, Any]:
+            if len(raw)>MAX_PAYROLL_XLSX_BYTES: raise APIError(413,"حجم ملف Excel يتجاوز الحد المسموح.","upload_too_large")
+            try:
+                if not zipfile.is_zipfile(io.BytesIO(raw)): raise APIError(422,"الملف ليس مصنف Excel صالحاً.","invalid_xlsx")
+                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    infos=archive.infolist()
+                    if len(infos)>50 or sum(info.file_size for info in infos)>15_000_000: raise APIError(422,"بنية ملف Excel أكبر من الحد الآمن.","invalid_xlsx")
+                    for info in infos:
+                        if info.flag_bits & 1 or info.file_size>8_000_000 or info.filename.startswith(("/","\\")) or ".." in Path(info.filename).parts:
+                            raise APIError(422,"ملف Excel يحتوي بنية غير آمنة.","invalid_xlsx")
+                    if "xl/worksheets/sheet1.xml" not in archive.namelist(): raise APIError(422,"ورقة الرواتب غير موجودة في الملف.","invalid_xlsx")
+                    shared=[]
+                    if "xl/sharedStrings.xml" in archive.namelist():
+                        shared_raw=archive.read("xl/sharedStrings.xml")
+                        if b"<!DOCTYPE" in shared_raw.upper() or b"<!ENTITY" in shared_raw.upper(): raise APIError(422,"ملف Excel غير آمن.","invalid_xlsx")
+                        shared_root=ET.fromstring(shared_raw); ns="{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+                        shared=["".join(node.text or "" for node in entry.iter(f"{ns}t")) for entry in shared_root.findall(f"{ns}si")]
+                    sheet_raw=archive.read("xl/worksheets/sheet1.xml")
+                    if b"<!DOCTYPE" in sheet_raw.upper() or b"<!ENTITY" in sheet_raw.upper(): raise APIError(422,"ملف Excel غير آمن.","invalid_xlsx")
+                    root=ET.fromstring(sheet_raw)
+            except APIError: raise
+            except (zipfile.BadZipFile,ET.ParseError,KeyError,OSError,ValueError) as exc:
+                raise APIError(422,"تعذر قراءة ملف Excel.","invalid_xlsx") from exc
+            ns="{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"; grid=[]; formulas:set[tuple[int,int]]=set()
+            for row in root.findall(f".//{ns}sheetData/{ns}row"):
+                row_no=int(row.get("r") or len(grid)+1); values={}
+                for cell in row.findall(f"{ns}c"):
+                    ref=str(cell.get("r") or ""); match=re.match(r"([A-Z]+)(\d+)",ref)
+                    if not match: continue
+                    column=0
+                    for letter in match.group(1): column=column*26+ord(letter)-64
+                    values[column]=self.payroll_xlsx_cell_value(cell,shared)
+                    if cell.find(f"{ns}f") is not None: formulas.add((row_no,column))
+                grid.append((row_no,values))
+            headers=self.payroll_xlsx_headers(); header_map={}
+            for row_no,values in grid:
+                if values.get(1)==headers[0]: header_map={str(value).strip():column for column,value in values.items()}; header_row=row_no; break
+            else: raise APIError(422,"عناوين قالب الرواتب غير موجودة أو تم تغييرها.","invalid_xlsx_headers")
+            required=[headers[index-1] for index in (1,10,11,12,13,14,15)]
+            missing=[header for header in required if header not in header_map]
+            if missing: raise APIError(422,"بعض أعمدة Excel المطلوبة مفقودة.","invalid_xlsx_headers",{"missing":missing})
+            editable_columns={header_map[header] for header in required[1:]}; result=[]
+            for row_no,values in grid:
+                if row_no<=header_row: continue
+                employee_no=str(values.get(header_map[headers[0]],"")).strip()
+                if not employee_no:
+                    if any(str(value).strip() for value in values.values()): raise APIError(422,f"الرقم الوظيفي مفقود في الصف {row_no}.","validation_error",{"row":row_no})
+                    continue
+                if any((row_no,column) in formulas for column in editable_columns): raise APIError(422,f"الصيغ غير مسموحة في الأعمدة القابلة للتعديل بالصف {row_no}.","xlsx_formula_forbidden",{"row":row_no})
+                result.append({"employee_no":employee_no,"variable_allowance":values.get(header_map[headers[9]],0) or 0,"allowance_reason":values.get(header_map[headers[10]],""),"bonus":values.get(header_map[headers[11]],0) or 0,"bonus_reason":values.get(header_map[headers[12]],""),"manual_deduction":values.get(header_map[headers[13]],0) or 0,"deduction_reason":values.get(header_map[headers[14]],"")})
+            if not result: raise APIError(422,"لا توجد صفوف موظفين قابلة للاستيراد.","validation_error",{"field":"rows"})
+            return {"revision":revision,"rows":result}
+
+        def api_payroll_xlsx_import(self, run_id: int) -> None:
+            user=self.require_permission("payroll.manage")
+            if not self.has_privileged_people_access(user,"employee.view"): raise APIError(403,"إدارة المسيرات متاحة للإدارة المخولة فقط.","forbidden")
+            run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
+            if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
+            if run["cancelled_at"] or run["status"]!="draft" or str(run["workflow_stage"]) not in {"draft","collecting","calculated","needs_review"}: raise APIError(409,"المسير مقفل ولا يقبل الاستيراد.","payroll_locked")
+            data=self.read_json(); revision=as_int(data.get("revision"),"revision",1); encoded=str(data.get("data_url") or "")
+            match=re.fullmatch(r"data:(?:application/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet|application/octet-stream);base64,([A-Za-z0-9+/=\r\n]+)",encoded)
+            if not match: raise APIError(422,"اختر ملف Excel بصيغة .xlsx.","invalid_xlsx")
+            try: raw=base64.b64decode(match.group(1),validate=True)
+            except ValueError as exc: raise APIError(422,"ملف Excel غير صالح.","invalid_xlsx") from exc
+            batch=self.parse_payroll_xlsx(raw,revision); updated=self.apply_payroll_batch(run,user,batch,"xlsx")
+            self.send_json(200,{"run":updated,"imported_rows":len(batch["rows"])})
+
         def api_payroll_csv(self, run_id: int) -> None:
             user=self.require_permission("salary.view")
             if not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"تصدير المسيرات متاح للإدارة المخولة فقط.","forbidden")
@@ -10940,14 +11247,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ["الفترة / Period",run["period_start"],run["period_end"],"تاريخ الدفع / Payment date",run["payment_date"]],
                 ["الرقم الوظيفي / Employee no.","الموظف / Employee","القسم / Department","المسمى / Job title","الدرجة / Grade",
                  "أيام الاستحقاق / Entitlement days","الأساسي / Basic","البدلات / Allowances","العمل الإضافي / Overtime",
-                 "بيع الإجازات / Leave cash-out","البونص / Bonus","العمولات / Commission","أثر رجعي / Retroactive",
+                 "بيع الإجازات / Leave cash-out","العلاوة الإضافية / Variable allowance","البونص / Bonus","العمولات / Commission","أثر رجعي / Retroactive",
                  "إجمالي الاستحقاقات / Gross earnings","تجزئة الراتب / Proration","غياب / Absence","إجازة بدون راتب / Unpaid leave",
                  "تأمين / Insurance","ضريبة / Tax","استقطاعات أخرى / Other deductions","قسط السلفة / Advance instalment",
                  "تعويض مصروفات / Reimbursements","الصافي / Net pay","تكلفة صاحب العمل / Employer cost","أسباب التعديلات / Adjustment reasons"],
             ]
             rows += [[
                 i["employee_no"],i["employee_name"],i["department_name"],i["job_title"],i["job_grade"],f'{float(i["entitlement_days"]):.2f}',
-                f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["overtime"]:.2f}',f'{i["leave_sale"]:.2f}',f'{i["bonus"]:.2f}',
+                f'{i["basic"]:.2f}',f'{i["allowances"]:.2f}',f'{i["overtime"]:.2f}',f'{i["leave_sale"]:.2f}',f'{i["variable_allowance"]:.2f}',f'{i["bonus"]:.2f}',
                 f'{i["commission"]:.2f}',f'{i["retroactive"]:.2f}',f'{i["gross"]:.2f}',f'{i["proration_deduction"]:.2f}',
                 f'{i["absence_deduction"]:.2f}',f'{i["unpaid_leave_deduction"]:.2f}',f'{i["insurance"]:.2f}',f'{i["tax"]:.2f}',
                 f'{max(0,i["deductions"]-i["proration_deduction"]-i["absence_deduction"]-i["unpaid_leave_deduction"]-i["insurance"]-i["tax"]):.2f}',
@@ -10972,9 +11279,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200,{"items":payslips,"salary_certificates":[self.certificate_payload(row) for row in certificates]})
 
         def api_payslip_get(self, item_id: int) -> None:
-            row=self.db.execute("SELECT i.*,r.payroll_month,r.status FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE i.id=?",(item_id,)).fetchone()
+            row=self.db.execute("SELECT i.*,r.payroll_month,r.status,r.cancelled_at FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE i.id=?",(item_id,)).fetchone()
             if not row: raise APIError(404,"قسيمة الراتب غير موجودة.","not_found")
             user=self.current_user(True); assert user is not None
+            if row["cancelled_at"] or row["status"] not in {"approved","paid"}: raise APIError(409,"قسيمة الراتب غير متاحة قبل اعتماد المسير.","payslip_unavailable")
             if row["employee_id"]!=user.get("employee_id") and not self.has_privileged_people_access(user,"salary.view"): raise APIError(403,"لا يمكنك عرض هذه القسيمة.","forbidden")
             self.send_json(200,{"payslip":self.payroll_item_payload(row)})
 

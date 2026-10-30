@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261030-production-r11">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261030-production-r14">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -300,10 +300,13 @@
       </section>
 
       <section class="page" id="payroll">
-        <div class="page-head"><div><span class="eyebrow">التعويضات</span><h1 id="payrollTitle">مسيرات الرواتب والقسائم</h1><p>مسير محفوظ واعتماد متسلسل وقسيمة خاصة بكل موظف وتصدير CSV فعلي.</p></div><button class="primary" id="createPayroll" data-permission="payroll.manage">+ إنشاء مسير شهر</button></div>
-        <div class="metric-grid compact" id="payrollMetrics"></div>
-        <article class="card payroll-method-card" data-permission="salary.view"><div class="section-head"><div><span class="eyebrow">منهجية الحساب</span><h2>كيف يُحتسب مسير الرواتب؟</h2><p>يحفظ كل مسير نسخة ثابتة من الفترة والسياسات والمدخلات والمعادلات حتى تبقى الشهور السابقة قابلة للمراجعة بعد تغير الرواتب أو الإعدادات.</p></div><span class="status">حساب مالي دقيق بالسنت</span></div><div class="payroll-formula-flow"><span><b>١</b>الأساسي والبدلات</span><i>+</i><span><b>٢</b>الإضافي والعمولات والبونص ومبيعات الإجازات</span><i>−</i><span><b>٣</b>التجزئة والغياب والتأخير والتأمين والضريبة والسلف</span><i>+</i><span><b>٤</b>تعويض المصروفات</span><i>=</i><span class="total"><b>٥</b>صافي الراتب</span></div><p class="payroll-method-note">التأمين والضريبة ومساهمة صاحب العمل لا تفترض نسباً قانونية ثابتة؛ تُدخل كنسب مؤرخة عند إنشاء المسير. المسير يُقفل عند إرساله للاعتماد ولا يتغير تلقائياً لاحقاً.</p></article>
-        <article class="card"><div id="payrollList" class="stack loading-block">جارٍ تحميل بيانات الرواتب…</div></article>
+        <div id="payrollOverview">
+          <div class="page-head"><div><span class="eyebrow">التعويضات</span><h1 id="payrollTitle">مسيرات الرواتب والقسائم</h1><p>مسير محفوظ واعتماد متسلسل وقسيمة خاصة بكل موظف وتصدير CSV وExcel فعلي.</p></div><button class="primary" id="createPayroll" data-permission="payroll.manage">+ إنشاء مسير شهر</button></div>
+          <div class="metric-grid compact" id="payrollMetrics"></div>
+          <article class="card payroll-method-card" data-permission="salary.view"><div class="section-head"><div><span class="eyebrow">منهجية الحساب</span><h2>كيف يُحتسب مسير الرواتب؟</h2><p>يحفظ كل مسير نسخة ثابتة من الفترة والسياسات والمدخلات والمعادلات حتى تبقى الشهور السابقة قابلة للمراجعة بعد تغير الرواتب أو الإعدادات.</p></div><span class="status">حساب مالي دقيق بالسنت</span></div><div class="payroll-formula-flow"><span><b>1</b>الأساسي والبدلات</span><i>+</i><span><b>2</b>الإضافي والعمولات والبونص ومبيعات الإجازات</span><i>−</i><span><b>3</b>التجزئة والغياب والتأخير والتأمين والضريبة والسلف</span><i>+</i><span><b>4</b>تعويض المصروفات</span><i>=</i><span class="total"><b>5</b>صافي الراتب</span></div><p class="payroll-method-note">التأمين والضريبة ومساهمة صاحب العمل لا تفترض نسباً قانونية ثابتة؛ تُدخل كنسب مؤرخة عند إنشاء المسير. المسير يُقفل عند إرساله للاعتماد ولا يتغير تلقائياً لاحقاً.</p></article>
+          <article class="card"><div id="payrollList" class="stack loading-block">جارٍ تحميل بيانات الرواتب…</div></article>
+        </div>
+        <div id="payrollWorkspace" class="payroll-workspace" hidden aria-live="polite"></div>
       </section>
 
       <section class="page" id="certificate-verification">
@@ -418,7 +421,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261030-production-r11"></script>
-  <script src="app.js?v=5.8.0&build=20261030-production-r11"></script>
+  <script src="i18n.js?v=5.8.0&build=20261030-production-r14"></script>
+  <script src="app.js?v=5.8.0&build=20261030-production-r14"></script>
 </body>
 </html>
