@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r16")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r17")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -4440,7 +4440,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r16", index)
+        self.assertIn("build=20261030-production-r17", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4598,6 +4598,38 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(final["hr_note"], "مطابق للسياسة")
         self.assertEqual(final["finance_note"], "اعتماد مالي نهائي")
 
+        employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
+        manager_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
+        employee.request("GET", "/api/purchases/requesters", expected=403)
+        requesters = admin.request("GET", "/api/purchases/requesters")["items"]
+        requester = next(item for item in requesters if item["id"] == employee_id)
+        self.assertEqual(requester["manager_employee_id"], manager_id)
+
+        admin_missing_employee = admin.request("POST", "/api/purchases", body, expected=422)
+        self.assertEqual(admin_missing_employee["details"]["field"], "employee_id")
+        spoofed = employee.request(
+            "POST", "/api/purchases", body | {"employee_id": manager_id}, expected=403,
+        )
+        self.assertEqual(spoofed["code"], "forbidden")
+        delegated_request = admin.request(
+            "POST", "/api/purchases",
+            body | {"employee_id": employee_id, "purchase_name": "شراء بالنيابة من مسؤول النظام"},
+            expected=201,
+        )["request"]
+        self.assertEqual(delegated_request["employee_id"], employee_id)
+        self.assertEqual(delegated_request["manager_employee_id"], manager_id)
+        self.assertEqual(delegated_request["status"], "manager_pending")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            audit_row = db.execute(
+                "SELECT actor_user_id,details FROM audit_log WHERE action='purchase.submit' AND entity_id=? ORDER BY id DESC LIMIT 1",
+                (str(delegated_request["id"]),),
+            ).fetchone()
+            admin_id = db.execute("SELECT id FROM users WHERE email='admin@demo.ae'").fetchone()[0]
+            self.assertEqual(audit_row["actor_user_id"], admin_id)
+            audit_details = json.loads(audit_row["details"])
+            self.assertTrue(audit_details["submitted_on_behalf"])
+            self.assertEqual(audit_details["submitted_for_employee_id"], employee_id)
+
         root = Path(__file__).parents[1]
         index = (root / "index.html").read_text(encoding="utf-8")
         app = (root / "app.js").read_text(encoding="utf-8")
@@ -4607,7 +4639,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertLess(purchases_nav, payroll_group)
         self.assertIn('id="myPurchaseShortcut"', index)
         self.assertIn('#myPurchaseShortcut', app)
+        self.assertIn("state.user.employee_id||adminOnly", app)
+        self.assertIn("/api/purchases/requesters", app)
+        self.assertIn("body.employee_id=Number(form.employee_id.value)", app)
         self.assertIn("'طلب مشتريات':'Purchase request'", i18n)
+        self.assertIn("'الموظف صاحب الطلب':'Requesting employee'", i18n)
 
     def test_82_historical_payroll_includes_former_staff_overtime_and_leave_sale(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -4938,7 +4974,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261030-production-r16", index)
+        self.assertIn("build=20261030-production-r17", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

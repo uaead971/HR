@@ -3580,6 +3580,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/salary-certificates/(\d+)/decision", self.api_certificate_request_decision),
                     ("GET", r"/api/purchases", self.api_purchases_get),
                     ("POST", r"/api/purchases", self.api_purchases_post),
+                    ("GET", r"/api/purchases/requesters", self.api_purchase_requesters_get),
                     ("GET", r"/api/purchases/(\d+)", self.api_purchase_get),
                     ("POST", r"/api/purchases/(\d+)/decision", self.api_purchase_decision),
                     ("GET", r"/api/payroll/runs", self.api_payroll_runs_get),
@@ -10413,6 +10414,43 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     recipients.append(int(candidate["id"]))
             return recipients
 
+        def api_purchase_requesters_get(self) -> None:
+            """Return the minimal, eligible requester directory for system admins.
+
+            A system administrator can submit a purchase on an employee's behalf,
+            but the request must still enter the employee's real reporting line.
+            Keeping this as a dedicated projection avoids exposing employee salary
+            or profile data in the purchase form.
+            """
+            user = self.current_user(True)
+            assert user is not None
+            if not is_system_admin(user):
+                raise APIError(403, "هذه القائمة متاحة لمسؤول النظام فقط.", "forbidden")
+            requesters: list[dict[str, Any]] = []
+            for employee in self.db.execute(
+                "SELECT id,employee_no,full_name FROM employees WHERE active=1 ORDER BY full_name,id"
+            ).fetchall():
+                manager_employee_id = self.direct_manager_employee_id(int(employee["id"]))
+                if not manager_employee_id:
+                    continue
+                manager = self.db.execute(
+                    """SELECT e.id,e.full_name,u.id AS user_id
+                         FROM employees e JOIN users u ON u.employee_id=e.id
+                        WHERE e.id=? AND e.active=1 AND u.active=1
+                        ORDER BY u.is_super_admin DESC,u.id LIMIT 1""",
+                    (manager_employee_id,),
+                ).fetchone()
+                if manager is None:
+                    continue
+                requesters.append({
+                    "id": int(employee["id"]),
+                    "employee_no": str(employee["employee_no"] or ""),
+                    "full_name": str(employee["full_name"] or ""),
+                    "manager_employee_id": int(manager["id"]),
+                    "manager_name": str(manager["full_name"] or ""),
+                })
+            self.send_json(200, {"items": requesters})
+
         def api_purchases_get(self) -> None:
             user = self.current_user(True)
             assert user is not None
@@ -10451,10 +10489,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_purchases_post(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            employee_id = self.own_employee_id()
             data = self.read_json()
+            submitted_on_behalf = is_system_admin(user)
+            if submitted_on_behalf:
+                employee_id = as_int(data.get("employee_id"), "employee_id", 1)
+                if not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (employee_id,)).fetchone():
+                    raise APIError(404, "الموظف المحدد غير موجود أو غير نشط.", "not_found", {"field": "employee_id"})
+            else:
+                employee_id = self.own_employee_id()
+                if data.get("employee_id") not in (None, "") and as_int(data.get("employee_id"), "employee_id", 1) != employee_id:
+                    raise APIError(403, "لا يمكنك تقديم طلب مشتريات باسم موظف آخر.", "forbidden", {"field": "employee_id"})
             manager_employee_id = self.direct_manager_employee_id(employee_id)
-            manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (manager_employee_id,)).fetchone() if manager_employee_id else None
+            manager_user = self.db.execute(
+                """SELECT u.id FROM users u JOIN employees e ON e.id=u.employee_id
+                    WHERE u.employee_id=? AND u.active=1 AND e.active=1
+                    ORDER BY u.is_super_admin DESC,u.id LIMIT 1""",
+                (manager_employee_id,),
+            ).fetchone() if manager_employee_id else None
             if not manager_employee_id or manager_user is None:
                 raise APIError(409, "لا يمكن إرسال الطلب قبل تعيين مسؤول مباشر نشط للموظف.", "purchase_manager_missing")
             amount_cents = money_cents(data.get("amount"), "amount", Decimal("0.01"))
@@ -10488,7 +10539,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     self.db, int(user["id"]), [int(manager_user["id"])], "طلب مشتريات يحتاج مراجعتك",
                     f"أرسل الموظف طلب «{str(data.get('purchase_name') or '').strip()}» بقيمة {cents_value(amount_cents):,.2f} درهم مع فاتورة مرفقة.",
                 )
-                audit(self.db, user["id"], "purchase.submit", "purchase_request", request_id, {"amount_cents": amount_cents, "manager_employee_id": manager_employee_id, "invoice_mime_type": mime_type})
+                audit(self.db, user["id"], "purchase.submit", "purchase_request", request_id, {
+                    "amount_cents": amount_cents,
+                    "manager_employee_id": manager_employee_id,
+                    "invoice_mime_type": mime_type,
+                    "submitted_for_employee_id": employee_id,
+                    "submitted_on_behalf": submitted_on_behalf,
+                })
             self.send_json(201, {"request": self.purchase_payload(self.purchase_request_row(request_id), user)})
 
         def api_purchase_get(self, request_id: int) -> None:
