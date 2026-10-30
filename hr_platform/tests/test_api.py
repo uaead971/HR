@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r17")
+        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r18")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3730,19 +3730,24 @@ class HRAPIEndToEndTests(unittest.TestCase):
         }, expected=201)["employee"]
 
         active_employees = hr.request("GET", "/api/employees")["items"]
-        current_employees = [row for row in active_employees if not row.get("hire_date") or row["hire_date"] <= date.today().isoformat()]
-        expected_total = round(sum(round(float(row["salary"]) * 100) for row in current_employees) / 100, 2)
+        expected_total_cents = sum(round(float(row["salary"]) * 100) for row in active_employees)
+        expected_total = round(expected_total_cents / 100, 2)
         dashboard = hr.request("GET", "/api/dashboard")
         self.assertTrue(dashboard["salary_metrics_visible"])
         self.assertEqual(dashboard["filters"]["date_from"], date.today().replace(day=1).isoformat())
-        self.assertEqual(dashboard["metrics"]["salary_employee_count"], len(current_employees))
+        self.assertEqual(dashboard["metrics"]["salary_employee_count"], len(active_employees))
+        self.assertEqual(dashboard["metrics"]["salary_employee_count"], dashboard["metrics"]["employees_active"])
+        self.assertEqual(dashboard["metrics"]["salary_contract_total_cents"], expected_total_cents)
         self.assertEqual(dashboard["metrics"]["salary_contract_total"], expected_total)
+        self.assertEqual(
+            round(dashboard["metrics"]["salary_basic_total"] + dashboard["metrics"]["salary_allowances_total"], 2),
+            expected_total,
+        )
 
-        branch_employees = [row for row in current_employees if row.get("branch_id") == branch["id"]]
-        branch_total = round(sum(round(float(row["salary"]) * 100) for row in branch_employees) / 100, 2)
         filtered = hr.request("GET", f"/api/dashboard?branch_id={branch['id']}")
-        self.assertEqual(filtered["metrics"]["salary_employee_count"], len(branch_employees))
-        self.assertEqual(filtered["metrics"]["salary_contract_total"], branch_total)
+        self.assertEqual(filtered["metrics"]["salary_employee_count"], len(active_employees))
+        self.assertEqual(filtered["metrics"]["salary_contract_total_cents"], expected_total_cents)
+        self.assertEqual(filtered["metrics"]["salary_contract_total"], expected_total)
 
         level_only = hr.request("PATCH", f"/api/employees/{employee['id']}", {"job_grade_level": "C"})["employee"]
         self.assertEqual(level_only["salary_breakdown"]["basic_salary"], 4500)
@@ -3802,12 +3807,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("صافي الرواتب", hidden_csv_text)
 
         report = hr.request("GET", "/api/reports/summary")["summary"]
-        current_employees = [
-            row for row in hr.request("GET", "/api/employees")["items"]
-            if not row.get("hire_date") or row["hire_date"] <= date.today().isoformat()
-        ]
+        current_employees = hr.request("GET", "/api/employees")["items"]
         current_total = round(sum(round(float(row["salary"]) * 100) for row in current_employees) / 100, 2)
         self.assertTrue(report["salary_metrics_visible"])
+        self.assertEqual(report["salary_employee_count"], len(current_employees))
         self.assertEqual(report["salary_contract_total"], current_total)
 
     def test_71_overnight_shift_checkout_updates_the_open_workday(self):
@@ -4440,7 +4443,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r17", index)
+        self.assertIn("build=20261030-production-r18", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4974,7 +4977,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261030-production-r17", index)
+        self.assertIn("build=20261030-production-r18", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

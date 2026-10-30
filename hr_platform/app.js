@@ -206,7 +206,7 @@
       const safeCount=value=>{const count=Number(value);return Number.isFinite(count)?Math.max(0,Math.trunc(count)):0};
       const salaryEmployeeCount=safeCount(m.salary_employee_count),payrollRuns=safeCount(m.payroll_runs);
       metrics.splice(8,0,
-        ['إجمالي الرواتب الشهرية',money(safeAmount(m.salary_contract_total)),tr('عدد الموظفين النشطين ضمن النطاق التنظيمي المحدد: {count}.',{count:digits(salaryEmployeeCount)}),'money finance-reconciliation'],
+        ['إجمالي الرواتب الشهرية',money(safeAmount(m.salary_contract_total)),tr('الأساسي {basic} + جميع البدلات {allowances} · {count} موظف نشط.',{basic:money(safeAmount(m.salary_basic_total)),allowances:money(safeAmount(m.salary_allowances_total)),count:digits(salaryEmployeeCount)}),'money finance-reconciliation'],
         ['صافي المسيرات المعتمدة',money(safeAmount(m.payroll_net)),tr('عدد المسيرات المعتمدة أو المدفوعة ضمن الفترة الزمنية المحددة: {count}.',{count:digits(payrollRuns)}),'money finance-reconciliation']
       );
     }

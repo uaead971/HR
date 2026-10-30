@@ -4505,26 +4505,41 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             conditions: Iterable[str] = (),
             params: Iterable[Any] = (),
         ) -> dict[str, Any]:
-            """Return the current active workforce's contractual monthly gross.
+            """Return every active employee file's contractual monthly gross.
 
-            Employee salary components are the source of truth.  Calculating in
-            integer cents avoids floating-point drift and keeps this dashboard
-            snapshot aligned with certificates and newly-created payroll items.
+            This is an organization headcount metric, not a payroll-period
+            entitlement calculation: future service dates affect payroll runs,
+            but an active employee file still belongs in the company's current
+            contractual salary commitment. Employee salary components are the
+            source of truth and every component is converted to integer cents
+            before aggregation to avoid floating-point drift.
             """
-            clauses = [*conditions, "e.active=1", "(e.hire_date IS NULL OR e.hire_date<=?)"]
-            query_params = (*tuple(params), local_now().date().isoformat())
+            clauses = [*conditions, "e.active=1"]
             rows = self.db.execute(
                 """SELECT e.salary,e.basic_salary,e.housing_allowance,e.transport_allowance,
                           e.profession_allowance,e.other_allowance,e.manual_allowances_json
                      FROM employees e WHERE """ + " AND ".join(clauses),
-                query_params,
+                tuple(params),
             ).fetchall()
-            total_cents = sum(
-                money_cents(salary_breakdown_from_row(row)["total"], "salary")
-                for row in rows
-            )
+            basic_total_cents = 0
+            allowances_total_cents = 0
+            for row in rows:
+                basic_total_cents += money_cents(row["basic_salary"] or 0, "basic_salary")
+                allowances_total_cents += sum(
+                    money_cents(row[field] or 0, field)
+                    for field in SALARY_COMPONENT_FIELDS if field != "basic_salary"
+                )
+                allowances_total_cents += sum(
+                    money_cents(item["amount"], "manual_allowance")
+                    for item in normalize_manual_allowances(row["manual_allowances_json"])
+                )
+            total_cents = basic_total_cents + allowances_total_cents
             return {
                 "employee_count": len(rows),
+                "basic_total_cents": basic_total_cents,
+                "basic_total": cents_value(basic_total_cents),
+                "allowances_total_cents": allowances_total_cents,
+                "allowances_total": cents_value(allowances_total_cents),
                 "contract_total_cents": total_cents,
                 "contract_total": cents_value(total_cents),
             }
@@ -4634,7 +4649,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             new_employees = count("e.hire_date BETWEEN ? AND ?", (date_from.isoformat(),date_to.isoformat()))
             advance_active = int(self.db.execute("SELECT COUNT(*) FROM advances a JOIN employees e ON e.id=a.employee_id WHERE a.status IN ('submitted','approved')"+scope_join, params).fetchone()[0])
             salary_metrics_visible = self.has_privileged_people_access(user, "salary.view")
-            salary_summary = self.current_salary_summary(conditions, params) if salary_metrics_visible else None
+            # The monthly contractual salary card is an organization-wide
+            # reconciliation. Branch/department filters continue to scope the
+            # operational dashboard, but must never make the company salary
+            # commitment appear incomplete.
+            salary_summary = self.current_salary_summary() if salary_metrics_visible else None
             payroll = self.db.execute(
                 "SELECT COUNT(DISTINCT r.id) runs,COALESCE(SUM(i.net_cents),0) net "
                 "FROM payroll_runs r JOIN payroll_items i ON i.run_id=r.id "
@@ -4665,7 +4684,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             action_map = [("employee.manage","إضافة موظف","employees"),("leave.approve","اعتماد الإجازات","leaves"),("payroll.manage","إنشاء مسير","payroll"),("communications.send","إرسال تعميم","communications")]
             quick_actions = [{"label":label,"route":route} for permission,label,route in action_map if has_permission(self.db,user,permission)]
             selected_label = "اليوم" if date_to == today else date_to.isoformat()
-            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"salary_metrics_visible":salary_metrics_visible,"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"salary_contract_total":salary_summary["contract_total"] if salary_summary else None,"salary_employee_count":salary_summary["employee_count"] if salary_summary else None,"payroll_runs":int(payroll["runs"] or 0) if payroll else None,"payroll_net":cents_value(payroll["net"]) if payroll else None},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
+            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"salary_metrics_visible":salary_metrics_visible,"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"salary_contract_total_cents":salary_summary["contract_total_cents"] if salary_summary else None,"salary_contract_total":salary_summary["contract_total"] if salary_summary else None,"salary_basic_total":salary_summary["basic_total"] if salary_summary else None,"salary_allowances_total":salary_summary["allowances_total"] if salary_summary else None,"salary_employee_count":salary_summary["employee_count"] if salary_summary else None,"payroll_runs":int(payroll["runs"] or 0) if payroll else None,"payroll_net":cents_value(payroll["net"]) if payroll else None},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
 
         def api_org_grid(self) -> None:
             user = self.current_user(True); assert user is not None
