@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r19")
+        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r20")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3526,16 +3526,31 @@ class HRAPIEndToEndTests(unittest.TestCase):
         protected_worker.request("POST", "/api/advances", {
             "amount": 500, "months": 2, "reason": "سجل مالي محفوظ",
         }, expected=201)
+        certificate = hr.request("POST", "/api/salary-certificates", {
+            "employee_id": protected["id"], "purpose": "اختبار الحذف الشامل",
+        }, expected=201)["certificate"]
         hr.request("POST", f"/api/employees/{protected['id']}/terminate", {
             "termination_date": "2026-10-01", "termination_type": "other",
             "termination_reason": "اختبار حماية السجل", "final_settlement_status": "paid",
         })
-        protected_conflict = admin.request(
+        protected_deleted = admin.request(
             "DELETE", f"/api/employees/{protected['id']}/permanent",
-            {"confirm_employee_no": protected["employee_no"]}, expected=409,
+            {"confirm_employee_no": protected["employee_no"]}, expected=200,
         )
-        self.assertEqual(protected_conflict["code"], "employee_delete_protected")
-        self.assertEqual(protected_conflict["details"]["records"]["advances"], 1)
+        self.assertEqual(protected_deleted["employee"]["employee_no"], protected["employee_no"])
+        self.assertGreaterEqual(protected_deleted["preserved_linked_records"]["advances.employee_id"], 1)
+        self.assertGreaterEqual(protected_deleted["preserved_linked_records"]["salary_certificates.employee_id"], 1)
+        admin.request("GET", f"/api/employees/{protected['id']}", expected=404)
+        self.assertNotIn(protected["id"], {row["id"] for row in admin.request("GET", "/api/employees?archive=1")["items"]})
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            removed = db.execute("SELECT employee_no,full_name,email,deleted_at FROM employees WHERE id=?", (protected["id"],)).fetchone()
+            self.assertIsNotNone(removed)
+            self.assertEqual(removed["employee_no"], f"DELETED-{protected['id']}")
+            self.assertEqual(removed["full_name"], "موظف محذوف")
+            self.assertIsNone(removed["email"])
+            self.assertIsNotNone(removed["deleted_at"])
+            self.assertIsNotNone(db.execute("SELECT id FROM advances WHERE employee_id=?", (protected["id"],)).fetchone())
+            self.assertIsNotNone(db.execute("SELECT id FROM salary_certificates WHERE id=?", (certificate["id"],)).fetchone())
 
         deleted = admin.request(
             "DELETE", f"/api/employees/{clean['id']}/permanent",
@@ -3544,7 +3559,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(deleted["employee"]["employee_no"], clean["employee_no"])
         self.assertNotIn(clean["id"], {row["id"] for row in admin.request("GET", "/api/employees?archive=1")["items"]})
         with contextlib.closing(hr_server.open_db(self.db_path)) as db:
-            self.assertIsNone(db.execute("SELECT id FROM employees WHERE id=?", (clean["id"],)).fetchone())
+            removed = db.execute("SELECT deleted_at FROM employees WHERE id=?", (clean["id"],)).fetchone()
+            self.assertIsNotNone(removed)
+            self.assertIsNotNone(removed["deleted_at"])
             account = db.execute("SELECT email,employee_id,active FROM users WHERE email LIKE ?", (f"deleted-employee-{clean['id']}-%",)).fetchone()
             self.assertIsNotNone(account)
             self.assertIsNone(account["employee_id"])
@@ -4558,7 +4575,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261031-production-r19", index)
+        self.assertIn("build=20261031-production-r20", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5100,7 +5117,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261031-production-r19", index)
+        self.assertIn("build=20261031-production-r20", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

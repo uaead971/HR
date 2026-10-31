@@ -425,6 +425,21 @@ def new_certificate_verification_code(db: sqlite3.Connection, year: int) -> str:
     raise RuntimeError("Could not allocate a unique salary-certificate verification code")
 
 
+def new_certificate_number(db: sqlite3.Connection, kind: str, year: int) -> str:
+    """Allocate a serial from retained numbers, even after permanent deletion."""
+    prefix = "SAL" if kind == "salary" else "REQ"
+    pattern = re.compile(rf"^{prefix}-{year}-(\d{{6}})$")
+    highest = 0
+    for row in db.execute(
+        "SELECT certificate_no FROM salary_certificates WHERE certificate_no LIKE ?",
+        (f"{prefix}-{year}-%",),
+    ).fetchall():
+        match = pattern.fullmatch(str(row["certificate_no"]))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return f"{prefix}-{year}-{highest + 1:06d}"
+
+
 def _pdf_text(value: Any) -> str:
     """Keep the lightweight built-in PDF generator safe for arbitrary tenant data."""
     text = str(value or "").replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
@@ -2028,6 +2043,7 @@ def initialize_database(db_path: Path) -> None:
                     "termination_reason": "TEXT NOT NULL DEFAULT ''", "termination_notes": "TEXT NOT NULL DEFAULT ''",
                     "notice_end_on": "TEXT", "final_settlement_status": "TEXT NOT NULL DEFAULT 'pending'",
                     "final_settlement_amount": "REAL NOT NULL DEFAULT 0", "terminated_by": "INTEGER", "terminated_at": "TEXT",
+                    "deleted_at": "TEXT", "deleted_by": "INTEGER",
                 },
                 "job_grades": {
                     "level_a_salary_cents": "INTEGER NOT NULL DEFAULT 0",
@@ -4622,7 +4638,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ensure_expiry_notifications(self.db)
             today = local_now().date(); date_to = parse_date(self.query.get("date_to", today.isoformat()), "date_to"); date_from = parse_date(self.query.get("date_from", date_to.replace(day=1).isoformat()), "date_from")
             if date_from > date_to or (date_to-date_from).days > 366: raise APIError(422,"نطاق التاريخ غير صالح أو يتجاوز سنة.","validation_error")
-            conditions, params = self.executive_scope(user); where = " WHERE "+" AND ".join(conditions) if conditions else ""
+            conditions, params = self.executive_scope(user)
+            conditions = [*conditions, "e.deleted_at IS NULL"]
+            where = " WHERE "+" AND ".join(conditions)
             def count(extra: str = "", extra_params: tuple[Any,...] = ()) -> int:
                 clauses = conditions + ([extra] if extra else []); sql_where = " WHERE "+" AND ".join(clauses) if clauses else ""
                 return int(self.db.execute("SELECT COUNT(*) FROM employees e"+sql_where, (*params,*extra_params)).fetchone()[0])
@@ -4839,7 +4857,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ).fetchone()
             general_manager = dict(gm_row) if gm_row else None
             gm_id = int(general_manager["id"]) if general_manager else None
-            employees_all = [dict(r) for r in self.db.execute(organization_employee_query() + " ORDER BY e.full_name")]
+            employees_all = [dict(r) for r in self.db.execute(organization_employee_query() + " WHERE e.active=1 AND e.deleted_at IS NULL ORDER BY e.full_name")]
             by_id = {e["id"]: e for e in employees_all if e}
             employees = [e for e in employees_all if not gm_id or int(e.get("id") or 0) != gm_id]
             department_managers = {int(d["id"]): int(d["manager_employee_id"]) for d in departments if d.get("manager_employee_id")}
@@ -5730,7 +5748,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             scope = "self"
             archive_mode = self.query.get("archive") in {"1", "true", "terminated", "archived"}
             if self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "employee.profile.edit"):
-                status_clause = " WHERE e.active=0" if archive_mode else " WHERE e.active=1"
+                status_clause = " WHERE e.active=0 AND e.deleted_at IS NULL" if archive_mode else " WHERE e.active=1 AND e.deleted_at IS NULL"
                 rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + status_clause + " ORDER BY e.full_name").fetchall()
                 payload = [normalize_employee(row) for row in rows]
                 if archive_mode or not has_permission(self.db, user, "employee_document.manage"):
@@ -5798,7 +5816,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_employee_service_history(self, employee_id: int) -> None:
             user = self.current_user(True)
             assert user is not None
-            if not self.db.execute("SELECT id FROM employees WHERE id=?", (employee_id,)).fetchone():
+            if not self.db.execute("SELECT id FROM employees WHERE id=? AND deleted_at IS NULL", (employee_id,)).fetchone():
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             if not (self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "employee.lifecycle.manage")):
                 raise APIError(403, "لا تملك صلاحية عرض سجل الخدمة.", "forbidden")
@@ -5810,10 +5828,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not is_system_admin(user):
                 raise APIError(403, "الحذف النهائي متاح لمسؤول النظام فقط.", "forbidden")
             employee = self.db.execute(
-                "SELECT id,employee_no,full_name,active FROM employees WHERE id=?",
+                "SELECT id,employee_no,full_name,active,deleted_at FROM employees WHERE id=?",
                 (employee_id,),
             ).fetchone()
-            if not employee:
+            if not employee or employee["deleted_at"]:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             if bool(employee["active"]):
                 raise APIError(
@@ -5831,29 +5849,29 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     {"field": "confirm_employee_no"},
                 )
 
-            protected_counts = {
-                "payroll_items": int(self.db.execute("SELECT COUNT(*) FROM payroll_items WHERE employee_id=?", (employee_id,)).fetchone()[0]),
-                "payroll_adjustments": int(self.db.execute("SELECT COUNT(*) FROM payroll_adjustments WHERE employee_id=?", (employee_id,)).fetchone()[0]),
-                "salary_certificates": int(self.db.execute("SELECT COUNT(*) FROM salary_certificates WHERE employee_id=?", (employee_id,)).fetchone()[0]),
-                "purchase_requests": int(self.db.execute(
-                    "SELECT COUNT(*) FROM purchase_requests WHERE employee_id=? OR manager_employee_id=?",
-                    (employee_id, employee_id),
-                ).fetchone()[0]),
-                "advances": int(self.db.execute("SELECT COUNT(*) FROM advances WHERE employee_id=?", (employee_id,)).fetchone()[0]),
-                "email_deliveries": int(self.db.execute("SELECT COUNT(*) FROM email_deliveries WHERE employee_id=?", (employee_id,)).fetchone()[0]),
-            }
-            protected_counts = {key: count for key, count in protected_counts.items() if count}
-            if protected_counts:
-                raise APIError(
-                    409,
-                    "لا يمكن حذف موظف مرتبط بسجلات مالية أو رسمية محفوظة.",
-                    "employee_delete_protected",
-                    {"employee_no": employee["employee_no"], "records": protected_counts},
-                )
-
             stamp = now_iso()
             accounts = self.db.execute("SELECT id FROM users WHERE employee_id=?", (employee_id,)).fetchall()
             former = {"employee_no": employee["employee_no"], "full_name": employee["full_name"]}
+            employee_foreign_keys = self.db.execute(
+                """SELECT m.name AS table_name,fk.\"from\" AS column_name,
+                          UPPER(fk.on_delete) AS on_delete
+                     FROM sqlite_master m
+                     JOIN pragma_foreign_key_list(m.name) fk
+                    WHERE m.type='table' AND fk.\"table\"='employees'
+                    ORDER BY m.name,fk.\"from\""""
+            ).fetchall()
+            linked_records: dict[str, int] = {}
+            for foreign_key in employee_foreign_keys:
+                table_name = str(foreign_key["table_name"])
+                column_name = str(foreign_key["column_name"])
+                quoted_table = '"' + table_name.replace('"', '""') + '"'
+                quoted_column = '"' + column_name.replace('"', '""') + '"'
+                count = int(self.db.execute(
+                    f"SELECT COUNT(*) FROM {quoted_table} WHERE {quoted_column}=?",
+                    (employee_id,),
+                ).fetchone()[0])
+                if count:
+                    linked_records[f"{table_name}.{column_name}"] = count
             try:
                 with self.db:
                     for account in accounts:
@@ -5877,23 +5895,44 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     self.db.execute("UPDATE departments SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
                     self.db.execute("UPDATE branches SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
                     self.db.execute("UPDATE organization SET general_manager_employee_id=NULL,updated_at=? WHERE general_manager_employee_id=?", (stamp, employee_id))
-                    self.db.execute("DELETE FROM employees WHERE id=?", (employee_id,))
+                    self.db.execute(
+                        """UPDATE employees SET
+                               employee_no=?,full_name='موظف محذوف',email=NULL,phone='',gender='unspecified',
+                               job_title='',job_grade='',job_grade_level='A',job_title_id=NULL,job_grade_id=NULL,
+                               department_id=NULL,branch_id=NULL,manager_id=NULL,approval_employee_id=NULL,hire_date=NULL,
+                               qualification='',nationality='',birth_date=NULL,place_of_birth='',passport_no='',passport_expires_on=NULL,
+                               emirates_id_no='',emirates_id_expires_on=NULL,marital_status='unspecified',address_country='',
+                               address_city='',address_area='',address_street='',address_building='',address_po_box='',address_notes='',
+                               salary=0,basic_salary=0,housing_allowance=0,transport_allowance=0,profession_allowance=0,
+                               other_allowance=0,manual_allowances_json='[]',rest_days_override=NULL,photo_data=NULL,active=0,
+                               termination_date=NULL,termination_type='',termination_reason='',termination_notes='',notice_end_on=NULL,
+                               final_settlement_status='pending',final_settlement_amount=0,deleted_at=?,deleted_by=?,updated_at=?
+                         WHERE id=? AND deleted_at IS NULL""",
+                        (f"DELETED-{employee_id}", stamp, user["id"], stamp, employee_id),
+                    )
                     audit(
                         self.db, user["id"], "employee.permanent_delete", "employee", employee_id,
-                        former | {"linked_accounts_anonymized": len(accounts)},
+                        former | {
+                            "linked_accounts_anonymized": len(accounts),
+                            "preserved_linked_records": linked_records,
+                        },
                     )
             except sqlite3.IntegrityError as exc:
                 raise APIError(
                     409,
-                    "لا يمكن حذف موظف مرتبط بسجلات مالية أو رسمية محفوظة.",
-                    "employee_delete_protected",
-                    {"employee_no": employee["employee_no"], "records": protected_counts, "constraint": "retained_history"},
+                    "تعذر إكمال الحذف بسبب ارتباط غير متوقع. لم تُحذف أي بيانات.",
+                    "employee_delete_dependency",
+                    {"employee_no": employee["employee_no"], "constraint": "unexpected_dependency"},
                 ) from exc
-            self.send_json(200, {"message": "تم حذف الموظف نهائياً من الأرشيف.", "employee": former})
+            self.send_json(200, {
+                "message": "تمت إزالة الموظف نهائياً من الأرشيف مع حفظ السجلات المالية والرسمية للتدقيق.",
+                "employee": former,
+                "preserved_linked_records": linked_records,
+            })
 
         def api_employee_terminate(self, employee_id: int) -> None:
             user = self.require_permission("employee.lifecycle.manage")
-            existing = self.db.execute("SELECT * FROM employees WHERE id=?", (employee_id,)).fetchone()
+            existing = self.db.execute("SELECT * FROM employees WHERE id=? AND deleted_at IS NULL", (employee_id,)).fetchone()
             if not existing:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             if not bool(existing["active"]):
@@ -5995,7 +6034,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_employee_rehire(self, employee_id: int) -> None:
             user = self.require_permission("employee.lifecycle.manage")
-            existing = self.db.execute("SELECT * FROM employees WHERE id=?", (employee_id,)).fetchone()
+            existing = self.db.execute("SELECT * FROM employees WHERE id=? AND deleted_at IS NULL", (employee_id,)).fetchone()
             if not existing:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             if bool(existing["active"]):
@@ -6294,7 +6333,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
             include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")
-            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=? AND e.deleted_at IS NULL", (employee_id,)).fetchone()
             employee = normalize_employee(row)
             assert employee is not None
             employee["languages"] = self.employee_languages(employee_id)
@@ -6313,7 +6352,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         return
                 raise APIError(403, "لا يمكنك عرض ملف هذا الموظف.", "forbidden")
             include_salary = user.get("employee_id") == employee_id or has_permission(self.db, user, "salary.view")
-            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=?", (employee_id,)).fetchone()
+            row = self.db.execute(employee_query(include_salary, True) + " WHERE e.id=? AND e.deleted_at IS NULL", (employee_id,)).fetchone()
             if row is None:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             employee = normalize_employee(row)
@@ -6366,13 +6405,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_employee_languages_get(self, employee_id: int) -> None:
             if not self.may_access_employee(employee_id):
                 raise APIError(403, "لا يمكنك عرض لغات هذا الموظف.", "forbidden")
-            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=? AND deleted_at IS NULL", (employee_id,)).fetchone():
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             self.send_json(200, {"items": self.employee_languages(employee_id)})
 
         def api_employee_languages_patch(self, employee_id: int) -> None:
             user = self.require_permission("employee.profile.edit")
-            if not self.db.execute("SELECT 1 FROM employees WHERE id=?", (employee_id,)).fetchone():
+            if not self.db.execute("SELECT 1 FROM employees WHERE id=? AND deleted_at IS NULL", (employee_id,)).fetchone():
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             languages = self.parse_languages(self.read_json().get("languages"))
             stamp = now_iso()
@@ -6384,7 +6423,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_employee_patch(self, employee_id: int) -> None:
             user = self.current_user(True)
             assert user is not None
-            existing_employee = self.db.execute("SELECT * FROM employees WHERE id=?", (employee_id,)).fetchone()
+            existing_employee = self.db.execute("SELECT * FROM employees WHERE id=? AND deleted_at IS NULL", (employee_id,)).fetchone()
             if not existing_employee:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             data = self.read_json()
@@ -7148,7 +7187,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200,{"action":dict(self.db.execute("SELECT * FROM employee_actions WHERE id=?",(action_id,)).fetchone())})
 
         def employee_card_payload(self, employee_id: int) -> dict[str, Any]:
-            employee = self.db.execute(employee_query(False) + " WHERE e.id=?", (employee_id,)).fetchone()
+            employee = self.db.execute(employee_query(False) + " WHERE e.id=? AND e.deleted_at IS NULL", (employee_id,)).fetchone()
             if employee is None:
                 raise APIError(404, "الموظف غير موجود.", "not_found")
             organization = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
@@ -10272,8 +10311,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             gross_salary = salary_breakdown_from_row(employee)["total"]
             stamp = now_iso(); year = local_now().year
             with self.db:
-                sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
-                certificate_no = f"REQ-{year}-{sequence:06d}"
+                certificate_no = new_certificate_number(self.db, "request", year)
                 verification_code = f"REQ-{year}-{secrets.token_hex(6).upper()}"
                 cur = self.db.execute(
                     """INSERT INTO salary_certificates(certificate_no,verification_code,integrity_hash,verification_status,employee_id,issued_by,purpose,salary_snapshot,organization_snapshot,employee_snapshot,issued_at,request_status,requester_id,requested_at)
@@ -10309,8 +10347,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 employee = self.db.execute(employee_query(True) + " WHERE e.id=? AND e.active=1", (row["employee_id"],)).fetchone()
                 if employee is None: raise APIError(404, "ملف الموظف غير موجود أو غير نشط.", "not_found")
                 org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
-                sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
-                certificate_no = f"SAL-{local_now().year}-{sequence:06d}"
+                certificate_no = new_certificate_number(self.db, "salary", local_now().year)
                 verification_code = new_certificate_verification_code(self.db, local_now().year)
                 gross_salary = salary_breakdown_from_row(employee)["total"]
                 values = {"certificate_no": certificate_no, "verification_code": verification_code, "employee_id": row["employee_id"], "issued_by": user["id"], "purpose": row["purpose"], "salary_snapshot": gross_salary, "organization_snapshot": json_text(serialize_org(org)), "employee_snapshot": json_text(normalize_employee(employee)), "issued_at": stamp}
@@ -10351,8 +10388,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             org = self.db.execute("SELECT * FROM organization WHERE id=1").fetchone()
             stamp = now_iso()
             with self.db:
-                sequence = int(self.db.execute("SELECT COALESCE(MAX(id),0)+1 FROM salary_certificates").fetchone()[0])
-                certificate_no = f"SAL-{local_now().year}-{sequence:06d}"
+                certificate_no = new_certificate_number(self.db, "salary", local_now().year)
                 verification_code = new_certificate_verification_code(self.db, local_now().year)
                 org_snapshot = serialize_org(org)
                 employee_snapshot = normalize_employee(employee)

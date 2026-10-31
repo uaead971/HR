@@ -172,6 +172,8 @@ CREATE TABLE IF NOT EXISTS employees (
   final_settlement_amount REAL NOT NULL DEFAULT 0,
   terminated_by INTEGER,
   terminated_at TEXT,
+  deleted_at TEXT,
+  deleted_by INTEGER,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (department_id) REFERENCES departments(id) ON DELETE SET NULL,
