@@ -1494,13 +1494,14 @@ def payroll_system_note(code: str, data: dict[str, Any] | None = None) -> dict[s
     """Return bilingual copy for notes authored by payroll automation."""
     values = data or {}
     count = int(values.get("count") or values.get("row_count") or 0)
+    removed = int(values.get("removed") or values.get("removed_count") or 0)
     linked = int(values.get("linked") or values.get("linked_installments") or 0)
     source = str(values.get("source") or "workspace")
     notes = {
         "payroll_created": ("إنشاء مسودة المسير واحتسابها.", "Payroll draft created and calculated."),
         "eligibility_sync": (
-            f"مزامنة الأهلية والسلف: أضيف {count} موظف، وربط {linked} قسط.",
-            f"Eligibility and advance sync: {count} employee(s) added and {linked} instalment(s) linked.",
+            f"مزامنة الأهلية والسلف: أضيف {count} موظف، واستبعد {removed} موظف مؤرشف أو محذوف، وربط {linked} قسط.",
+            f"Eligibility and advance sync: {count} employee(s) added, {removed} archived or deleted employee(s) excluded, and {linked} instalment(s) linked.",
         ),
         "batch_saved": (
             f"حفظ {count} صفاً من {'Excel' if source == 'xlsx' else 'مساحة عمل المسير'}.",
@@ -4554,6 +4555,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             clauses = [
                 *conditions,
                 "e.active=1",
+                "e.deleted_at IS NULL",
                 "(e.hire_date IS NULL OR e.hire_date<=?)",
                 "(e.termination_date IS NULL OR e.termination_date>=?)",
             ]
@@ -4696,21 +4698,28 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "SELECT COUNT(DISTINCT r.id) runs,COALESCE(SUM(i.net_cents),0) net "
                 "FROM payroll_runs r JOIN payroll_items i ON i.run_id=r.id "
                 "JOIN employees e ON e.id=i.employee_id "
-                "WHERE r.status IN ('approved','paid') AND r.payroll_month BETWEEN ? AND ?" + scope_join,
+                "WHERE r.status IN ('approved','paid') AND r.payroll_month BETWEEN ? AND ? "
+                "AND e.active=1 AND e.deleted_at IS NULL" + scope_join,
                 (date_from.strftime('%Y-%m'),date_to.strftime('%Y-%m'),*params),
             ).fetchone() if salary_metrics_visible else None
             latest_payroll = self.db.execute(
                 """SELECT r.id,r.payroll_month,r.status,r.approved_at,
-                          COUNT(i.id) AS employee_count,
-                          COALESCE(SUM(i.basic_cents+i.allowances_cents+i.variable_allowance_cents+
+                          COUNT(CASE WHEN e.id IS NOT NULL THEN i.id END) AS employee_count,
+                          COALESCE(SUM(CASE WHEN e.id IS NOT NULL THEN
+                                       i.basic_cents+i.allowances_cents+i.variable_allowance_cents+
                                        i.overtime_cents+i.leave_sale_cents+i.bonus_cents+
-                                       i.commission_cents+i.retroactive_cents),0) AS gross,
-                          COALESCE(SUM(i.net_cents),0) AS net
+                                       i.commission_cents+i.retroactive_cents ELSE 0 END),0) AS gross,
+                          COALESCE(SUM(CASE WHEN e.id IS NOT NULL THEN i.net_cents ELSE 0 END),0) AS net
                      FROM payroll_runs r
-                     JOIN payroll_items i ON i.run_id=r.id
-                    WHERE r.status IN ('approved','paid') AND r.cancelled_at IS NULL
+                     LEFT JOIN payroll_items i ON i.run_id=r.id
+                     LEFT JOIN employees e ON e.id=i.employee_id AND e.active=1 AND e.deleted_at IS NULL
+                    WHERE r.id=(
+                          SELECT latest.id FROM payroll_runs latest
+                           WHERE latest.status IN ('approved','paid') AND latest.cancelled_at IS NULL
+                           ORDER BY COALESCE(latest.approved_at,latest.updated_at,latest.created_at) DESC,latest.id DESC
+                           LIMIT 1
+                    )
                     GROUP BY r.id
-                    ORDER BY COALESCE(r.approved_at,r.updated_at,r.created_at) DESC,r.id DESC
                     LIMIT 1"""
             ).fetchone() if salary_metrics_visible else None
             departments = [dict(r) for r in self.db.execute("SELECT COALESCE(d.name,'دون قسم') label,COUNT(*) value FROM employees e LEFT JOIN departments d ON d.id=e.department_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.department_id,d.name ORDER BY value DESC", params)]
@@ -11019,7 +11028,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def payroll_payload(self, run_id: int) -> dict[str, Any]:
             run=self.db.execute("SELECT * FROM payroll_runs WHERE id=?",(run_id,)).fetchone()
             if not run: raise APIError(404,"مسير الرواتب غير موجود.","not_found")
-            rows=self.db.execute("SELECT * FROM payroll_items WHERE run_id=? ORDER BY employee_name",(run_id,)).fetchall()
+            rows=self.db.execute(
+                """SELECT i.* FROM payroll_items i
+                     JOIN employees e ON e.id=i.employee_id
+                    WHERE i.run_id=? AND e.active=1 AND e.deleted_at IS NULL
+                    ORDER BY i.employee_name""",
+                (run_id,),
+            ).fetchall()
             items=[]
             totals={
                 "basic_cents":0,"allowances_cents":0,"variable_allowance_cents":0,"overtime_cents":0,"leave_sale_cents":0,"bonus_cents":0,
@@ -11041,7 +11056,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 current_coverage = self.payroll_employee_coverage(
                     date.fromisoformat(result["period_start"]), date.fromisoformat(result["period_end"])
                 )
-                member_ids={int(item["employee_id"]) for item in items}
+                member_ids={int(item["employee_id"]) for item in self.db.execute(
+                    "SELECT employee_id FROM payroll_items WHERE run_id=?", (run_id,)
+                ).fetchall()}
                 eligible_ids={int(item["id"]) for item in current_coverage["included"]}
                 result["coverage"]["pending_add_count"] = len(eligible_ids-member_ids)
                 result["coverage"]["changed_eligibility_count"] = len(member_ids-eligible_ids)
@@ -11078,7 +11095,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.require_permission("salary.view")
             if not self.has_privileged_people_access(user, "salary.view"):
                 raise APIError(403, "مسيرات الرواتب متاحة للإدارة المخولة فقط.", "forbidden")
-            rows=self.db.execute("SELECT r.*,(SELECT COUNT(*) FROM payroll_items i WHERE i.run_id=r.id) AS employee_count,(SELECT COALESCE(SUM(net_cents),0) FROM payroll_items i WHERE i.run_id=r.id) AS net_cents FROM payroll_runs r ORDER BY payroll_month DESC").fetchall()
+            rows=self.db.execute(
+                """SELECT r.*,
+                          (SELECT COUNT(*) FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                            WHERE i.run_id=r.id AND e.active=1 AND e.deleted_at IS NULL) AS employee_count,
+                          (SELECT COALESCE(SUM(i.net_cents),0) FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                            WHERE i.run_id=r.id AND e.active=1 AND e.deleted_at IS NULL) AS net_cents
+                     FROM payroll_runs r ORDER BY payroll_month DESC"""
+            ).fetchall()
             payload=[]
             for row in rows:
                 item=dict(row)|{"net":cents_value(row["net_cents"])}
@@ -11173,8 +11197,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             }
 
         def payroll_employee_coverage(self, period_start: date, period_end: date) -> dict[str, Any]:
-            """Reconcile payroll membership against current and historical service episodes."""
-            employees = [dict(row) for row in self.db.execute(employee_query(True) + " ORDER BY e.full_name").fetchall()]
+            """Reconcile payroll membership for current, non-archived employees only."""
+            employees = [dict(row) for row in self.db.execute(
+                employee_query(True) + " WHERE e.active=1 AND e.deleted_at IS NULL ORDER BY e.full_name"
+            ).fetchall()]
             included: list[dict[str, Any]] = []
             excluded: list[dict[str, Any]] = []
             for employee in employees:
@@ -11362,7 +11388,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def payroll_month_conflict_details(self, month: str, user: dict[str, Any]) -> dict[str, Any] | None:
             existing=self.db.execute(
-                """SELECT r.*,(SELECT COUNT(*) FROM payroll_items pi WHERE pi.run_id=r.id) AS employee_count
+                """SELECT r.*,(SELECT COUNT(*) FROM payroll_items pi JOIN employees e ON e.id=pi.employee_id
+                                  WHERE pi.run_id=r.id AND e.active=1 AND e.deleted_at IS NULL) AS employee_count
                      FROM payroll_runs r WHERE r.payroll_month=? AND r.cancelled_at IS NULL""", (month,)
             ).fetchone()
             if not existing:
@@ -11599,8 +11626,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if revision!=int(run["revision"] or 1):
                 raise APIError(409,"تم تعديل المسير من مستخدم آخر. حدّث الصفحة قبل المزامنة.","payroll_revision_conflict",{"current_revision":int(run["revision"] or 1)})
             coverage=self.payroll_employee_coverage(date.fromisoformat(run["period_start"]),date.fromisoformat(run["period_end"]))
-            existing_ids={int(row["employee_id"]) for row in self.db.execute("SELECT employee_id FROM payroll_items WHERE run_id=?",(run_id,))}
+            existing_rows=self.db.execute("SELECT id,employee_id FROM payroll_items WHERE run_id=?",(run_id,)).fetchall()
+            existing_ids={int(row["employee_id"]) for row in existing_rows}
+            eligible_ids={int(employee["id"]) for employee in coverage["included"]}
             additions=[employee for employee in coverage["included"] if int(employee["id"]) not in existing_ids]
+            removals=[row for row in existing_rows if int(row["employee_id"]) not in eligible_ids]
             stamp=now_iso()
             snapshot={"total_files":coverage["total_files"],"included_count":coverage["included_count"],"excluded_count":coverage["excluded_count"],"excluded":coverage["excluded"]}
             with self.db:
@@ -11610,17 +11640,32 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 )
                 if changed.rowcount!=1:
                     raise APIError(409,"تم تعديل المسير من مستخدم آخر. حدّث الصفحة قبل المزامنة.","payroll_revision_conflict")
+                if removals:
+                    removal_item_ids=[int(row["id"]) for row in removals]
+                    placeholders=",".join("?" for _ in removal_item_ids)
+                    self.db.execute(
+                        f"UPDATE advance_installments SET payroll_item_id=NULL WHERE status='scheduled' AND payroll_item_id IN ({placeholders})",
+                        removal_item_ids,
+                    )
+                    self.db.execute(
+                        f"UPDATE leave_sale_requests SET payroll_item_id=NULL,payout_month=NULL,updated_at=? WHERE payroll_item_id IN ({placeholders})",
+                        (stamp,*removal_item_ids),
+                    )
+                    self.db.execute(
+                        f"DELETE FROM payroll_items WHERE run_id=? AND id IN ({placeholders})",
+                        (run_id,*removal_item_ids),
+                    )
                 for employee in additions:
                     self.add_employee_to_payroll_run(run,employee,user)
                 linked=self.sync_payroll_advance_links(run_id)
-                note_data={"count":len(additions),"linked":linked}
+                note_data={"count":len(additions),"removed":len(removals),"linked":linked}
                 self.db.execute(
                     """INSERT INTO payroll_run_history(run_id,from_stage,to_stage,actor_user_id,note,note_code,note_data_json,created_at)
                        VALUES(?,?,?,?,?,'eligibility_sync',?,?)""",
                     (run_id,run["workflow_stage"],run["workflow_stage"],user["id"],"",json_text(note_data),stamp),
                 )
-                audit(self.db,user["id"],"payroll.sync","payroll_run",run_id,{"added_employee_ids":[int(value["id"]) for value in additions],"linked_installments":linked,"retained_rows":len(existing_ids)})
-            self.send_json(200,{"run":self.payroll_payload(run_id),"added_count":len(additions),"linked_installments":linked})
+                audit(self.db,user["id"],"payroll.sync","payroll_run",run_id,{"added_employee_ids":[int(value["id"]) for value in additions],"removed_employee_ids":[int(value["employee_id"]) for value in removals],"linked_installments":linked,"retained_rows":len(existing_ids)-len(removals)})
+            self.send_json(200,{"run":self.payroll_payload(run_id),"added_count":len(additions),"removed_count":len(removals),"linked_installments":linked})
 
         def payroll_batch_rows(self, run: sqlite3.Row, data: dict[str, Any]) -> list[dict[str, Any]]:
             revision=as_int(data.get("revision"),"revision",1)
@@ -11629,7 +11674,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             raw_rows=data.get("rows")
             if not isinstance(raw_rows,list) or not raw_rows or len(raw_rows)>10000:
                 raise APIError(422,"صفوف المسير غير صالحة.","validation_error",{"field":"rows"})
-            members=self.db.execute("SELECT * FROM payroll_items WHERE run_id=?",(run["id"],)).fetchall()
+            members=self.db.execute(
+                """SELECT i.* FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                    WHERE i.run_id=? AND e.active=1 AND e.deleted_at IS NULL""",
+                (run["id"],),
+            ).fetchall()
             by_id={int(row["employee_id"]):row for row in members}
             by_no={str(row["employee_no"]):row for row in members}
             seen:set[int]=set(); validated=[]
@@ -11726,7 +11775,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             reason=require_text(data,"reason",500)
             scope=str(data.get("scope") or "employee")
             if scope=="all":
-                items=self.db.execute("SELECT id,employee_id FROM payroll_items WHERE run_id=? ORDER BY id",(run_id,)).fetchall()
+                items=self.db.execute(
+                    """SELECT i.id,i.employee_id FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                        WHERE i.run_id=? AND e.active=1 AND e.deleted_at IS NULL ORDER BY i.id""",
+                    (run_id,),
+                ).fetchall()
             elif scope=="employees":
                 raw_ids=data.get("employee_ids")
                 if not isinstance(raw_ids,list) or not raw_ids or len(raw_ids)>10000:
@@ -11734,12 +11787,21 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 try: employee_ids=sorted({int(value) for value in raw_ids})
                 except (TypeError,ValueError) as exc: raise APIError(422,"قائمة الموظفين غير صالحة.","validation_error",{"field":"employee_ids"}) from exc
                 placeholders=",".join("?" for _ in employee_ids)
-                items=self.db.execute(f"SELECT id,employee_id FROM payroll_items WHERE run_id=? AND employee_id IN ({placeholders})",(run_id,*employee_ids)).fetchall()
+                items=self.db.execute(
+                    f"""SELECT i.id,i.employee_id FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                          WHERE i.run_id=? AND i.employee_id IN ({placeholders})
+                            AND e.active=1 AND e.deleted_at IS NULL""",
+                    (run_id,*employee_ids),
+                ).fetchall()
                 if len(items)!=len(employee_ids):
                     raise APIError(422,"بعض الموظفين غير موجودين في هذا المسير.","validation_error",{"field":"employee_ids"})
             else:
                 employee_id=as_int(data.get("employee_id"),"employee_id",1)
-                item=self.db.execute("SELECT id,employee_id FROM payroll_items WHERE run_id=? AND employee_id=?",(run_id,employee_id)).fetchone()
+                item=self.db.execute(
+                    """SELECT i.id,i.employee_id FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                        WHERE i.run_id=? AND i.employee_id=? AND e.active=1 AND e.deleted_at IS NULL""",
+                    (run_id,employee_id),
+                ).fetchone()
                 if not item:
                     raise APIError(404,"الموظف غير موجود في هذا المسير.","not_found")
                 items=[item]
@@ -12226,7 +12288,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             today=local_now().date().isoformat()
             salary_metrics_visible = self.has_privileged_people_access(user, "salary.view")
             values={
-                "employees":self.db.execute("SELECT COUNT(*) FROM employees WHERE active=1").fetchone()[0],
+                "employees":self.db.execute("SELECT COUNT(*) FROM employees WHERE active=1 AND deleted_at IS NULL").fetchone()[0],
                 "branches":self.db.execute("SELECT COUNT(*) FROM branches WHERE active=1").fetchone()[0],
                 "departments":self.db.execute("SELECT COUNT(*) FROM departments WHERE active=1").fetchone()[0],
                 "attendance_today":self.db.execute("SELECT COUNT(*) FROM attendance WHERE work_date=? AND check_in_at IS NOT NULL",(today,)).fetchone()[0],
@@ -12241,7 +12303,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "salary_contract_total": salary_summary["contract_total"],
                     "salary_employee_count": salary_summary["employee_count"],
                     "payroll_runs": self.db.execute("SELECT COUNT(*) FROM payroll_runs").fetchone()[0],
-                    "payroll_net_cents": self.db.execute("SELECT COALESCE(SUM(i.net_cents),0) FROM payroll_items i JOIN payroll_runs r ON r.id=i.run_id WHERE r.status IN ('approved','paid')").fetchone()[0],
+                    "payroll_net_cents": self.db.execute(
+                        """SELECT COALESCE(SUM(i.net_cents),0) FROM payroll_items i
+                             JOIN payroll_runs r ON r.id=i.run_id
+                             JOIN employees e ON e.id=i.employee_id
+                            WHERE r.status IN ('approved','paid')
+                              AND e.active=1 AND e.deleted_at IS NULL"""
+                    ).fetchone()[0],
                 })
                 values["payroll_net"] = cents_value(values["payroll_net_cents"])
             else:

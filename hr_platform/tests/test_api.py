@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r21")
+        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r22")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3969,6 +3969,91 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(report["salary_employee_count"], len(current_employees))
         self.assertEqual(report["salary_contract_total"], current_total)
 
+    def test_70b_archived_and_deleted_employees_are_excluded_from_every_payroll_total(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"PAY-REMOVE-{suffix}", "full_name": "موظف مستبعد من الرواتب",
+            "email": f"pay-remove-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "salary": 8000, "basic_salary": 8000,
+        }, expected=201)["employee"]
+
+        approved = hr.request("POST", "/api/payroll/runs", {
+            "payroll_month": "2098-10",
+        }, expected=201)["run"]
+        approved_target = next(item for item in approved["items"] if item["employee_id"] == employee["id"])
+        approved_count_before = approved["employee_count"]
+        approved_gross_before = approved["gross"]
+        approved_net_before = approved["net"]
+        hr.request("POST", f"/api/payroll/runs/{approved['id']}/transition", {"status": "review"})
+        approved = admin.request("POST", f"/api/payroll/runs/{approved['id']}/transition", {
+            "status": "approved",
+        })["run"]
+
+        draft = hr.request("POST", "/api/payroll/runs", {
+            "payroll_month": "2098-11",
+        }, expected=201)["run"]
+        self.assertIn(employee["id"], {item["employee_id"] for item in draft["items"]})
+
+        hr.request("POST", f"/api/employees/{employee['id']}/terminate", {
+            "termination_date": "2098-10-31", "termination_type": "other",
+            "termination_reason": "استبعاد الموظف المؤرشف من جميع حسابات الرواتب",
+            "final_settlement_status": "paid",
+        })
+
+        archived_approved = hr.request("GET", f"/api/payroll/runs/{approved['id']}")["run"]
+        self.assertNotIn(employee["id"], {item["employee_id"] for item in archived_approved["items"]})
+        self.assertEqual(archived_approved["employee_count"], approved_count_before - 1)
+        self.assertEqual(archived_approved["gross"], round(approved_gross_before - approved_target["gross"], 2))
+        self.assertEqual(archived_approved["net"], round(approved_net_before - approved_target["net"], 2))
+
+        listed_run = next(item for item in hr.request("GET", "/api/payroll/runs")["items"] if item["id"] == approved["id"])
+        self.assertEqual(listed_run["employee_count"], archived_approved["employee_count"])
+        self.assertEqual(listed_run["net"], archived_approved["net"])
+        dashboard = hr.request("GET", "/api/dashboard")
+        self.assertEqual(dashboard["metrics"]["latest_payroll_id"], approved["id"])
+        self.assertEqual(dashboard["metrics"]["latest_payroll_employee_count"], archived_approved["employee_count"])
+        self.assertEqual(dashboard["metrics"]["latest_payroll_gross"], archived_approved["gross"])
+        self.assertEqual(dashboard["metrics"]["latest_payroll_net"], archived_approved["net"])
+        summary = hr.request("GET", "/api/reports/summary")["summary"]
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            expected_approved_net_cents = int(db.execute(
+                """SELECT COALESCE(SUM(i.net_cents),0) FROM payroll_items i
+                     JOIN payroll_runs r ON r.id=i.run_id
+                     JOIN employees e ON e.id=i.employee_id
+                    WHERE r.status IN ('approved','paid')
+                      AND e.active=1 AND e.deleted_at IS NULL"""
+            ).fetchone()[0])
+        self.assertEqual(summary["payroll_net_cents"], expected_approved_net_cents)
+        self.assertEqual(summary["payroll_net"], round(expected_approved_net_cents / 100, 2))
+
+        archived_draft = hr.request("GET", f"/api/payroll/runs/{draft['id']}")["run"]
+        self.assertNotIn(employee["id"], {item["employee_id"] for item in archived_draft["items"]})
+        synced = hr.request("POST", f"/api/payroll/runs/{draft['id']}/sync", {
+            "revision": archived_draft["revision"],
+        })
+        self.assertEqual(synced["removed_count"], 1)
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            self.assertIsNone(db.execute(
+                "SELECT id FROM payroll_items WHERE run_id=? AND employee_id=?",
+                (draft["id"], employee["id"]),
+            ).fetchone())
+
+        admin.request("DELETE", f"/api/employees/{employee['id']}/permanent", {
+            "confirm_employee_no": employee["employee_no"],
+        })
+        deleted_approved = hr.request("GET", f"/api/payroll/runs/{approved['id']}")["run"]
+        self.assertEqual(deleted_approved["employee_count"], archived_approved["employee_count"])
+        self.assertEqual(deleted_approved["gross"], archived_approved["gross"])
+        self.assertEqual(deleted_approved["net"], archived_approved["net"])
+
+        next_run = hr.request("POST", "/api/payroll/runs", {
+            "payroll_month": "2098-12",
+        }, expected=201)["run"]
+        self.assertNotIn(employee["id"], {item["employee_id"] for item in next_run["items"]})
+        self.assertTrue(all(item["employee_no"] != f"DELETED-{employee['id']}" for item in next_run["items"]))
+
     def test_71_overnight_shift_checkout_updates_the_open_workday(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         branch = hr.request("GET", "/api/branches")["items"][0]
@@ -4599,7 +4684,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261031-production-r21", index)
+        self.assertIn("build=20261031-production-r22", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4804,7 +4889,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("'طلب مشتريات':'Purchase request'", i18n)
         self.assertIn("'الموظف صاحب الطلب':'Requesting employee'", i18n)
 
-    def test_82_historical_payroll_includes_former_staff_overtime_and_leave_sale(self):
+    def test_82_historical_payroll_excludes_archived_staff_and_retains_unpaid_source_records(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         suffix = uuid.uuid4().hex[:8]
         former = hr.request("POST", "/api/employees", {
@@ -4838,21 +4923,19 @@ class HRAPIEndToEndTests(unittest.TestCase):
         run = hr.request(
             "POST", "/api/payroll/runs", {"payroll_month": "2024-06"}, expected=201,
         )["run"]
-        item = next(row for row in run["items"] if row["employee_id"] == former["id"])
-        self.assertGreater(item["overtime_cents"], 0)
-        self.assertEqual(item["leave_sale_cents"], 25000)
-        self.assertEqual(item["gross_cents"], item["contract_gross_cents"] + item["overtime_cents"] + 25000)
+        self.assertNotIn(former["id"], {row["employee_id"] for row in run["items"]})
         with contextlib.closing(hr_server.open_db(self.db_path)) as db:
             linked = db.execute(
                 "SELECT payout_month,payroll_item_id FROM leave_sale_requests WHERE employee_id=? AND payout_month='2024-06'",
                 (former["id"],),
             ).fetchone()
         self.assertEqual(linked[0], "2024-06")
-        self.assertEqual(linked[1], item["id"])
+        self.assertIsNone(linked[1])
         _headers, content = hr.raw_request(f"/api/payroll/runs/{run['id']}/export.csv")
         csv_text = content.decode("utf-8-sig")
         self.assertIn("العمل الإضافي", csv_text)
         self.assertIn("بيع الإجازات", csv_text)
+        self.assertNotIn(former["employee_no"], csv_text)
 
     def test_83_department_report_period_financials_and_frontend_time_colors(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5141,7 +5224,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261031-production-r21", index)
+        self.assertIn("build=20261031-production-r22", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -5186,7 +5269,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         run_id = int(created["id"])
         exclusions = {item["employee_id"]: item["reason_code"] for item in created["coverage"]["excluded"]}
         self.assertEqual(exclusions[future["id"]], "service_starts_after_period")
-        self.assertEqual(exclusions[ended["id"]], "service_ended_before_period")
+        self.assertNotIn(ended["id"], exclusions)
+        self.assertNotIn(ended["id"], {item["employee_id"] for item in created["items"]})
         linked = next(item for item in created["items"] if int(item["employee_id"]) == employee_id)
         self.assertEqual(linked["advance"], 100)
         with contextlib.closing(hr_server.open_db(self.db_path)) as db:
@@ -5417,8 +5501,8 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
             "note_data_json": '{"count":2,"linked":1}',
             "actor_is_super_admin": 0,
         })
-        self.assertEqual(sync["note_ar"], "مزامنة الأهلية والسلف: أضيف 2 موظف، وربط 1 قسط.")
-        self.assertEqual(sync["note_en"], "Eligibility and advance sync: 2 employee(s) added and 1 instalment(s) linked.")
+        self.assertEqual(sync["note_ar"], "مزامنة الأهلية والسلف: أضيف 2 موظف، واستبعد 0 موظف مؤرشف أو محذوف، وربط 1 قسط.")
+        self.assertEqual(sync["note_en"], "Eligibility and advance sync: 2 employee(s) added, 0 archived or deleted employee(s) excluded, and 1 instalment(s) linked.")
         self.assertNotRegex(sync["note_en"], r"[\u0600-\u06ff]")
 
         custom = hr_server.payroll_history_note_fields({
