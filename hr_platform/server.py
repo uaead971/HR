@@ -4709,6 +4709,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                                        i.basic_cents+i.allowances_cents+i.variable_allowance_cents+
                                        i.overtime_cents+i.leave_sale_cents+i.bonus_cents+
                                        i.commission_cents+i.retroactive_cents ELSE 0 END),0) AS gross,
+                          COALESCE(SUM(CASE WHEN e.id IS NOT NULL THEN i.deductions_cents ELSE 0 END),0) AS deductions,
+                          COALESCE(SUM(CASE WHEN e.id IS NOT NULL THEN i.advance_cents ELSE 0 END),0) AS advance,
                           COALESCE(SUM(CASE WHEN e.id IS NOT NULL THEN i.net_cents ELSE 0 END),0) AS net
                      FROM payroll_runs r
                      LEFT JOIN payroll_items i ON i.run_id=r.id
@@ -4745,7 +4747,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             action_map = [("employee.manage","إضافة موظف","employees"),("leave.approve","اعتماد الإجازات","leaves"),("payroll.manage","إنشاء مسير","payroll"),("communications.send","إرسال تعميم","communications")]
             quick_actions = [{"label":label,"route":route} for permission,label,route in action_map if has_permission(self.db,user,permission)]
             selected_label = "اليوم" if date_to == today else date_to.isoformat()
-            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"salary_metrics_visible":salary_metrics_visible,"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"salary_contract_total_cents":salary_summary["contract_total_cents"] if salary_summary else None,"salary_contract_total":salary_summary["contract_total"] if salary_summary else None,"salary_basic_total":salary_summary["basic_total"] if salary_summary else None,"salary_allowances_total":salary_summary["allowances_total"] if salary_summary else None,"salary_employee_count":salary_summary["employee_count"] if salary_summary else None,"payroll_runs":int(payroll["runs"] or 0) if payroll else None,"payroll_net":cents_value(payroll["net"]) if payroll else None,"latest_payroll_id":int(latest_payroll["id"]) if latest_payroll else None,"latest_payroll_month":str(latest_payroll["payroll_month"]) if latest_payroll else None,"latest_payroll_status":str(latest_payroll["status"]) if latest_payroll else None,"latest_payroll_employee_count":int(latest_payroll["employee_count"] or 0) if latest_payroll else 0,"latest_payroll_gross":cents_value(latest_payroll["gross"]) if latest_payroll else 0,"latest_payroll_net":cents_value(latest_payroll["net"]) if latest_payroll else 0},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
+            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"salary_metrics_visible":salary_metrics_visible,"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"salary_contract_total_cents":salary_summary["contract_total_cents"] if salary_summary else None,"salary_contract_total":salary_summary["contract_total"] if salary_summary else None,"salary_basic_total":salary_summary["basic_total"] if salary_summary else None,"salary_allowances_total":salary_summary["allowances_total"] if salary_summary else None,"salary_employee_count":salary_summary["employee_count"] if salary_summary else None,"payroll_runs":int(payroll["runs"] or 0) if payroll else None,"payroll_net":cents_value(payroll["net"]) if payroll else None,"latest_payroll_id":int(latest_payroll["id"]) if latest_payroll else None,"latest_payroll_month":str(latest_payroll["payroll_month"]) if latest_payroll else None,"latest_payroll_status":str(latest_payroll["status"]) if latest_payroll else None,"latest_payroll_employee_count":int(latest_payroll["employee_count"] or 0) if latest_payroll else 0,"latest_payroll_gross":cents_value(latest_payroll["gross"]) if latest_payroll else 0,"latest_payroll_deductions":cents_value(latest_payroll["deductions"]) if latest_payroll else 0,"latest_payroll_advance":cents_value(latest_payroll["advance"]) if latest_payroll else 0,"latest_payroll_net":cents_value(latest_payroll["net"]) if latest_payroll else 0},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
 
         def api_org_grid(self) -> None:
             user = self.current_user(True); assert user is not None
@@ -10906,6 +10908,70 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 row["expected_item_id"] is None or int(row["payroll_item_id"] or 0)!=int(row["expected_item_id"] or 0)
             )]
 
+        def validate_payroll_deduction_limits(
+            self, *, employee_id: int, employee_name: str, gross_cents: int,
+            deductions_cents: int, advance_cents: int,
+            proration_cents: int = 0, absence_cents: int = 0,
+            unpaid_leave_cents: int = 0,
+        ) -> None:
+            """Enforce UAE wage-deduction limits without treating unearned wage as a recovery.
+
+            Proration, unpaid leave, and absence reduce the wage earned for the
+            period.  They are therefore excluded from the statutory recovery
+            bucket.  Advance instalments remain a separate receivable recovery:
+            at most 20% of earned wage, with all regulated deductions capped at
+            50% of earned wage.
+            """
+            gross = max(0, int(gross_cents or 0))
+            deductions = max(0, int(deductions_cents or 0))
+            advance = max(0, int(advance_cents or 0))
+            total_deductions = deductions + advance
+            details = {
+                "employee_id": int(employee_id),
+                "gross": cents_value(gross),
+                "deductions": cents_value(deductions),
+                "advance": cents_value(advance),
+                "total_deductions": cents_value(total_deductions),
+            }
+            if total_deductions > gross:
+                raise APIError(
+                    422,
+                    f"إجمالي استقطاعات {employee_name} يتجاوز راتبه الإجمالي.",
+                    "payroll_deductions_exceed_gross",
+                    details,
+                )
+            unearned_wage = min(
+                gross,
+                max(0, int(proration_cents or 0))
+                + max(0, int(absence_cents or 0))
+                + max(0, int(unpaid_leave_cents or 0)),
+            )
+            earned_wage = max(0, gross - unearned_wage)
+            advance_limit = earned_wage * 20 // 100
+            if advance > advance_limit:
+                raise APIError(
+                    422,
+                    f"قسط سلفة {employee_name} يتجاوز 20% من الأجر المستحق.",
+                    "advance_installment_limit_exceeded",
+                    details | {
+                        "earned_wage": cents_value(earned_wage),
+                        "maximum_advance_installment": cents_value(advance_limit),
+                    },
+                )
+            regulated_deductions = max(0, deductions - unearned_wage) + advance
+            total_limit = earned_wage * 50 // 100
+            if regulated_deductions > total_limit:
+                raise APIError(
+                    422,
+                    f"الاستقطاعات النظامية من راتب {employee_name} تتجاوز 50% من الأجر المستحق.",
+                    "payroll_deduction_limit_exceeded",
+                    details | {
+                        "earned_wage": cents_value(earned_wage),
+                        "regulated_deductions": cents_value(regulated_deductions),
+                        "maximum_regulated_deductions": cents_value(total_limit),
+                    },
+                )
+
         def recalculate_payroll_item(self, item_id: int) -> None:
             item = self.db.execute("SELECT * FROM payroll_items WHERE id=?", (item_id,)).fetchone()
             if not item:
@@ -10932,17 +10998,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 + variable_allowance + bonus + commission + retroactive
             )
             total_deductions = deductions + int(item["advance_cents"])
-            if total_deductions > gross:
-                raise APIError(
-                    422,
-                    f"إجمالي استقطاعات {item['employee_name']} يتجاوز راتبه الإجمالي.",
-                    "payroll_deductions_exceed_gross",
-                    {
-                        "employee_id": int(item["employee_id"]),
-                        "gross": cents_value(gross),
-                        "total_deductions": cents_value(total_deductions),
-                    },
-                )
+            self.validate_payroll_deduction_limits(
+                employee_id=int(item["employee_id"]), employee_name=str(item["employee_name"]),
+                gross_cents=gross, deductions_cents=deductions, advance_cents=int(item["advance_cents"]),
+                proration_cents=int(item["proration_deduction_cents"] or 0),
+                absence_cents=int(item["absence_deduction_cents"] or 0),
+                unpaid_leave_cents=int(item["unpaid_leave_deduction_cents"] or 0),
+            )
             net = gross - total_deductions + reimbursement
             calculation = parse_json_text(item["calculation_json"], {})
             calculation["totals"] = {
@@ -11074,6 +11136,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             "en":"Employee eligibility changed after creation; the row was retained for review.",
                         })
             for key,value in totals.items(): result[key]=value; result[key.removesuffix("_cents")]=cents_value(value)
+            result["manual_deduction_cents"] = sum(int(item.get("manual_deduction_cents") or 0) for item in items)
+            result["manual_deduction"] = cents_value(result["manual_deduction_cents"])
+            result["system_deductions_cents"] = max(0, totals["deductions_cents"] - result["manual_deduction_cents"])
+            result["system_deductions"] = cents_value(result["system_deductions_cents"])
             result["contract_gross_cents"] = totals["basic_cents"] + totals["allowances_cents"]
             result["contract_gross"] = cents_value(result["contract_gross_cents"])
             result["gross_cents"] = result["contract_gross_cents"] + totals["variable_allowance_cents"] + totals["overtime_cents"] + totals["leave_sale_cents"] + totals["bonus_cents"] + totals["commission_cents"] + totals["retroactive_cents"]
@@ -11355,8 +11421,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not employee.get("branch_name"): warnings.append({"code":"branch_unassigned","ar":"لا يوجد فرع معين للموظف.","en":"No branch is assigned to this employee."})
             if not employee.get("has_shift"): warnings.append({"code":"shift_unassigned","ar":"لا توجد مناوبة سارية خلال الفترة.","en":"No shift assignment is effective in this period."})
             if not employee.get("has_account"): warnings.append({"code":"account_missing","ar":"لا يوجد حساب دخول مرتبط بالملف.","en":"No sign-in account is linked to this employee file."})
-            if base_deductions+advance>gross:
-                raise APIError(422,f"إجمالي استقطاعات {employee['full_name']} يتجاوز راتبه الإجمالي.","payroll_deductions_exceed_gross",{"employee_id":int(employee["id"])})
+            self.validate_payroll_deduction_limits(
+                employee_id=int(employee["id"]), employee_name=str(employee["full_name"]),
+                gross_cents=gross, deductions_cents=base_deductions, advance_cents=advance,
+                proration_cents=proration, absence_cents=absence, unpaid_leave_cents=unpaid,
+            )
             calculation={"formula_version":"payroll-v2","rounding":"half_up_to_cent","inputs":{"basic_cents":basic,"allowances_cents":allowances,"service_units":service_units,"divisor_days":divisor,"unpaid_units":unpaid_units,"absence_units":float(facts["absence_days"]),"overtime_minutes":overtime_minutes,"overtime_multiplier":float(multiplier)},"warnings":warnings}
             cursor=self.db.execute(
                 """INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,department_name,branch_name,
@@ -11558,8 +11627,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "warnings":warnings,
                     }
                     initial_gross=basic+total_allowances+overtime_cents+leave_sale_cents
-                    if base_deductions+int(installment)>initial_gross:
-                        raise APIError(422,f"إجمالي استقطاعات {employee['full_name']} يتجاوز راتبه الإجمالي.","payroll_deductions_exceed_gross",{"employee_id":int(employee["id"])})
+                    self.validate_payroll_deduction_limits(
+                        employee_id=int(employee["id"]), employee_name=str(employee["full_name"]),
+                        gross_cents=initial_gross, deductions_cents=base_deductions, advance_cents=int(installment),
+                        proration_cents=proration_deduction, absence_cents=absence_deduction,
+                        unpaid_leave_cents=unpaid_leave_deduction,
+                    )
                     item_cur=self.db.execute(
                         """INSERT INTO payroll_items(
                                run_id,employee_id,employee_no,employee_name,job_title,job_grade,department_name,branch_name,
@@ -11717,9 +11790,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                        FROM payroll_adjustments WHERE payroll_item_id=?""",(member["id"],),
                 ).fetchone()
                 gross=(int(member["basic_cents"])+int(member["allowances_cents"])+int(member["overtime_cents"] or 0)+int(member["leave_sale_cents"] or 0)+int(other["other_gross"] or 0)+allowance+bonus)
-                deductions=int(member["base_deductions_cents"] or 0)+int(other["other_deductions"] or 0)+manual_deduction+int(member["advance_cents"] or 0)
-                if deductions>gross:
-                    raise APIError(422,f"إجمالي استقطاعات {member['employee_name']} يتجاوز راتبه الإجمالي.","payroll_deductions_exceed_gross",{"row":index,"employee_id":employee_id,"gross":cents_value(gross),"total_deductions":cents_value(deductions)})
+                deductions=int(member["base_deductions_cents"] or 0)+int(other["other_deductions"] or 0)+manual_deduction
+                self.validate_payroll_deduction_limits(
+                    employee_id=employee_id, employee_name=str(member["employee_name"]),
+                    gross_cents=gross, deductions_cents=deductions, advance_cents=int(member["advance_cents"] or 0),
+                    proration_cents=int(member["proration_deduction_cents"] or 0),
+                    absence_cents=int(member["absence_deduction_cents"] or 0),
+                    unpaid_leave_cents=int(member["unpaid_leave_deduction_cents"] or 0),
+                )
                 validated.append({"item":member,"employee_id":employee_id,"variable_allowance_cents":allowance,"allowance_reason":allowance_reason,"bonus_cents":bonus,"bonus_reason":bonus_reason,"manual_deduction_cents":manual_deduction,"deduction_reason":deduction_reason})
             return validated
 
@@ -11900,6 +11978,26 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if target_stage=="paid" and int(row["approved_by"] or 0)==int(user["id"]):
                 raise APIError(409,"لا يجوز لمعتمد المسير نفسه تنفيذ خطوة الصرف. يلزم مستخدم مخول آخر.","payroll_self_payment_forbidden")
             if target_stage in {"approved","paid"}:
+                deduction_rows=self.db.execute(
+                    """SELECT i.* FROM payroll_items i JOIN employees e ON e.id=i.employee_id
+                         WHERE i.run_id=? AND e.active=1 AND e.deleted_at IS NULL""",
+                    (run_id,),
+                ).fetchall()
+                for item in deduction_rows:
+                    gross=(
+                        int(item["basic_cents"] or 0)+int(item["allowances_cents"] or 0)
+                        +int(item["variable_allowance_cents"] or 0)+int(item["overtime_cents"] or 0)
+                        +int(item["leave_sale_cents"] or 0)+int(item["bonus_cents"] or 0)
+                        +int(item["commission_cents"] or 0)+int(item["retroactive_cents"] or 0)
+                    )
+                    self.validate_payroll_deduction_limits(
+                        employee_id=int(item["employee_id"]), employee_name=str(item["employee_name"]),
+                        gross_cents=gross, deductions_cents=int(item["deductions_cents"] or 0),
+                        advance_cents=int(item["advance_cents"] or 0),
+                        proration_cents=int(item["proration_deduction_cents"] or 0),
+                        absence_cents=int(item["absence_deduction_cents"] or 0),
+                        unpaid_leave_cents=int(item["unpaid_leave_deduction_cents"] or 0),
+                    )
                 missing=self.missing_payroll_advance_installments(run_id)
                 if missing:
                     raise APIError(409,"توجد أقساط سلفة مستحقة غير مرتبطة بمسير الرواتب. حدّث الموظفين والسلف قبل المتابعة.","payroll_advance_sync_required",{
@@ -12152,7 +12250,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200,{"items":[self.advance_payload(r["id"]) for r in rows]})
 
         def api_advances_post(self) -> None:
-            user=self.current_user(True); assert user is not None; employee_id=self.own_employee_id(); data=self.read_json(); amount=money_cents(data.get("amount"),"amount",Decimal("0.01")); months=as_int(data.get("months"),"months",1,6)
+            user=self.current_user(True); assert user is not None; employee_id=self.own_employee_id(); data=self.read_json(); amount=money_cents(data.get("amount"),"amount",Decimal("0.01")); months=as_int(data.get("months"),"months",1,24)
             employee_salary = self.db.execute(
                 """SELECT salary,basic_salary,housing_allowance,transport_allowance,
                           profession_allowance,other_allowance,manual_allowances_json
@@ -12163,13 +12261,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if amount>salary_cents*3: raise APIError(422,"المبلغ يتجاوز حد السياسة (ثلاثة رواتب).","advance_policy_limit")
             if self.db.execute("SELECT 1 FROM advances WHERE employee_id=? AND status IN ('submitted','approved')",(employee_id,)).fetchone(): raise APIError(409,"لديك سلفة نشطة بالفعل.","active_advance_exists")
             base, remainder=divmod(amount,months); schedule=[base]*(months-1)+[base+remainder]
-            if not salary_cents or max(schedule)>salary_cents:
-                minimum_months = math.ceil(amount / salary_cents) if salary_cents else None
+            maximum_installment = salary_cents * 20 // 100
+            if not maximum_installment or max(schedule)>maximum_installment:
+                minimum_months = math.ceil(amount / maximum_installment) if maximum_installment else None
                 raise APIError(
                     422,
-                    "قسط السلفة الشهري لا يمكن أن يتجاوز إجمالي الراتب. زد مدة السداد.",
-                    "advance_installment_exceeds_salary",
-                    {"salary": cents_value(salary_cents), "minimum_months": minimum_months},
+                    "قسط السلفة الشهري لا يمكن أن يتجاوز 20% من الأجر. زد مدة السداد.",
+                    "advance_installment_limit_exceeded",
+                    {"salary": cents_value(salary_cents), "maximum_installment": cents_value(maximum_installment), "minimum_months": minimum_months},
                 )
             today=local_now().date(); stamp=now_iso()
             with self.db:

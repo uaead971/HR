@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r22")
+        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r23")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -1359,6 +1359,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
             expected=201,
         )["run"]
         self.assertGreater(run["net"], 0)
+        self.assertEqual(run["manual_deduction"], 25 * run["employee_count"])
+        self.assertEqual(run["system_deductions"] + run["manual_deduction"], run["deductions"])
+        self.assertEqual(run["total_deductions"], run["deductions"] + run["advance"])
         run = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "review"})["run"]
         blocked = hr.request("POST", f"/api/payroll/runs/{run['id']}/transition", {"status": "approved"}, expected=409)
         self.assertEqual(blocked["code"], "payroll_self_approval_forbidden")
@@ -1374,6 +1377,12 @@ class HRAPIEndToEndTests(unittest.TestCase):
     def test_09_advance_exact_cent_schedule_and_permission(self):
         employee = self.client("employee@demo.ae", "Emp@12345")
         admin = self.client("admin@demo.ae", "Admin@123")
+        excessive_installment = employee.request(
+            "POST", "/api/advances", {"amount": 3000, "months": 1, "reason": "اختبار حد القسط"}, expected=422,
+        )
+        self.assertEqual(excessive_installment["code"], "advance_installment_limit_exceeded")
+        self.assertEqual(excessive_installment["details"]["maximum_installment"], 2400)
+        self.assertEqual(excessive_installment["details"]["minimum_months"], 2)
         advance = employee.request("POST", "/api/advances", {"amount": 1000, "months": 3, "reason": "احتياج شخصي"}, expected=201)["advance"]
         self.assertEqual([x["amount"] for x in advance["installments"]], [333.33, 333.33, 333.34])
         employee.request("POST", f"/api/advances/{advance['id']}/decision", {"action": "approve"}, expected=403)
@@ -3904,6 +3913,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(draft_dashboard["metrics"]["payroll_runs"], 0)
         self.assertEqual(draft_dashboard["metrics"]["payroll_net"], 0)
         target = next(row for row in run["items"] if row["employee_id"] == employee["id"])
+        statutory_excess = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
+            "kind": "deduction", "amount": round(target["gross"] * 0.60, 2),
+            "reason": "اختبار حد الاستقطاع النظامي", "employee_id": employee["id"],
+        }, expected=422)
+        self.assertEqual(statutory_excess["code"], "payroll_deduction_limit_exceeded")
         excessive = hr.request("POST", f"/api/payroll/runs/{run['id']}/adjustments", {
             "kind": "deduction", "amount": target["gross"] + 1,
             "reason": "اختبار منع الاستقطاع الزائد", "employee_id": employee["id"],
@@ -3925,6 +3939,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(approved_dashboard["metrics"]["latest_payroll_month"], "2044-02")
         self.assertEqual(approved_dashboard["metrics"]["latest_payroll_employee_count"], run["employee_count"])
         self.assertEqual(approved_dashboard["metrics"]["latest_payroll_gross"], run["gross"])
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_deductions"], run["deductions"])
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_advance"], run["advance"])
         self.assertEqual(approved_dashboard["metrics"]["latest_payroll_net"], run["net"])
 
         limited_employee = hr.request("POST", "/api/employees", {
@@ -4684,7 +4700,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261031-production-r22", index)
+        self.assertIn("build=20261031-production-r23", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5224,7 +5240,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261031-production-r22", index)
+        self.assertIn("build=20261031-production-r23", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

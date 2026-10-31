@@ -357,7 +357,7 @@
     'مساحة عمل الرواتب':'Payroll workspace','محفوظ':'Saved','حفظ المسودة':'Save draft','إرسال للتدقيق':'Submit for review',
     'الاعتماد النهائي':'Final approval','إرجاع لمعد المسير':'Return to preparer','إلغاء المسير':'Cancel payroll run',
     'مسودة':'Draft','تدقيق':'Review','معتمد':'Approved','مدفوع':'Paid','ملغى':'Cancelled','العلاوات والبونص':'Allowances & bonus',
-    'خصومات النظام':'System deductions','الخصومات والسلف':'Deductions & advances','صافي الرواتب':'Net payroll','التحذيرات':'Warnings',
+    'خصومات النظام':'System deductions','الخصومات اليدوية':'Manual deductions','أقساط السلف':'Advance instalments','الخصومات والسلف':'Deductions & advances','صافي الرواتب':'Net payroll','التحذيرات':'Warnings',
     'بحث الموظفين':'Search employees','الاسم أو الرقم الوظيفي':'Name or employee number','كل الأقسام':'All departments',
     'تنزيل ملف Excel':'Download Excel','اختيار ملف Excel':'Choose Excel file','استيراد Excel':'Import Excel','لم يتم اختيار ملف':'No file selected',
     'تعديل متقدم':'Advanced adjustment','الخلايا الخضراء قابلة للتعديل. المبالغ لا تُحفظ إلا عند الضغط على حفظ المسودة.':'Green cells are editable. Amounts are saved only when you press Save draft.',
@@ -373,7 +373,13 @@
     'سيستبدل ملف Excel التغييرات غير المحفوظة. هل تريد المتابعة؟':'The Excel file will replace unsaved changes. Continue?',
     'تعذر قراءة ملف Excel.':'Could not read the Excel file.',
     'اكتب الشهر بصيغة YYYY-MM بالأرقام الإنجليزية.':'Enter the month as YYYY-MM using Latin digits.',
-    'صيغة الشهر المطلوبة YYYY-MM، مثال 2026-10.':'Use YYYY-MM, for example 2026-10.'
+    'صيغة الشهر المطلوبة YYYY-MM، مثال 2026-10.':'Use YYYY-MM, for example 2026-10.',
+    'شهر {month} · {count} موظف حالي · إجمالي {gross} − خصومات {deductions} − أقساط سلف {advance}.':'Month {month} · {count} current employees · gross {gross} − deductions {deductions} − advance instalments {advance}.',
+    'مجموع الاستقطاعات يتجاوز 50% من الأجر المستحق.':'Total regulated deductions exceed 50% of earned wage.',
+    'قسط السلفة يتجاوز 20% من الأجر المستحق؛ زد مدة السداد.':'The advance instalment exceeds 20% of earned wage; extend the repayment term.',
+    'قسط السلفة منفصل عن الراتب التعاقدي والخصومات الأخرى، ولا يجوز أن يتجاوز 20% من الأجر الشهري.':'The advance instalment is separate from contractual salary and other deductions, and may not exceed 20% of monthly wage.',
+    'مدخلات جماعية تطبق لكل موظف':'Bulk inputs applied to each employee','بدل لكل موظف':'Allowance per employee','بونص لكل موظف':'Bonus per employee','خصم لكل موظف':'Deduction per employee',
+    'أي مبلغ في هذه الخانات يطبق كاملاً على كل موظف، وليس مرة واحدة على مجموع المسير.':'Every amount in these fields is applied in full to each employee, not once to the payroll total.'
   });
 
   Object.assign(english, {
