@@ -3177,7 +3177,14 @@ def normalize_job_grade(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 
 
 def salary_breakdown_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
-    """Build a consistent salary breakdown and gross total from an employee row."""
+    """Build a salary breakdown without adding allowances above gross salary.
+
+    ``employees.salary`` is the authoritative contractual gross: allowances are
+    components *inside* that amount, not amounts to add to it a second time.
+    Keeping the listed component total alongside the reconciled allowance total
+    lets older files remain reviewable while payroll and dashboard calculations
+    use the approved gross value.
+    """
     data = dict(row) if isinstance(row, sqlite3.Row) else row
     components = {
         "basic_salary": round(float(data.get("basic_salary") or 0), 2),
@@ -3188,7 +3195,13 @@ def salary_breakdown_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
     }
     manual = normalize_manual_allowances(data.get("manual_allowances_json", data.get("manual_allowances", [])))
     custom_total = round(sum(item["amount"] for item in manual), 2)
-    total = round(sum(components.values()) + custom_total, 2)
+    listed_allowances_total = round(
+        sum(components[key] for key in SALARY_COMPONENT_FIELDS if key != "basic_salary") + custom_total,
+        2,
+    )
+    components_total = round(components["basic_salary"] + listed_allowances_total, 2)
+    total = round(float(data.get("salary")), 2) if data.get("salary") is not None else components_total
+    reconciled_allowances_total = round(max(0, total - components["basic_salary"]), 2)
     lines = [
         {"code": "basic_salary", "name": "الراتب الأساسي", "name_en": "Basic salary", "amount": components["basic_salary"]},
         {"code": "housing_allowance", "name": "بدل السكن", "name_en": "Housing allowance", "amount": components["housing_allowance"]},
@@ -3197,11 +3210,22 @@ def salary_breakdown_from_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, An
         {"code": "other_allowance", "name": "بدل آخر", "name_en": "Other allowance", "amount": components["other_allowance"]},
     ]
     lines.extend({"code": "manual", "name": item["name"], "name_en": item["name"], "amount": item["amount"]} for item in manual)
+    reconciliation_difference = round(total - components_total, 2)
+    if reconciliation_difference:
+        lines.append({
+            "code": "gross_reconciliation",
+            "name": "تسوية إجمالي الراتب",
+            "name_en": "Gross salary reconciliation",
+            "amount": reconciliation_difference,
+        })
     return {
         **components,
         "manual_allowances": manual,
         "custom_allowances_total": custom_total,
-        "allowances_total": round(sum(components[key] for key in SALARY_COMPONENT_FIELDS if key != "basic_salary") + custom_total, 2),
+        "listed_allowances_total": listed_allowances_total,
+        "allowances_total": reconciled_allowances_total,
+        "components_total": components_total,
+        "reconciliation_difference": reconciliation_difference,
         "total": total,
         "lines": lines,
     }
@@ -3292,8 +3316,8 @@ def normalize_employee(row: sqlite3.Row | None) -> dict[str, Any] | None:
         breakdown = salary_breakdown_from_row(data)
         data["salary_breakdown"] = breakdown
         data["salary_total"] = breakdown["total"]
-        # Keep the legacy field as the canonical gross salary for existing
-        # payroll/certificate consumers while making the detailed lines public.
+        # ``salary`` stays the canonical contractual gross.  Component lines
+        # explain that amount but are never added above it by consumers.
         if data.get("salary") is not None:
             data["salary"] = breakdown["total"]
     if "birth_date" in data:
@@ -4517,13 +4541,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             conditions: Iterable[str] = (),
             params: Iterable[Any] = (),
         ) -> dict[str, Any]:
-            """Return the contractual monthly gross for staff currently employed.
+            """Return the authoritative gross salary for staff currently employed.
 
             The dashboard and report reconciliation intentionally excludes
             archived files, completed service and future starters. Employee
-            salary components remain the source of truth and every component
-            is converted to integer cents before aggregation to avoid
-            floating-point drift.
+            ``employees.salary`` already includes allowances, so it is summed
+            once and never reconstructed by adding allowance columns again.
+            Every amount is converted to integer cents before aggregation to
+            avoid floating-point drift.
             """
             today = local_now().date().isoformat()
             clauses = [
@@ -4533,24 +4558,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "(e.termination_date IS NULL OR e.termination_date>=?)",
             ]
             rows = self.db.execute(
-                """SELECT e.salary,e.basic_salary,e.housing_allowance,e.transport_allowance,
-                          e.profession_allowance,e.other_allowance,e.manual_allowances_json
+                """SELECT e.salary,e.basic_salary
                      FROM employees e WHERE """ + " AND ".join(clauses),
                 (*tuple(params), today, today),
             ).fetchall()
             basic_total_cents = 0
-            allowances_total_cents = 0
+            total_cents = 0
             for row in rows:
-                basic_total_cents += money_cents(row["basic_salary"] or 0, "basic_salary")
-                allowances_total_cents += sum(
-                    money_cents(row[field] or 0, field)
-                    for field in SALARY_COMPONENT_FIELDS if field != "basic_salary"
-                )
-                allowances_total_cents += sum(
-                    money_cents(item["amount"], "manual_allowance")
-                    for item in normalize_manual_allowances(row["manual_allowances_json"])
-                )
-            total_cents = basic_total_cents + allowances_total_cents
+                gross_cents = money_cents(row["salary"] or 0, "salary")
+                basic_cents = min(gross_cents, money_cents(row["basic_salary"] or 0, "basic_salary"))
+                total_cents += gross_cents
+                basic_total_cents += basic_cents
+            allowances_total_cents = max(0, total_cents - basic_total_cents)
             return {
                 "employee_count": len(rows),
                 "basic_total_cents": basic_total_cents,
@@ -4680,6 +4699,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "WHERE r.status IN ('approved','paid') AND r.payroll_month BETWEEN ? AND ?" + scope_join,
                 (date_from.strftime('%Y-%m'),date_to.strftime('%Y-%m'),*params),
             ).fetchone() if salary_metrics_visible else None
+            latest_payroll = self.db.execute(
+                """SELECT r.id,r.payroll_month,r.status,r.approved_at,
+                          COUNT(i.id) AS employee_count,
+                          COALESCE(SUM(i.basic_cents+i.allowances_cents+i.variable_allowance_cents+
+                                       i.overtime_cents+i.leave_sale_cents+i.bonus_cents+
+                                       i.commission_cents+i.retroactive_cents),0) AS gross,
+                          COALESCE(SUM(i.net_cents),0) AS net
+                     FROM payroll_runs r
+                     JOIN payroll_items i ON i.run_id=r.id
+                    WHERE r.status IN ('approved','paid') AND r.cancelled_at IS NULL
+                    GROUP BY r.id
+                    ORDER BY COALESCE(r.approved_at,r.updated_at,r.created_at) DESC,r.id DESC
+                    LIMIT 1"""
+            ).fetchone() if salary_metrics_visible else None
             departments = [dict(r) for r in self.db.execute("SELECT COALESCE(d.name,'دون قسم') label,COUNT(*) value FROM employees e LEFT JOIN departments d ON d.id=e.department_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.department_id,d.name ORDER BY value DESC", params)]
             branches = [dict(r) for r in self.db.execute("SELECT COALESCE(b.name,'دون فرع') label,COUNT(*) value FROM employees e LEFT JOIN branches b ON b.id=e.branch_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.branch_id,b.name ORDER BY value DESC", params)]
             activity = []
@@ -4703,7 +4736,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             action_map = [("employee.manage","إضافة موظف","employees"),("leave.approve","اعتماد الإجازات","leaves"),("payroll.manage","إنشاء مسير","payroll"),("communications.send","إرسال تعميم","communications")]
             quick_actions = [{"label":label,"route":route} for permission,label,route in action_map if has_permission(self.db,user,permission)]
             selected_label = "اليوم" if date_to == today else date_to.isoformat()
-            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"salary_metrics_visible":salary_metrics_visible,"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"salary_contract_total_cents":salary_summary["contract_total_cents"] if salary_summary else None,"salary_contract_total":salary_summary["contract_total"] if salary_summary else None,"salary_basic_total":salary_summary["basic_total"] if salary_summary else None,"salary_allowances_total":salary_summary["allowances_total"] if salary_summary else None,"salary_employee_count":salary_summary["employee_count"] if salary_summary else None,"payroll_runs":int(payroll["runs"] or 0) if payroll else None,"payroll_net":cents_value(payroll["net"]) if payroll else None},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
+            self.send_json(200,{"filters":{"date_from":date_from.isoformat(),"date_to":date_to.isoformat(),"branch_id":self.query.get("branch_id"),"department_id":self.query.get("department_id")},"salary_metrics_visible":salary_metrics_visible,"metrics":{"employees_total":total,"employees_active":active,"employees_inactive":inactive,"attendance_today":attendance,"absent_today":absent,"eligible_to_attend":eligible_to_attend,"late_today":late,"leave_pending":leave_pending,"overtime_pending":overtime_pending,"documents_expiring":expiring_docs,"new_employees":new_employees,"advance_active":advance_active,"salary_contract_total_cents":salary_summary["contract_total_cents"] if salary_summary else None,"salary_contract_total":salary_summary["contract_total"] if salary_summary else None,"salary_basic_total":salary_summary["basic_total"] if salary_summary else None,"salary_allowances_total":salary_summary["allowances_total"] if salary_summary else None,"salary_employee_count":salary_summary["employee_count"] if salary_summary else None,"payroll_runs":int(payroll["runs"] or 0) if payroll else None,"payroll_net":cents_value(payroll["net"]) if payroll else None,"latest_payroll_id":int(latest_payroll["id"]) if latest_payroll else None,"latest_payroll_month":str(latest_payroll["payroll_month"]) if latest_payroll else None,"latest_payroll_status":str(latest_payroll["status"]) if latest_payroll else None,"latest_payroll_employee_count":int(latest_payroll["employee_count"] or 0) if latest_payroll else 0,"latest_payroll_gross":cents_value(latest_payroll["gross"]) if latest_payroll else 0,"latest_payroll_net":cents_value(latest_payroll["net"]) if latest_payroll else 0},"attendance_context":attendance_context|{"date":date_to.isoformat(),"label":selected_label},"health":{"score":health_score,"status":"جيد" if health_score>=80 else "يحتاج متابعة" if health_score>=60 else "حرج","absence_denominator":eligible_to_attend},"pulse":[{"label":"القوة النشطة","value":active},{"label":"حضور "+selected_label,"value":attendance},{"label":"طلبات معلقة","value":leave_pending+overtime_pending},{"label":"وثائق قريبة","value":expiring_docs}],"distributions":{"departments":departments,"branches":branches},"activity":activity,"quick_actions":quick_actions,"as_of":now_iso()})
 
         def api_org_grid(self) -> None:
             user = self.current_user(True); assert user is not None
@@ -6067,7 +6100,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             row = self.db.execute(employee_query(has_permission(self.db, user, "salary.view"), True) + " WHERE e.id=?", (employee_id,)).fetchone()
             self.send_json(200, {"employee": normalize_employee(row), "account_reactivated": bool(account), "history": self.service_history_rows(employee_id)})
 
-        def parse_employee(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+        def parse_employee(
+            self,
+            data: dict[str, Any],
+            partial: bool = False,
+            allow_salary_override: bool = False,
+        ) -> dict[str, Any]:
             result: dict[str, Any] = {}
             scale_salary: float | None = None
             for key, max_len in (("employee_no", 40), ("full_name", 180)):
@@ -6174,8 +6212,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if initialize_salary_components:
                 manual = normalize_manual_allowances(result.get("manual_allowances_json", []))
                 total = sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS) + sum(item["amount"] for item in manual)
-                result["salary"] = round(total, 2)
-            if scale_salary is not None and scale_salary > 0:
+                if not (allow_salary_override and "salary" in data):
+                    result["salary"] = round(total, 2)
+            if scale_salary is not None and scale_salary > 0 and not allow_salary_override:
                 # The salary scale is authoritative for the base salary.  The
                 # employee may still receive separate allowance components.
                 result["basic_salary"] = scale_salary
@@ -6186,7 +6225,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     + sum(item["amount"] for item in manual),
                     2,
                 )
-            elif "salary" in data and not any(key in data for key in SALARY_COMPONENT_FIELDS):
+            elif "salary" in data and not any(key in data for key in SALARY_COMPONENT_FIELDS) and not (allow_salary_override and partial):
                 # Legacy callers can still set one gross value; it is treated
                 # as the basic salary so the new breakdown remains coherent.
                 result["basic_salary"] = result["salary"]
@@ -6289,7 +6328,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_employees_post(self) -> None:
             user = self.require_permission("employee.manage")
             data = self.read_json()
-            values = self.parse_employee(data)
+            values = self.parse_employee(data, allow_salary_override=is_system_admin(user))
             approval_id = values.get("approval_employee_id")
             if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
                 raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
@@ -6445,7 +6484,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 # A level-only update still needs the employee's current grade
                 # so the authoritative salary scale can recalculate the base.
                 parse_data = dict(data) | {"job_grade_id": existing_employee["job_grade_id"]}
-            values = self.parse_employee(parse_data, partial=True)
+            explicit_gross_override = is_system_admin(user) and "salary" in data
+            values = self.parse_employee(
+                parse_data,
+                partial=True,
+                allow_salary_override=is_system_admin(user),
+            )
             salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json", "job_grade_id", "job_grade_level"))
             if salary_touched:
                 merged_salary = {key: float(existing_employee[key] or 0) for key in SALARY_COMPONENT_FIELDS}
@@ -6457,7 +6501,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 for key, value in merged_salary.items():
                     values[key] = round(value, 2)
                 values["manual_allowances_json"] = json_text(manual)
-                values["salary"] = round(sum(merged_salary.values()) + sum(item["amount"] for item in manual), 2)
+                calculated_total = round(sum(merged_salary.values()) + sum(item["amount"] for item in manual), 2)
+                if explicit_gross_override:
+                    gross_salary = round(float(values.get("salary", data["salary"])), 2)
+                    if gross_salary < merged_salary["basic_salary"]:
+                        raise APIError(
+                            422,
+                            "الراتب الإجمالي لا يمكن أن يكون أقل من الراتب الأساسي.",
+                            "validation_error",
+                            {"field": "salary"},
+                        )
+                    values["salary"] = gross_salary
+                else:
+                    values["salary"] = calculated_total
             current_contract = None
             if any(key in data for key in ("contract_start_on", "contract_end_on")):
                 current_contract = self.db.execute(

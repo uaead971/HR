@@ -94,6 +94,16 @@
   };
 
   Object.assign(english, {
+    'الراتب الإجمالي هو المبلغ الشهري المعتمد ويشمل البدلات. يمكن لمسؤول النظام تعديله مباشرة.':'Gross salary is the approved monthly amount and already includes allowances. The system administrator can edit it directly.',
+    'هذه القيمة هي المعتمدة في لوحة القيادة ومسير الراتب.':'This is the authoritative value used by the dashboard and payroll runs.',
+    'يشمل الراتب الأساسي وجميع البدلات.':'Includes basic salary and all allowances.',
+    'البدلات جزء من الراتب الإجمالي ولا تُضاف فوقه مرة أخرى.':'Allowances are included in gross salary and are not added on top of it again.',
+    'راتب السلم مقترح ويمكن لمسؤول النظام تعديله.':'The grade-scale salary is a suggestion that the system administrator can override.',
+    'قابل للتعديل لمسؤول النظام':'Editable by the system administrator',
+    'مجموع الراتب الإجمالي المعتمد لـ {count} موظف على رأس العمل؛ البدلات مشمولة داخله.':'Sum of the approved gross salary for {count} active employees; allowances are already included.',
+    'آخر مسير راتب معتمد':'Latest approved payroll run',
+    'شهر {month} · {count} موظف · الإجمالي قبل الخصومات {gross}.':'Month {month} · {count} employees · gross before deductions {gross}.',
+    'لا توجد مسيرة راتب معتمدة حتى الآن.':'No payroll run has been approved yet.',
     'المشهد الشهري':'Monthly operations', 'تقويم الحضور والانصراف':'Attendance calendar',
     'يعرض الأعداد وفق النطاق والفلاتر المحددة.':'Counts reflect the selected scope and filters.',
     'التنقل بين الأشهر':'Month navigation', 'الشهر السابق':'Previous month', 'الشهر التالي':'Next month', 'الشهر':'Month',

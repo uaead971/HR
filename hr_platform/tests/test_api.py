@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r20")
+        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r21")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3821,6 +3821,23 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(employee["salary_breakdown"]["basic_salary"], 5000)
         self.assertEqual(employee["salary"], 6750.55)
 
+        gross_override_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"GROSS-{suffix}", "full_name": "موظف إجمالي معتمد",
+            "email": f"gross-authoritative-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "branch_id": branch["id"], "basic_salary": 4000,
+            "housing_allowance": 1000, "transport_allowance": 0,
+            "profession_allowance": 0, "other_allowance": 0,
+        }, expected=201)["employee"]
+        self.assertEqual(gross_override_employee["salary"], 5000)
+        gross_override_employee = admin.request(
+            "PATCH", f"/api/employees/{gross_override_employee['id']}", {"salary": 7200}
+        )["employee"]
+        self.assertEqual(gross_override_employee["salary"], 7200)
+        self.assertEqual(gross_override_employee["salary_breakdown"]["basic_salary"], 4000)
+        self.assertEqual(gross_override_employee["salary_breakdown"]["listed_allowances_total"], 1000)
+        self.assertEqual(gross_override_employee["salary_breakdown"]["allowances_total"], 3200)
+        self.assertEqual(gross_override_employee["salary_breakdown"]["total"], 7200)
+
         future_employee = hr.request("POST", "/api/employees", {
             "employee_no": f"FUT-{suffix}", "full_name": "موظف مستقبلي",
             "email": f"future-{suffix}@demo.ae", "hire_date": "2050-01-01",
@@ -3881,6 +3898,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
         run = hr.request("POST", "/api/payroll/runs", {"payroll_month": "2044-02"}, expected=201)["run"]
         self.assertNotIn(future_employee["id"], {row["employee_id"] for row in run["items"]})
+        gross_override_item = next(row for row in run["items"] if row["employee_id"] == gross_override_employee["id"])
+        self.assertEqual(gross_override_item["contract_gross"], 7200)
         draft_dashboard = hr.request("GET", "/api/dashboard?date_from=2044-02-01&date_to=2044-02-29")
         self.assertEqual(draft_dashboard["metrics"]["payroll_runs"], 0)
         self.assertEqual(draft_dashboard["metrics"]["payroll_net"], 0)
@@ -3902,6 +3921,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         approved_dashboard = hr.request("GET", "/api/dashboard?date_from=2044-02-01&date_to=2044-02-29")
         self.assertEqual(approved_dashboard["metrics"]["payroll_runs"], 1)
         self.assertEqual(approved_dashboard["metrics"]["payroll_net"], run["net"])
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_id"], run["id"])
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_month"], "2044-02")
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_employee_count"], run["employee_count"])
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_gross"], run["gross"])
+        self.assertEqual(approved_dashboard["metrics"]["latest_payroll_net"], run["net"])
 
         limited_employee = hr.request("POST", "/api/employees", {
             "employee_no": f"FIN-LIMIT-{suffix}", "full_name": "مدير دون صلاحية الرواتب",
@@ -4575,7 +4599,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261031-production-r20", index)
+        self.assertIn("build=20261031-production-r21", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5117,7 +5141,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261031-production-r20", index)
+        self.assertIn("build=20261031-production-r21", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
