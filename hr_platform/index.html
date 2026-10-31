@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261030-production-r18">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261031-production-r19">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -157,7 +157,7 @@
 
       <section class="page" id="employees">
         <div class="page-head"><div><span class="eyebrow">الأفراد</span><h1 id="employeesPageTitle">الموظفون والملفات</h1><p id="employeesPageDescription">ملف موحد، فرع ومناوبة وبطاقة عمل قابلة للطباعة.</p></div><div class="button-row"><button class="secondary" id="openEmployeeReport" type="button" data-permission="employee_report.view"><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg><span>تقرير موظف شامل</span></button><button class="primary" id="addEmployee" data-permission="employee.manage">+ إضافة موظف</button></div></div>
-        <article class="card"><div class="toolbar"><input id="employeeSearch" type="search" placeholder="ابحث بالاسم أو الرقم الوظيفي"><select id="employeeStatusFilter" aria-label="حالة الموظف"><option value="active">الموظفون الحاليون</option><option value="archive">أرشيف الموظفين</option></select><select id="employeeBranchFilter"><option value="">كل الفروع</option></select><button class="secondary" id="refreshEmployees">تحديث</button></div><div class="employee-compliance-legend"><span aria-hidden="true"></span><div><b>ماذا يعني الاسم الأحمر؟</b><small>يعني أن عقد العمل أو إحدى الوثائق الرسمية للموظف منتهية. يظهر السبب والتاريخ أسفل الاسم، ويمكن فتح الملف لتحديث الوثيقة.</small></div></div><div class="archive-guidance" id="employeeArchiveGuidance" hidden><b>أرشيف الموظفين</b><span>السجلات محفوظة ولا تُحذف. افتح الملف لمراجعة سبب وتاريخ انتهاء الخدمة أو بدء إعادة التوظيف.</span></div><div class="table-wrap"><table><thead id="employeesHead"><tr><th>الموظف</th><th>الرقم</th><th>المسمى</th><th>القسم</th><th>الفرع</th><th>المناوبة</th><th></th></tr></thead><tbody id="employeesRows"></tbody></table></div></article>
+        <article class="card"><div class="toolbar"><input id="employeeSearch" type="search" placeholder="ابحث بالاسم أو الرقم الوظيفي"><select id="employeeStatusFilter" aria-label="حالة الموظف"><option value="active">الموظفون الحاليون</option><option value="archive">أرشيف الموظفين</option></select><select id="employeeBranchFilter"><option value="">كل الفروع</option></select><button class="secondary" id="refreshEmployees">تحديث</button></div><div class="employee-compliance-legend" id="employeeComplianceLegend" hidden><span aria-hidden="true"></span><div><b>ماذا يعني الاسم الأحمر؟</b><small>يعني أن عقد العمل أو إحدى الوثائق الرسمية للموظف منتهية. يظهر السبب والتاريخ أسفل الاسم، ويمكن فتح الملف لتحديث الوثيقة.</small></div></div><div class="archive-guidance" id="employeeArchiveGuidance" hidden><b>أرشيف الموظفين</b><span>يمكن لمسؤول النظام فقط حذف ملف نهائياً، ويمنع النظام حذف أي موظف مرتبط بسجلات مالية أو رسمية محفوظة.</span></div><div class="table-wrap"><table><thead id="employeesHead"><tr><th>الموظف</th><th>الرقم</th><th>المسمى</th><th>القسم</th><th>الفرع</th><th>المناوبة</th><th></th></tr></thead><tbody id="employeesRows"></tbody></table></div></article>
       </section>
 
       <section class="page employee-report-page" id="employee-report">
@@ -421,7 +421,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261030-production-r18"></script>
-  <script src="app.js?v=5.8.0&build=20261030-production-r18"></script>
+  <script src="i18n.js?v=5.8.0&build=20261031-production-r19"></script>
+  <script src="app.js?v=5.8.0&build=20261031-production-r19"></script>
 </body>
 </html>

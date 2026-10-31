@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261030-production-r18")
+        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r19")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3477,6 +3477,87 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(len(hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"]), 1)
         self.assertIsNotNone(hr.request("GET", f"/api/employees/{employee['id']}/service-history")["items"][0]["rehired_at"])
 
+    def test_66b_archive_permanent_delete_is_admin_only_confirmed_and_history_safe(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        password = "ArchivedUser@12345"
+        clean = hr.request("POST", "/api/employees", {
+            "employee_no": f"DEL-{suffix}", "full_name": "موظف حذف آمن",
+            "email": f"delete-safe-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "salary": 3000, "create_user": True, "password": password, "role": "employee",
+        }, expected=201)["employee"]
+
+        worker = self.client(f"delete-safe-{suffix}@demo.ae", password)
+        own_directory = worker.request("GET", "/api/employees")["items"]
+        self.assertEqual(len(own_directory), 1)
+        self.assertFalse(any(key.startswith("compliance_") for key in own_directory[0]))
+        self.assertNotIn("nearest_document_expiry", own_directory[0])
+        self.assertNotIn("nearest_document_title", own_directory[0])
+        self.assertNotIn("contract_end_on", own_directory[0])
+
+        active_conflict = admin.request(
+            "DELETE", f"/api/employees/{clean['id']}/permanent",
+            {"confirm_employee_no": clean["employee_no"]}, expected=409,
+        )
+        self.assertEqual(active_conflict["code"], "employee_delete_active")
+
+        hr.request("POST", f"/api/employees/{clean['id']}/terminate", {
+            "termination_date": "2026-10-01", "termination_type": "resignation",
+            "termination_reason": "اختبار الحذف النهائي", "final_settlement_status": "paid",
+        })
+        hr_forbidden = hr.request(
+            "DELETE", f"/api/employees/{clean['id']}/permanent",
+            {"confirm_employee_no": clean["employee_no"]}, expected=403,
+        )
+        self.assertEqual(hr_forbidden["code"], "forbidden")
+        mismatch = admin.request(
+            "DELETE", f"/api/employees/{clean['id']}/permanent",
+            {"confirm_employee_no": "WRONG"}, expected=422,
+        )
+        self.assertEqual(mismatch["code"], "employee_delete_confirmation_mismatch")
+
+        protected = hr.request("POST", "/api/employees", {
+            "employee_no": f"PROT-{suffix}", "full_name": "موظف بسجل مالي",
+            "email": f"delete-protected-{suffix}@demo.ae", "hire_date": "2020-01-01", "salary": 4000,
+            "create_user": True, "password": password, "role": "employee",
+        }, expected=201)["employee"]
+        protected_worker = self.client(f"delete-protected-{suffix}@demo.ae", password)
+        protected_worker.request("POST", "/api/advances", {
+            "amount": 500, "months": 2, "reason": "سجل مالي محفوظ",
+        }, expected=201)
+        hr.request("POST", f"/api/employees/{protected['id']}/terminate", {
+            "termination_date": "2026-10-01", "termination_type": "other",
+            "termination_reason": "اختبار حماية السجل", "final_settlement_status": "paid",
+        })
+        protected_conflict = admin.request(
+            "DELETE", f"/api/employees/{protected['id']}/permanent",
+            {"confirm_employee_no": protected["employee_no"]}, expected=409,
+        )
+        self.assertEqual(protected_conflict["code"], "employee_delete_protected")
+        self.assertEqual(protected_conflict["details"]["records"]["advances"], 1)
+
+        deleted = admin.request(
+            "DELETE", f"/api/employees/{clean['id']}/permanent",
+            {"confirm_employee_no": clean["employee_no"]}, expected=200,
+        )
+        self.assertEqual(deleted["employee"]["employee_no"], clean["employee_no"])
+        self.assertNotIn(clean["id"], {row["id"] for row in admin.request("GET", "/api/employees?archive=1")["items"]})
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            self.assertIsNone(db.execute("SELECT id FROM employees WHERE id=?", (clean["id"],)).fetchone())
+            account = db.execute("SELECT email,employee_id,active FROM users WHERE email LIKE ?", (f"deleted-employee-{clean['id']}-%",)).fetchone()
+            self.assertIsNotNone(account)
+            self.assertIsNone(account["employee_id"])
+            self.assertFalse(account["active"])
+            audit_row = db.execute("SELECT details FROM audit_log WHERE action='employee.permanent_delete' AND entity_id=?", (str(clean["id"]),)).fetchone()
+            self.assertIsNotNone(audit_row)
+
+        org_grid = hr.request("GET", "/api/org/grid")
+        org_people = ([org_grid.get("general_manager")] if org_grid.get("general_manager") else [])
+        org_people += [person for department in org_grid["departments"] for person in department["employees"]]
+        self.assertTrue(org_people)
+        self.assertTrue(all(not any(key.startswith("compliance_") for key in person) for person in org_people))
+
     def test_67_v58_four_role_ceiling_and_employee_surface_are_strict(self):
         admin = self.client("admin@demo.ae", "Admin@123")
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3729,14 +3810,42 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "branch_id": branch["id"], "salary": 9999,
         }, expected=201)["employee"]
 
+        archived_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"ARCH-SAL-{suffix}", "full_name": "موظف راتب مؤرشف",
+            "email": f"archived-salary-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "branch_id": branch["id"], "salary": 8888,
+        }, expected=201)["employee"]
+        hr.request("POST", f"/api/employees/{archived_employee['id']}/terminate", {
+            "termination_date": "2026-09-30", "termination_type": "end_of_contract",
+            "termination_reason": "انتهاء الخدمة قبل احتساب الراتب", "final_settlement_status": "paid",
+        })
+
+        ended_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"ENDED-SAL-{suffix}", "full_name": "موظف انتهت خدمته",
+            "email": f"ended-salary-{suffix}@demo.ae", "hire_date": "2020-01-01",
+            "branch_id": branch["id"], "salary": 7777,
+        }, expected=201)["employee"]
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            db.execute("UPDATE employees SET termination_date=? WHERE id=?", ("2026-09-30", ended_employee["id"]))
+
         active_employees = hr.request("GET", "/api/employees")["items"]
-        expected_total_cents = sum(round(float(row["salary"]) * 100) for row in active_employees)
+        today = hr_server.local_now().date().isoformat()
+        current_employees = [
+            row for row in active_employees
+            if (not row.get("hire_date") or row["hire_date"] <= today)
+            and (not row.get("termination_date") or row["termination_date"] >= today)
+        ]
+        current_ids = {row["id"] for row in current_employees}
+        self.assertNotIn(future_employee["id"], current_ids)
+        self.assertNotIn(archived_employee["id"], current_ids)
+        self.assertNotIn(ended_employee["id"], current_ids)
+        expected_total_cents = sum(round(float(row["salary"]) * 100) for row in current_employees)
         expected_total = round(expected_total_cents / 100, 2)
         dashboard = hr.request("GET", "/api/dashboard")
         self.assertTrue(dashboard["salary_metrics_visible"])
         self.assertEqual(dashboard["filters"]["date_from"], date.today().replace(day=1).isoformat())
-        self.assertEqual(dashboard["metrics"]["salary_employee_count"], len(active_employees))
-        self.assertEqual(dashboard["metrics"]["salary_employee_count"], dashboard["metrics"]["employees_active"])
+        self.assertEqual(dashboard["metrics"]["salary_employee_count"], len(current_employees))
+        self.assertLess(dashboard["metrics"]["salary_employee_count"], dashboard["metrics"]["employees_active"])
         self.assertEqual(dashboard["metrics"]["salary_contract_total_cents"], expected_total_cents)
         self.assertEqual(dashboard["metrics"]["salary_contract_total"], expected_total)
         self.assertEqual(
@@ -3745,7 +3854,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         )
 
         filtered = hr.request("GET", f"/api/dashboard?branch_id={branch['id']}")
-        self.assertEqual(filtered["metrics"]["salary_employee_count"], len(active_employees))
+        self.assertEqual(filtered["metrics"]["salary_employee_count"], len(current_employees))
         self.assertEqual(filtered["metrics"]["salary_contract_total_cents"], expected_total_cents)
         self.assertEqual(filtered["metrics"]["salary_contract_total"], expected_total)
 
@@ -3807,7 +3916,13 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("صافي الرواتب", hidden_csv_text)
 
         report = hr.request("GET", "/api/reports/summary")["summary"]
-        current_employees = hr.request("GET", "/api/employees")["items"]
+        listed_employees = hr.request("GET", "/api/employees")["items"]
+        today = hr_server.local_now().date().isoformat()
+        current_employees = [
+            row for row in listed_employees
+            if (not row.get("hire_date") or row["hire_date"] <= today)
+            and (not row.get("termination_date") or row["termination_date"] >= today)
+        ]
         current_total = round(sum(round(float(row["salary"]) * 100) for row in current_employees) / 100, 2)
         self.assertTrue(report["salary_metrics_visible"])
         self.assertEqual(report["salary_employee_count"], len(current_employees))
@@ -4443,7 +4558,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261030-production-r18", index)
+        self.assertIn("build=20261031-production-r19", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -4820,6 +4935,14 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("Each payroll run stores an immutable snapshot", i18n)
         self.assertIn("ماذا يعني الاسم الأحمر؟", index)
         self.assertIn("employeeComplianceNote", app)
+        self.assertIn('id="employeeComplianceLegend" hidden', index)
+        self.assertIn("showCompliance=!teamOnly&&!archive&&state.employeeScope==='all'&&hasPermission('employee_document.manage')", app)
+        self.assertIn("data-permanent-delete-employee", app)
+        self.assertIn("confirm_employee_no", app)
+        org_card = app[app.index("function orgPersonCard"):app.index("function renderOrgHierarchical")]
+        executive_card = app[app.index("function executivePersonCard"):app.index("function renderExecutiveOrgGrid")]
+        self.assertNotIn("compliance", org_card)
+        self.assertNotIn("compliance", executive_card)
 
     def test_86_payroll_workspace_batch_revision_excel_return_and_cancel(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -4977,7 +5100,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261030-production-r18", index)
+        self.assertIn("build=20261031-production-r19", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

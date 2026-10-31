@@ -174,7 +174,7 @@
     ,'تم حفظ رصيد الإجازة وتسجيل التعديل في سجل التدقيق':'Leave balance saved and the adjustment was recorded in the audit log.','اختر الموظف أولاً للاستعلام عن الرصيد.':'Choose an employee first to query the balance.'
     ,'إضافة وتعديل أرصدة الموظفين (مدير النظام فقط)':'Add and edit employee balances (system administrator only)'
     ,'عدد الموظفين':'Employee count','بانتظار اعتماد مستخدم مخول آخر':'Awaiting approval by another authorized user','بانتظار تنفيذ الصرف من مستخدم مخول آخر':'Awaiting payment by another authorized user'
-    ,'عدد الموظفين النشطين ضمن النطاق التنظيمي المحدد: {count}.':'Active employees in the selected organizational scope: {count}.','عدد الموظفين النشطين المحتسبين: {count}.':'Active employees included: {count}.','جميع الحالات المسجلة':'All recorded statuses'
+    ,'عدد الموظفين النشطين ضمن النطاق التنظيمي المحدد: {count}.':'Active employees in the selected organizational scope: {count}.','عدد الموظفين على رأس العمل المحتسبين: {count}.':'Currently employed employees included: {count}.','الأساسي {basic} + جميع البدلات {allowances} · {count} موظف على رأس العمل.':'Base {basic} + all allowances {allowances} · {count} currently employed employee(s).','جميع الحالات المسجلة':'All recorded statuses'
     ,'سلم رواتب الدرجة':'Grade salary scale','أدخل الراتب الأساسي الشهري لكل حرف في هذه الدرجة.':'Enter the monthly base salary for each letter in this grade.','حرف الدرجة':'Grade level','الراتب الأساسي حسب السلم':'Base salary from scale','يُحدد الراتب الأساسي من سلم الدرجة والحرف.':'Base salary is determined by the grade and level.','لا يوجد راتب مسجل لهذا الحرف.':'No salary is registered for this level.','الحرف':'Level','الأولى':'First','الثانية':'Second','الثالثة':'Third','الرابعة':'Fourth','الخامسة':'Fifth','السادسة':'Sixth','السابعة':'Seventh','الثامنة':'Eighth','الراتب الأساسي الشهري':'Monthly base salary'
   });
 
@@ -256,6 +256,12 @@
   Object.assign(english, {
     'ماذا يعني الاسم الأحمر؟':'Why is the employee name red?',
     'يعني أن عقد العمل أو إحدى الوثائق الرسمية للموظف منتهية. يظهر السبب والتاريخ أسفل الاسم، ويمكن فتح الملف لتحديث الوثيقة.':'It means the employment contract or an official employee document has expired. The reason and date appear below the name; open the profile to update the document.',
+    'حذف نهائي':'Delete permanently','حذف الموظف نهائياً':'Permanently delete employee','هذه العملية نهائية ولا يمكن التراجع عنها.':'This action is permanent and cannot be undone.',
+    'اكتب الرقم الوظيفي للتأكيد':'Type the employee number to confirm','يجب أن يطابق الرقم المكتوب الرقم الوظيفي تماماً.':'The value must exactly match the employee number.',
+    'لا يمكن حذف موظف مرتبط بسجلات مالية أو رسمية محفوظة.':'An employee linked to retained financial or official records cannot be deleted.',
+    'لا يمكن حذف موظف على رأس العمل. أنهِ الخدمة وانقل الملف إلى الأرشيف أولاً.':'A currently employed person cannot be deleted. End their service and move the profile to the archive first.',
+    'الرقم الوظيفي المكتوب غير مطابق.':'The employee number does not match.','جارٍ حذف الموظف…':'Deleting employee…','تم حذف الموظف نهائياً من الأرشيف.':'Employee permanently deleted from the archive.','تعذر حذف الموظف':'Employee could not be deleted',
+    'يمكن لمسؤول النظام فقط حذف ملف نهائياً، ويمنع النظام حذف أي موظف مرتبط بسجلات مالية أو رسمية محفوظة.':'Only a system administrator can permanently delete a profile. Employees linked to retained financial or official records are protected from deletion.',
     'وثيقة الموظف':'Employee document','عقد العمل':'Employment contract','جواز السفر':'Passport','الهوية الإماراتية':'Emirates ID','منتهي':'Expired',
     'منهجية الحساب':'Calculation methodology','كيف يُحتسب مسير الرواتب؟':'How is payroll calculated?',
     'يحفظ كل مسير نسخة ثابتة من الفترة والسياسات والمدخلات والمعادلات حتى تبقى الشهور السابقة قابلة للمراجعة بعد تغير الرواتب أو الإعدادات.':'Each payroll run stores an immutable snapshot of its period, policies, inputs, and formulas so prior months remain auditable after salaries or settings change.',
@@ -300,7 +306,6 @@
 
   Object.assign(english, {
     'العربية':'Arabic','الموظفون الحاليون':'Current employees','أرشيف الموظفين':'Employee archive',
-    'السجلات محفوظة ولا تُحذف. افتح الملف لمراجعة سبب وتاريخ انتهاء الخدمة أو بدء إعادة التوظيف.':'Records are retained and never deleted. Open a profile to review the termination date and reason or begin rehiring.',
     'أنواع الإجازات والترخيص':'Leave and permission types','قائمة الأنواع المهيأة في النظام، بما فيها الترخيص المدفوع خلال ساعات العمل بحد أقصى ساعتين.':'Configured leave types, including paid permission during working hours for up to two hours.',
     'سياسة المؤسسة':'Organization policy','إدارة الرسائل المرسلة':'Manage sent messages','تحديث السجل':'Refresh register','الرسالة':'Message','الجمهور':'Audience',
     'تحديث من قاعدة البيانات':'Refresh from database','المصدر: قاعدة بيانات الموظفين والأقسام':'Source: employee and department database',

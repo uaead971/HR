@@ -3245,14 +3245,9 @@ def organization_employee_query() -> str:
                COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,
-               e.passport_expires_on,e.emirates_id_expires_on,
                e.branch_id,b.name AS branch_name,
-               b.license_expires_on AS branch_license_expires_on,
                e.manager_id,m.full_name AS manager_name,
-               e.hire_date,e.active,e.updated_at,
-               (SELECT ed.expires_on FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.document_type='contract' AND ed.archived=0 ORDER BY ed.expires_on DESC,ed.id DESC LIMIT 1) AS contract_end_on,
-               (SELECT MIN(ed.expires_on) FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL) AS nearest_document_expiry,
-               (SELECT ed.title FROM employee_documents ed WHERE ed.employee_id=e.id AND ed.archived=0 AND ed.no_expiry=0 AND ed.expires_on IS NOT NULL ORDER BY ed.expires_on,ed.id LIMIT 1) AS nearest_document_title
+               e.hire_date,e.active,e.updated_at
         FROM employees e
         LEFT JOIN departments d ON d.id=e.department_id
         LEFT JOIN branches b ON b.id=e.branch_id
@@ -3475,6 +3470,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/employees/(\d+)/comprehensive-report/export", self.api_employee_report_export),
                     ("GET", r"/api/employees/(\d+)", self.api_employee_get),
                     ("PATCH", r"/api/employees/(\d+)", self.api_employee_patch),
+                    ("DELETE", r"/api/employees/(\d+)/permanent", self.api_employee_permanent_delete),
                     ("GET", r"/api/employees/(\d+)/service-history", self.api_employee_service_history),
                     ("POST", r"/api/employees/(\d+)/terminate", self.api_employee_terminate),
                     ("POST", r"/api/employees/(\d+)/rehire", self.api_employee_rehire),
@@ -4505,21 +4501,26 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             conditions: Iterable[str] = (),
             params: Iterable[Any] = (),
         ) -> dict[str, Any]:
-            """Return every active employee file's contractual monthly gross.
+            """Return the contractual monthly gross for staff currently employed.
 
-            This is an organization headcount metric, not a payroll-period
-            entitlement calculation: future service dates affect payroll runs,
-            but an active employee file still belongs in the company's current
-            contractual salary commitment. Employee salary components are the
-            source of truth and every component is converted to integer cents
-            before aggregation to avoid floating-point drift.
+            The dashboard and report reconciliation intentionally excludes
+            archived files, completed service and future starters. Employee
+            salary components remain the source of truth and every component
+            is converted to integer cents before aggregation to avoid
+            floating-point drift.
             """
-            clauses = [*conditions, "e.active=1"]
+            today = local_now().date().isoformat()
+            clauses = [
+                *conditions,
+                "e.active=1",
+                "(e.hire_date IS NULL OR e.hire_date<=?)",
+                "(e.termination_date IS NULL OR e.termination_date>=?)",
+            ]
             rows = self.db.execute(
                 """SELECT e.salary,e.basic_salary,e.housing_allowance,e.transport_allowance,
                           e.profession_allowance,e.other_allowance,e.manual_allowances_json
                      FROM employees e WHERE """ + " AND ".join(clauses),
-                tuple(params),
+                (*tuple(params), today, today),
             ).fetchall()
             basic_total_cents = 0
             allowances_total_cents = 0
@@ -4714,13 +4715,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if department: conditions.append("e.department_id=?"); params.append(as_int(department,"department_id",1))
             if search: conditions.append("(e.full_name LIKE ? OR e.employee_no LIKE ? OR e.job_title LIKE ?)"); term=f"%{search}%"; params.extend((term,term,term))
             employees = [dict(row) for row in self.db.execute(organization_employee_query()+" WHERE "+" AND ".join(conditions)+" ORDER BY e.full_name", params)]
-            for employee in employees:
-                employee.update(expiry_compliance(
-                    (employee.get("contract_end_on"), "عقد العمل"),
-                    (employee.get("nearest_document_expiry"), employee.get("nearest_document_title") or "وثيقة الموظف"),
-                    (employee.get("passport_expires_on"), "جواز السفر"),
-                    (employee.get("emirates_id_expires_on"), "الهوية الإماراتية"),
-                ))
             departments = []
             dept_rows = self.db.execute("SELECT d.id,d.name,d.branch_id,b.name AS branch_name,d.manager_employee_id,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id WHERE d.active=1 ORDER BY d.name").fetchall()
             for row in dept_rows:
@@ -4864,12 +4858,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 # never render that same person as a department/root employee.
                 if gm_id and effective_manager_id and int(effective_manager_id) == gm_id:
                     effective_manager_id = None
-                employee.update(expiry_compliance(
-                    (employee.get("contract_end_on"), "عقد العمل"),
-                    (employee.get("nearest_document_expiry"), employee.get("nearest_document_title") or "وثيقة الموظف"),
-                    (employee.get("passport_expires_on"), "جواز السفر"),
-                    (employee.get("emirates_id_expires_on"), "الهوية الإماراتية"),
-                ))
                 employee = employee | {"manager_id": effective_manager_id}
                 chain, seen, manager_id = [], set(), effective_manager_id
                 while manager_id and manager_id not in seen and manager_id in by_id:
@@ -5745,6 +5733,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 status_clause = " WHERE e.active=0" if archive_mode else " WHERE e.active=1"
                 rows = self.db.execute(employee_query(has_permission(self.db, user, "salary.view")) + status_clause + " ORDER BY e.full_name").fetchall()
                 payload = [normalize_employee(row) for row in rows]
+                if archive_mode or not has_permission(self.db, user, "employee_document.manage"):
+                    compliance_keys = {
+                        "compliance_expired", "compliance_expiring", "compliance_days_remaining",
+                        "compliance_expiry_date", "compliance_expiry_reason", "compliance_alert_stage",
+                        "contract_end_on", "nearest_document_expiry", "nearest_document_title",
+                        "passport_expires_on", "emirates_id_expires_on", "branch_license_expires_on",
+                    }
+                    for employee in payload:
+                        for key in compliance_keys:
+                            employee.pop(key, None)
                 if not archive_mode and has_permission(self.db, user, "employee.profile.edit"):
                     for employee in payload:
                         employee["approval_eligible"] = bool(
@@ -5765,6 +5763,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             elif user.get("employee_id"):
                 rows = self.db.execute(employee_query(True) + " WHERE e.id=?", (user["employee_id"],)).fetchall()
                 payload = [normalize_employee(row) for row in rows]
+                for employee in payload:
+                    for key in (
+                        "compliance_expired", "compliance_expiring", "compliance_days_remaining",
+                        "compliance_expiry_date", "compliance_expiry_reason", "compliance_alert_stage",
+                        "contract_end_on", "nearest_document_expiry", "nearest_document_title",
+                        "passport_expires_on", "emirates_id_expires_on", "branch_license_expires_on",
+                    ):
+                        employee.pop(key, None)
             else:
                 raise APIError(403, "لا تملك صلاحية عرض الموظفين.", "forbidden")
             self.send_json(200, {"items": payload, "scope": scope})
@@ -5797,6 +5803,93 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not (self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "employee.lifecycle.manage")):
                 raise APIError(403, "لا تملك صلاحية عرض سجل الخدمة.", "forbidden")
             self.send_json(200, {"items": self.service_history_rows(employee_id)})
+
+        def api_employee_permanent_delete(self, employee_id: int) -> None:
+            user = self.current_user(True)
+            assert user is not None
+            if not is_system_admin(user):
+                raise APIError(403, "الحذف النهائي متاح لمسؤول النظام فقط.", "forbidden")
+            employee = self.db.execute(
+                "SELECT id,employee_no,full_name,active FROM employees WHERE id=?",
+                (employee_id,),
+            ).fetchone()
+            if not employee:
+                raise APIError(404, "الموظف غير موجود.", "not_found")
+            if bool(employee["active"]):
+                raise APIError(
+                    409,
+                    "لا يمكن حذف موظف على رأس العمل. أنهِ الخدمة وانقل الملف إلى الأرشيف أولاً.",
+                    "employee_delete_active",
+                )
+            data = self.read_json()
+            confirmation = str(data.get("confirm_employee_no") or "").strip()
+            if not hmac.compare_digest(confirmation, str(employee["employee_no"])):
+                raise APIError(
+                    422,
+                    "اكتب الرقم الوظيفي مطابقاً للتأكيد قبل الحذف النهائي.",
+                    "employee_delete_confirmation_mismatch",
+                    {"field": "confirm_employee_no"},
+                )
+
+            protected_counts = {
+                "payroll_items": int(self.db.execute("SELECT COUNT(*) FROM payroll_items WHERE employee_id=?", (employee_id,)).fetchone()[0]),
+                "payroll_adjustments": int(self.db.execute("SELECT COUNT(*) FROM payroll_adjustments WHERE employee_id=?", (employee_id,)).fetchone()[0]),
+                "salary_certificates": int(self.db.execute("SELECT COUNT(*) FROM salary_certificates WHERE employee_id=?", (employee_id,)).fetchone()[0]),
+                "purchase_requests": int(self.db.execute(
+                    "SELECT COUNT(*) FROM purchase_requests WHERE employee_id=? OR manager_employee_id=?",
+                    (employee_id, employee_id),
+                ).fetchone()[0]),
+                "advances": int(self.db.execute("SELECT COUNT(*) FROM advances WHERE employee_id=?", (employee_id,)).fetchone()[0]),
+                "email_deliveries": int(self.db.execute("SELECT COUNT(*) FROM email_deliveries WHERE employee_id=?", (employee_id,)).fetchone()[0]),
+            }
+            protected_counts = {key: count for key, count in protected_counts.items() if count}
+            if protected_counts:
+                raise APIError(
+                    409,
+                    "لا يمكن حذف موظف مرتبط بسجلات مالية أو رسمية محفوظة.",
+                    "employee_delete_protected",
+                    {"employee_no": employee["employee_no"], "records": protected_counts},
+                )
+
+            stamp = now_iso()
+            accounts = self.db.execute("SELECT id FROM users WHERE employee_id=?", (employee_id,)).fetchall()
+            former = {"employee_no": employee["employee_no"], "full_name": employee["full_name"]}
+            try:
+                with self.db:
+                    for account in accounts:
+                        account_id = int(account["id"])
+                        password_hash, password_salt = password_record(secrets.token_urlsafe(48))
+                        self.db.execute("DELETE FROM sessions WHERE user_id=?", (account_id,))
+                        self.db.execute("DELETE FROM user_permissions WHERE user_id=?", (account_id,))
+                        self.db.execute(
+                            """UPDATE users
+                                  SET email=?,display_name=?,employee_id=NULL,active=0,must_change_password=1,
+                                      password_hash=?,password_salt=?,updated_at=?
+                                WHERE id=?""",
+                            (
+                                f"deleted-employee-{employee_id}-{account_id}@invalid.local",
+                                f"Deleted employee {employee['employee_no']}",
+                                password_hash, password_salt, stamp, account_id,
+                            ),
+                        )
+                    self.db.execute("UPDATE employees SET manager_id=NULL WHERE manager_id=?", (employee_id,))
+                    self.db.execute("UPDATE employees SET approval_employee_id=NULL WHERE approval_employee_id=?", (employee_id,))
+                    self.db.execute("UPDATE departments SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute("UPDATE branches SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute("UPDATE organization SET general_manager_employee_id=NULL,updated_at=? WHERE general_manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute("DELETE FROM employees WHERE id=?", (employee_id,))
+                    audit(
+                        self.db, user["id"], "employee.permanent_delete", "employee", employee_id,
+                        former | {"linked_accounts_anonymized": len(accounts)},
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise APIError(
+                    409,
+                    "لا يمكن حذف موظف مرتبط بسجلات مالية أو رسمية محفوظة.",
+                    "employee_delete_protected",
+                    {"employee_no": employee["employee_no"], "records": protected_counts, "constraint": "retained_history"},
+                ) from exc
+            self.send_json(200, {"message": "تم حذف الموظف نهائياً من الأرشيف.", "employee": former})
 
         def api_employee_terminate(self, employee_id: int) -> None:
             user = self.require_permission("employee.lifecycle.manage")
