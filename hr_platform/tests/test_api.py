@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r29")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r30")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -965,6 +965,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "مكتبة الأهداف المعتمدة", "اختر الأهداف قبل الإرسال. يحدد المسؤول النقاط في المرحلة التالية.",
             "إضافة المتبقية", "+ اختيار", "إرسال الأهداف", "النقاط والتقرير",
             "المراجعة النهائية", "يحدده HR", "إنجاز الموظف", "الدليل / النتيجة",
+            "مرفق إثبات الإنجاز", "مرفق PDF لإثبات الإنجاز (اختياري)", "حذف المرفق الحالي",
             "نقاط المسؤول", "إرسال النقاط والتقرير للموارد البشرية", "اعتماد وتحديد الإفصاح",
             "فترة الأداء", "التقييم الذاتي", "موعد المسؤول", "قرار HR",
             "تعذر تحميل سجل التقييم.", "لا توجد دورة معلنة ومسندة إلى حسابك حالياً.",
@@ -976,9 +977,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "tr('متبقٍ {days} يوم'", "tr('أهداف الموظف')", "tr('الفترة من')",
             "tr('مكتبة الأهداف المعتمدة')", "tr('إضافة المتبقية')", "tr('+ اختيار')",
             "tr('إنجاز الموظف')", "tr('إرسال الأهداف')", "tr('المراجعة النهائية')",
-            "tr('دفتر أهدافي ونتائجي')", "tr('ملف تقييم {name}'",
+            "tr('دفتر أهدافي ونتائجي')", "tr('ملف تقييم {name}'", "tr('مرفق إثبات الإنجاز')",
         ):
             self.assertIn(marker, app)
+        self.assertIn("/api/evaluation-goals/${goal.id}/evidence", app)
+        self.assertIn("uploadData(file,['application/pdf'],2_000_000)", app)
 
         # Exact smaller leaks from employee, dossier and certificate surfaces.
         self.assertIn("e.shift_name||tr('من وحدة المناوبات')", app)
@@ -1200,14 +1203,40 @@ class HRAPIEndToEndTests(unittest.TestCase):
     def test_04_evaluation_weight_and_sequential_approval(self):
         employee = self.client("employee@demo.ae", "Emp@12345")
         current_year = date.today().year
+        evidence_pdf = b"%PDF-1.4\n%%EOF\n"
+        evidence_data_url = "data:application/pdf;base64," + base64.b64encode(evidence_pdf).decode("ascii")
         evaluation_payload = employee.request("POST", "/api/evaluations", {"year": current_year})
         evaluation_id = evaluation_payload["evaluation"]["id"]
         first = employee.request(
             "POST", f"/api/evaluations/{evaluation_id}/goals",
-            {"title": "رفع جودة العمليات", "description": "تقليل الأخطاء", "weight": 90, "measure": "نسبة الدقة", "achievement": 95, "employee_comment": "تحسن مستمر", "objective_type": "specialized", "goal_type": "result", "start_date": f"{current_year}-01-01", "end_date": f"{current_year}-12-31", "progress_status": "in_progress", "evidence_note": "انخفضت الأخطاء وفق تقرير الجودة."},
+            {"title": "رفع جودة العمليات", "description": "تقليل الأخطاء", "weight": 90, "measure": "نسبة الدقة", "achievement": 95, "employee_comment": "تحسن مستمر", "objective_type": "specialized", "goal_type": "result", "start_date": f"{current_year}-01-01", "end_date": f"{current_year}-12-31", "progress_status": "in_progress", "evidence_note": "", "evidence_file_name": "quality-evidence.pdf", "evidence_file_data": evidence_data_url},
             expected=201,
         )
         self.assertEqual(first["weight_total"], 90)
+        first_goal = first["goals"][0]
+        self.assertTrue(first_goal["has_evidence_attachment"])
+        self.assertEqual(first_goal["evidence_file_name"], "quality-evidence.pdf")
+        self.assertNotIn("evidence_file_data", first_goal)
+        evidence_headers, evidence_body = employee.raw_request(f"/api/evaluation-goals/{first_goal['id']}/evidence")
+        self.assertEqual(evidence_headers.get_content_type(), "application/pdf")
+        self.assertEqual(evidence_body, evidence_pdf)
+        invalid_attachment = employee.request(
+            "PATCH", f"/api/evaluation-goals/{first_goal['id']}",
+            {"evidence_file_name": "not-a-pdf.txt", "evidence_file_data": evidence_data_url}, expected=422,
+        )
+        self.assertEqual(invalid_attachment["code"], "invalid_upload")
+        replaced_goal = employee.request(
+            "PATCH", f"/api/evaluation-goals/{first_goal['id']}",
+            {"evidence_file_name": "updated-quality-evidence.pdf", "evidence_file_data": evidence_data_url},
+        )["goals"][0]
+        self.assertEqual(replaced_goal["evidence_file_name"], "updated-quality-evidence.pdf")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            audit_details = db.execute(
+                "SELECT details FROM audit_log WHERE action='evaluation.goal_update' AND entity_id=? ORDER BY id DESC LIMIT 1",
+                (str(first_goal["id"]),),
+            ).fetchone()[0]
+        self.assertNotIn("evidence_file_data", audit_details)
+        self.assertNotIn(evidence_data_url, audit_details)
         rejected = employee.request("POST", f"/api/evaluations/{evaluation_id}/submit", {}, expected=422)
         self.assertEqual(rejected["code"], "invalid_weight_total")
         over_weight = employee.request(
@@ -1238,6 +1267,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(step_one["evaluation"]["status"], "in_review")
         gm = self.client("gm@demo.ae", "GM@12345")
         gm.request("GET", f"/api/evaluations/{evaluation_id}", expected=403)
+        gm.request("GET", f"/api/evaluation-goals/{first_goal['id']}/evidence", expected=403)
         hr = self.client("hr@demo.ae", "HR@12345")
         final = hr.request(
             "POST", f"/api/evaluations/{evaluation_id}/hr-review",
@@ -2575,7 +2605,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 legacy.commit()
             hr_server.initialize_database(legacy_path)
             with contextlib.closing(sqlite3.connect(legacy_path)) as migrated_db:
-                self.assertIn("source_template_id", {row[1] for row in migrated_db.execute("PRAGMA table_info(evaluation_goals)")})
+                migrated_goal_columns = {row[1] for row in migrated_db.execute("PRAGMA table_info(evaluation_goals)")}
+                self.assertIn("source_template_id", migrated_goal_columns)
+                self.assertIn("evidence_file_name", migrated_goal_columns)
+                self.assertIn("evidence_file_data", migrated_goal_columns)
                 self.assertTrue(migrated_db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_evaluation_goal_template_once'").fetchone())
                 self.assertEqual(migrated_db.execute("SELECT title FROM evaluation_goals WHERE id=1").fetchone()[0], "هدف قديم باقٍ")
 
@@ -2814,7 +2847,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261105-production-r29", index)
+        self.assertIn("build=20261105-production-r30", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3026,7 +3059,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261105-production-r29", index)
+        self.assertIn("build=20261105-production-r30", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5275,7 +5308,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r29", index)
+        self.assertIn("build=20261105-production-r30", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5835,7 +5868,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r29", index)
+        self.assertIn("build=20261105-production-r30", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6096,7 +6129,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261105-production-r29", index)
+        self.assertIn("build=20261105-production-r30", index)
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

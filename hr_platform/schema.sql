@@ -624,6 +624,8 @@ CREATE TABLE IF NOT EXISTS evaluation_goals (
   end_date TEXT,
   progress_status TEXT NOT NULL DEFAULT 'not_completed' CHECK (progress_status IN ('completed','in_progress','not_completed')),
   evidence_note TEXT NOT NULL DEFAULT '',
+  evidence_file_name TEXT NOT NULL DEFAULT '',
+  evidence_file_data TEXT,
   awarded_points REAL,
   employee_comment TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,

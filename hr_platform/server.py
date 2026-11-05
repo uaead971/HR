@@ -2443,6 +2443,8 @@ def initialize_database(db_path: Path) -> None:
                     "end_date": "TEXT",
                     "progress_status": "TEXT NOT NULL DEFAULT 'not_completed'",
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
+                    "evidence_file_name": "TEXT NOT NULL DEFAULT ''",
+                    "evidence_file_data": "TEXT",
                 },
                 "notifications": {
                     "available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT",
@@ -4023,6 +4025,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/evaluations/(\d+)", self.api_evaluation_get),
                     ("POST", r"/api/evaluations/(\d+)/goals", self.api_evaluation_goal_post),
                     ("POST", r"/api/evaluations/(\d+)/goals/from-templates", self.api_evaluation_goals_from_templates),
+                    ("GET", r"/api/evaluation-goals/(\d+)/evidence", self.api_evaluation_goal_evidence_get),
                     ("PATCH", r"/api/evaluation-goals/(\d+)", self.api_evaluation_goal_patch),
                     ("DELETE", r"/api/evaluation-goals/(\d+)", self.api_evaluation_goal_delete),
                     ("POST", r"/api/evaluations/(\d+)/submit", self.api_evaluation_submit),
@@ -10043,7 +10046,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             goals = self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,)).fetchall()
             approvals = self.db.execute("SELECT a.*,e.full_name AS approver_name,u.role AS approver_role FROM evaluation_approvals a JOIN employees e ON e.id=a.approver_employee_id LEFT JOIN users u ON u.employee_id=e.id WHERE a.evaluation_id=? ORDER BY a.step_no", (evaluation_id,)).fetchall()
             weight_total = sum(float(g["weight"]) for g in goals)
-            return {"evaluation": dict(evaluation), "goals": [dict(g) for g in goals], "weight_total": weight_total, "approvals": [dict(a) for a in approvals]}
+            return {"evaluation": dict(evaluation), "goals": [self.evaluation_goal_payload(g) for g in goals], "weight_total": weight_total, "approvals": [dict(a) for a in approvals]}
 
         def api_evaluations_get(self) -> None:
             user = self.current_user(True)
@@ -10080,6 +10083,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.evaluation_access(evaluation_id)
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
+        def api_evaluation_goal_evidence_get(self, goal_id: int) -> None:
+            goal = self.db.execute(
+                "SELECT evaluation_id,evidence_file_name,evidence_file_data FROM evaluation_goals WHERE id=?",
+                (goal_id,),
+            ).fetchone()
+            if goal is None:
+                raise APIError(404, "الهدف غير موجود.", "not_found")
+            self.evaluation_access(int(goal["evaluation_id"]))
+            data_url = str(goal["evidence_file_data"] or "")
+            match = re.fullmatch(r"data:application/pdf;base64,([A-Za-z0-9+/=\r\n]+)", data_url, flags=re.IGNORECASE)
+            if not match:
+                raise APIError(404, "لا يوجد مرفق PDF لهذا الهدف.", "goal_evidence_missing")
+            try:
+                raw = base64.b64decode(match.group(1), validate=True)
+            except ValueError as exc:
+                raise APIError(422, "تعذر قراءة مرفق دليل الإنجاز.", "invalid_upload") from exc
+            self.send_download(f"goal-evidence-{goal_id}.pdf", "application/pdf", raw)
+
         def ensure_goal_owner(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
             evaluation, user = self.evaluation_access(evaluation_id)
             if evaluation["employee_id"] != user.get("employee_id"):
@@ -10087,6 +10108,28 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if evaluation["status"] not in {"draft", "returned"}:
                 raise APIError(409, "لا يمكن تعديل الأهداف بعد إرسال التقييم.", "invalid_status")
             return evaluation, user
+
+        @staticmethod
+        def evaluation_goal_payload(goal: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+            payload = dict(goal)
+            attachment = bool(payload.pop("evidence_file_data", None))
+            payload["has_evidence_attachment"] = attachment
+            if not attachment:
+                payload["evidence_file_name"] = ""
+            return payload
+
+        def parse_goal_attachment(self, data: dict[str, Any], partial: bool) -> dict[str, Any]:
+            if data.get("remove_evidence_attachment") is True:
+                return {"evidence_file_name": "", "evidence_file_data": None}
+            if data.get("evidence_file_data") not in (None, ""):
+                file_name = str(data.get("evidence_file_name") or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+                if not file_name or len(file_name) > 255 or Path(file_name).suffix.lower() != ".pdf":
+                    raise APIError(422, "اسم مرفق دليل الإنجاز يجب أن ينتهي بامتداد PDF.", "invalid_upload")
+                data_url = validate_data_url(
+                    data["evidence_file_data"], "دليل إنجاز الهدف", ("application/pdf",), 2_000_000,
+                )
+                return {"evidence_file_name": file_name, "evidence_file_data": data_url}
+            return {} if partial else {"evidence_file_name": "", "evidence_file_data": None}
 
         def parse_goal(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             result: dict[str, Any] = {}
@@ -10119,6 +10162,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for field in ("start_date", "end_date"):
                 if not partial or field in data:
                     result[field] = parse_date(data.get(field), field).isoformat()
+            result.update(self.parse_goal_attachment(data, partial))
             return result
 
         def validate_evaluation_goal(self, evaluation: sqlite3.Row | dict[str, Any], goal: dict[str, Any], require_evidence: bool = False) -> None:
@@ -10140,8 +10184,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "حالة تقدم الهدف غير صالحة.", "invalid_progress_status")
             if (progress == "completed" and abs(achievement - 100) > 0.000001) or (progress == "not_completed" and abs(achievement) > 0.000001) or (progress == "in_progress" and not 0 < achievement < 100):
                 raise APIError(422, "حالة التقدم لا تتوافق مع نسبة الإنجاز: منجز 100٪، لم يُنجز 0٪، وقيد التقدم بينهما.", "goal_progress_mismatch")
-            if require_evidence and not str(goal.get("evidence_note") or "").strip():
-                raise APIError(422, "أدخل نتيجة أو دليل إنجاز لكل هدف قبل الإرسال.", "goal_evidence_required", {"goal_id": goal.get("id")})
+            if require_evidence and not (
+                str(goal.get("evidence_note") or "").strip() or goal.get("evidence_file_data")
+            ):
+                raise APIError(422, "أدخل نتيجة أو أرفق ملف PDF لإثبات إنجاز كل هدف قبل الإرسال.", "goal_evidence_required", {"goal_id": goal.get("id")})
 
         def api_evaluation_goal_post(self, evaluation_id: int) -> None:
             evaluation, user = self.ensure_goal_owner(evaluation_id)
@@ -10171,6 +10217,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "progress_status": str(data.get("progress_status", "not_completed")),
                     "evidence_note": optional_text(data, "evidence_note", 4000),
                 }
+                values.update(self.parse_goal_attachment(data, partial=False))
             else:
                 values = self.parse_goal(data)
             self.validate_evaluation_goal(evaluation, values)
@@ -10253,7 +10300,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             values["updated_at"] = now_iso()
             with self.db:
                 self.db.execute("UPDATE evaluation_goals SET " + ",".join(f"{k}=?" for k in values) + " WHERE id=?", (*values.values(), goal_id))
-                audit(self.db, user["id"], "evaluation.goal_update", "evaluation_goal", goal_id, values)
+                audit_values = {key: value for key, value in values.items() if key != "evidence_file_data"}
+                if "evidence_file_data" in values:
+                    audit_values["evidence_attachment_updated"] = bool(values["evidence_file_data"])
+                audit(self.db, user["id"], "evaluation.goal_update", "evaluation_goal", goal_id, audit_values)
             self.send_json(200, self.evaluation_payload(goal["evaluation_id"]))
 
         def api_evaluation_goal_delete(self, goal_id: int) -> None:
@@ -10637,7 +10687,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def evaluation_payload(self, evaluation_id: int) -> dict[str, Any]:
             evaluation, user = self.evaluation_access(evaluation_id)
             evaluation_data = dict(evaluation)
-            goal_rows = [dict(row) for row in self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,))]
+            goal_rows = [self.evaluation_goal_payload(row) for row in self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,))]
             approvals = [dict(row) for row in self.db.execute(
                 """SELECT a.*,e.full_name AS approver_name,u.role AS approver_role
                      FROM evaluation_approvals a JOIN employees e ON e.id=a.approver_employee_id
