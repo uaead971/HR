@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r24")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r25")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2611,12 +2611,108 @@ class HRAPIEndToEndTests(unittest.TestCase):
         index = (root / "index.html").read_text(encoding="utf-8")
         app = (root / "app.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('id="goalTemplateSettings"', index)
+        self.assertIn('id="goals-library"', index)
+        self.assertNotIn('id="goalTemplateSettings"', index)
         self.assertIn("كتابة هدف مخصص", index + app)
         self.assertIn("/api/evaluation-goal-templates", app)
         self.assertIn("data-add-all-goal-templates", app)
-        self.assertIn("title.department_name", app)
+        self.assertIn("jobTitle.department_name", app)
         self.assertIn("recommended-goal-grid", styles)
+
+    def test_32b_v59_goals_library_rbac_aggregation_safe_archive_and_frontend(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+
+        employee.request("GET", "/api/evaluation-goals-library", expected=403)
+        employee.request(
+            "POST", "/api/evaluation-goal-templates",
+            {"job_title_id": 1, "title": "هدف غير مصرح", "measure": "ممنوع", "default_weight": 10},
+            expected=403,
+        )
+
+        catalogue = admin.request("GET", "/api/admin/permissions/catalog")["groups"]
+        performance = next(group for group in catalogue if group["key"] == "performance")
+        goal_permission = next(item for item in performance["permissions"] if item["key"] == "evaluation.goals.manage")
+        self.assertEqual(goal_permission["label"], "إدارة مكتبة أهداف التقييم حسب الوظيفة")
+
+        library = hr.request("GET", "/api/evaluation-goals-library")
+        self.assertGreaterEqual(library["summary"]["department_count"], 1)
+        self.assertGreaterEqual(library["summary"]["job_title_count"], 1)
+        self.assertGreaterEqual(library["summary"]["active_goal_count"], 1)
+        self.assertGreaterEqual(library["summary"]["employee_count"], 1)
+        self.assertTrue(all("job_titles" in department for department in library["departments"]))
+        all_titles = [title for department in library["departments"] for title in department["job_titles"]]
+        self.assertTrue(all({"employee_count", "active_goal_count", "weight_total", "goals"}.issubset(title) for title in all_titles))
+
+        users = admin.request("GET", "/api/admin/users")["items"]
+        manager_user = next(user for user in users if user["email"] == "manager@demo.ae")
+        original_overrides = manager_user["overrides"]
+        delegated = [item for item in original_overrides if item["permission"] != "evaluation.goals.manage"]
+        delegated.append({"permission": "evaluation.goals.manage", "granted": True})
+        admin.request("PATCH", f"/api/admin/users/{manager_user['id']}/permissions", {"overrides": delegated})
+        delegated_library = manager.request("GET", "/api/evaluation-goals-library")
+        self.assertEqual(delegated_library["summary"]["job_title_count"], library["summary"]["job_title_count"])
+        admin.request("PATCH", f"/api/admin/users/{manager_user['id']}/permissions", {"overrides": original_overrides})
+        manager.request("GET", "/api/evaluation-goals-library", expected=403)
+
+        me = hr.request("GET", "/api/auth/me")["user"]
+        hr_employee = next(item for item in hr.request("GET", "/api/employees")["items"] if item["id"] == me["employee_id"])
+        title_id = hr_employee["job_title_id"]
+        suffix = uuid.uuid4().hex[:8]
+        historical_template = hr.request(
+            "POST", "/api/evaluation-goal-templates",
+            {
+                "job_title_id": title_id, "title": f"هدف محفوظ تاريخياً {suffix}",
+                "description": "يجب أن تبقى هذه النسخة داخل التقييم.", "measure": "نسبة الإنجاز المثبتة",
+                "default_weight": 5, "sort_order": 901, "active": True,
+            }, expected=201,
+        )["template"]
+        evaluation = hr.request("POST", "/api/evaluations", {"year": date.today().year})["evaluation"]
+        existing_goals = hr.request("GET", f"/api/evaluations/{evaluation['id']}")["goals"]
+        for goal in existing_goals:
+            hr.request("DELETE", f"/api/evaluation-goals/{goal['id']}")
+        copied = hr.request(
+            "POST", f"/api/evaluations/{evaluation['id']}/goals",
+            {"template_id": historical_template["id"]}, expected=201,
+        )["goals"]
+        self.assertTrue(any(goal["source_template_id"] == historical_template["id"] for goal in copied))
+        archived = hr.request("DELETE", f"/api/evaluation-goal-templates/{historical_template['id']}")
+        self.assertTrue(archived["archived"])
+        self.assertFalse(archived["deleted"])
+        self.assertGreaterEqual(archived["historical_usage_count"], 1)
+        preserved = hr.request("GET", f"/api/evaluations/{evaluation['id']}")["goals"]
+        self.assertTrue(any(goal["title"] == historical_template["title"] for goal in preserved))
+        inactive = hr.request("GET", f"/api/evaluation-goal-templates?job_title_id={title_id}&include_inactive=1")["items"]
+        self.assertFalse(next(goal for goal in inactive if goal["id"] == historical_template["id"])["active"])
+
+        unused_template = hr.request(
+            "POST", "/api/evaluation-goal-templates",
+            {
+                "job_title_id": title_id, "title": f"هدف قابل للحذف {suffix}",
+                "measure": "معيار مؤقت", "default_weight": 1, "sort_order": 902, "active": True,
+            }, expected=201,
+        )["template"]
+        deleted = hr.request("DELETE", f"/api/evaluation-goal-templates/{unused_template['id']}")
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(deleted["archived"])
+        hr.request("PATCH", f"/api/evaluation-goal-templates/{unused_template['id']}", {"active": False}, expected=404)
+
+        root = Path(__file__).parents[1]
+        index = (root / "index.html").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('href="#goals-library"', index)
+        self.assertIn('data-permission="evaluation.goals.manage"', index)
+        self.assertIn("/api/evaluation-goals-library", app)
+        self.assertIn("data-library-add-goal", app)
+        self.assertIn("data-library-delete-goal", app)
+        self.assertIn(".goals-library-department", styles)
+        self.assertIn(".goal-title-weight.unbalanced", styles)
+        self.assertIn("'الأهداف':'Goals'", translations)
+        self.assertIn("'إدارة مكتبة أهداف التقييم حسب الوظيفة':'Manage the evaluation goals library by job title'", translations)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -4851,7 +4947,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r24", index)
+        self.assertIn("build=20261105-production-r25", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5391,7 +5487,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r24", index)
+        self.assertIn("build=20261105-production-r25", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

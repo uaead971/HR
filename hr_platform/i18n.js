@@ -464,6 +464,28 @@
     'اختر الموظفين الذين لم يرسلوا لتذكيرهم مرة واحدة اليوم. الاسم الأحمر يعني أن الموظف لم يُكمل ستة أشهر ويحتاج قرار استبعاد يدوي.':'Select employees who have not submitted for one reminder today. A red name means the employee has not completed six months and needs a manual exclusion decision.'
   });
 
+  Object.assign(english, {
+    'الأهداف':'Goals','مكتبة الأداء':'Performance library','إدارة مخولة':'Authorized management','الأقسام':'Departments',
+    'كل هدف يرتبط بمسمى وظيفي، وتظهر الأهداف النشطة تلقائياً لموظفي هذا المسمى ضمن التقييم السنوي.':'Each goal is linked to a job title, and active goals automatically appear in the annual review library for employees with that title.',
+    'المسميات':'Job titles','الأهداف النشطة':'Active goals','الموظفون المشمولون':'Covered employees',
+    'ابحث في قسم أو مسمى أو هدف أو معيار…':'Search a department, job title, goal or measure…','طي الكل':'Collapse all','فتح الكل':'Expand all','جارٍ تحميل خريطة الأهداف…':'Loading the goals map…',
+    'إدارة مكتبة أهداف التقييم حسب الوظيفة':'Manage the evaluation goals library by job title','مسميات غير مرتبطة بقسم':'Job titles without a department',
+    'قسم':'Department','مسميات':'job titles','أهداف نشطة':'active goals','موظفون':'employees','هدف نشط':'active goal',
+    'الوزن مكتمل':'Weight complete','الوزن يحتاج مراجعة':'Weight needs review','معيار القياس':'Measurement criterion',
+    'الأهداف النشطة أدناه تظهر تلقائياً لموظفي هذا المسمى في مكتبة التقييم.':'The active goals below automatically appear in the evaluation library for employees with this job title.',
+    'إضافة هدف':'Add goal','إضافة أول هدف':'Add first goal','لا توجد أهداف لهذا المسمى':'No goals for this job title',
+    'أضف أول هدف مع وزنه ومعيار قياسه ليظهر للموظفين.':'Add the first goal with its weight and measurement criterion so it appears to employees.',
+    'لا توجد مسميات وظيفية في هذا القسم':'No job titles in this department','أضف المسمى من إعدادات المؤسسة ثم ارجع إلى مكتبة الأهداف.':'Add a job title in Organization Settings, then return to the goals library.',
+    'لا توجد نتائج مطابقة':'No matching results','جرّب البحث باسم قسم أو مسمى أو هدف أو معيار قياس.':'Try searching by department, job title, goal or measurement criterion.',
+    'تعديل هدف':'Edit goal','ينعكس الهدف النشط مباشرة في مكتبة موظفي هذا المسمى للتقييم.':'An active goal is immediately reflected in the evaluation library for employees with this job title.',
+    'اسم الهدف':'Goal name','الوزن':'Weight','الترتيب':'Order','هدف نشط ومتاح للموظفين':'Active goal available to employees','إضافة الهدف':'Add goal',
+    'جارٍ حفظ التعديلات…':'Saving changes…','جارٍ إضافة الهدف…':'Adding goal…','تم تحديث الهدف':'Goal updated','تمت إضافة الهدف وربطه بالمسمى':'Goal added and linked to the job title',
+    'تم تعطيل الهدف':'Goal disabled','تم تفعيل الهدف وإتاحته للموظفين':'Goal enabled and made available to employees',
+    'هذا الهدف مستخدم في تقييمات سابقة؛ سيُعطّل في المكتبة وتبقى نسخه التاريخية محفوظة. هل تريد المتابعة؟':'This goal is used in previous evaluations. It will be disabled in the library while historical copies remain preserved. Continue?',
+    'حذف هذا الهدف من المكتبة نهائياً؟':'Permanently delete this goal from the library?','تم حذف الهدف':'Goal deleted',
+    'دون وصف':'No description','غير محدد':'Not specified','نشط':'Active','متوقف':'Disabled','تفعيل':'Enable','إلغاء':'Cancel'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

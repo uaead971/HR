@@ -104,6 +104,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "evaluation.view": "عرض التقييمات", "evaluation.review": "مراجعة الموارد البشرية وحل التظلمات",
         "evaluation.override_manager": "استكمال تقييمات المسؤولين الغائبين",
         "evaluation.cycle.manage": "إنشاء دورات التقييم وإعلانها وإرسال تذكيراتها", "lifecycle.view": "عرض دورة الموظف",
+        "evaluation.goals.manage": "إدارة مكتبة أهداف التقييم حسب الوظيفة",
         "lifecycle.manage": "إدارة دورة الموظف",
     },
     "communications": {
@@ -3757,8 +3758,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/evaluations/history", self.api_evaluation_history),
                     ("GET", r"/api/employees/(\d+)/evaluations/history", self.api_employee_evaluation_history),
                     ("GET", r"/api/evaluation-goal-templates", self.api_evaluation_goal_templates_get),
+                    ("GET", r"/api/evaluation-goals-library", self.api_evaluation_goals_library_get),
                     ("POST", r"/api/evaluation-goal-templates", self.api_evaluation_goal_template_post),
                     ("PATCH", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_patch),
+                    ("DELETE", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_delete),
                     ("GET", r"/api/evaluations/(\d+)", self.api_evaluation_get),
                     ("POST", r"/api/evaluations/(\d+)/goals", self.api_evaluation_goal_post),
                     ("POST", r"/api/evaluations/(\d+)/goals/from-templates", self.api_evaluation_goals_from_templates),
@@ -9287,7 +9290,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True)
             assert user is not None
             requested = as_int(self.query["job_title_id"], "job_title_id", 1) if self.query.get("job_title_id") else None
-            if requested is not None and has_permission(self.db, user, "reference.manage"):
+            if requested is not None and has_permission(self.db, user, "evaluation.goals.manage"):
                 job_title_id = requested
             else:
                 employee_id = user.get("employee_id")
@@ -9311,7 +9314,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_evaluation_goal_templates_get(self) -> None:
             user, title = self.evaluation_goal_template_scope()
-            include_inactive = has_permission(self.db, user, "reference.manage") and self.query.get("include_inactive") == "1"
+            include_inactive = has_permission(self.db, user, "evaluation.goals.manage") and self.query.get("include_inactive") == "1"
             sql = "SELECT * FROM evaluation_goal_templates WHERE job_title_id=?"
             if not include_inactive:
                 sql += " AND active=1"
@@ -9323,8 +9326,64 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 },
                 "items": [dict(row) | {"active": bool(row["active"])} for row in rows],
                 "weight_total": round(sum(float(row["default_weight"]) for row in rows if bool(row["active"])), 2),
-                "can_manage": has_permission(self.db, user, "reference.manage"),
+                "can_manage": has_permission(self.db, user, "evaluation.goals.manage"),
             })
+
+        def api_evaluation_goals_library_get(self) -> None:
+            """Return the complete department → job title → goal management tree."""
+            self.require_permission("evaluation.goals.manage")
+            departments = [dict(row) | {"active": bool(row["active"]), "job_titles": []} for row in self.db.execute(
+                "SELECT id,name,active FROM departments ORDER BY active DESC,name,id"
+            ).fetchall()]
+            by_department = {int(item["id"]): item for item in departments}
+            titles = [dict(row) | {"active": bool(row["active"]), "goals": []} for row in self.db.execute(
+                """SELECT jt.id,jt.name,jt.department_id,jt.active,d.name AS department_name,
+                          (SELECT COUNT(*) FROM employees e
+                            WHERE e.job_title_id=jt.id AND e.active=1 AND e.deleted_at IS NULL) AS employee_count
+                     FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id
+                    ORDER BY COALESCE(d.name,''),jt.active DESC,jt.name,jt.id"""
+            ).fetchall()]
+            goals = [dict(row) | {"active": bool(row["active"]), "historical_usage_count": int(row["historical_usage_count"] or 0)} for row in self.db.execute(
+                """SELECT t.*,
+                          (SELECT COUNT(*) FROM evaluation_goals g WHERE g.source_template_id=t.id) AS historical_usage_count
+                     FROM evaluation_goal_templates t
+                    ORDER BY t.job_title_id,t.sort_order,t.id"""
+            ).fetchall()]
+            titles_by_id = {int(item["id"]): item for item in titles}
+            for goal in goals:
+                title = titles_by_id.get(int(goal["job_title_id"]))
+                if title is not None:
+                    title["goals"].append(goal)
+            unassigned_titles: list[dict[str, Any]] = []
+            for title in titles:
+                active_goals = [goal for goal in title["goals"] if goal["active"]]
+                title["goal_count"] = len(title["goals"])
+                title["active_goal_count"] = len(active_goals)
+                title["weight_total"] = round(sum(float(goal["default_weight"]) for goal in active_goals), 2)
+                department = by_department.get(int(title["department_id"])) if title["department_id"] else None
+                if department is None:
+                    unassigned_titles.append(title)
+                else:
+                    department["job_titles"].append(title)
+            if unassigned_titles:
+                departments.append({
+                    "id": None, "name": "مسميات غير مرتبطة بقسم", "active": True,
+                    "virtual": True, "job_titles": unassigned_titles,
+                })
+            for department in departments:
+                department_titles = department["job_titles"]
+                department["job_title_count"] = len(department_titles)
+                department["active_goal_count"] = sum(int(title["active_goal_count"]) for title in department_titles)
+                department["employee_count"] = sum(int(title["employee_count"] or 0) for title in department_titles)
+            summary = {
+                "department_count": len(departments),
+                "job_title_count": len(titles),
+                "active_goal_count": sum(1 for goal in goals if goal["active"]),
+                "employee_count": int(self.db.execute(
+                    "SELECT COUNT(*) FROM employees WHERE active=1 AND deleted_at IS NULL AND job_title_id IS NOT NULL"
+                ).fetchone()[0]),
+            }
+            self.send_json(200, {"summary": summary, "departments": departments})
 
         def parse_goal_template(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             values: dict[str, Any] = {}
@@ -9342,7 +9401,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return values
 
         def api_evaluation_goal_template_post(self) -> None:
-            user = self.require_permission("reference.manage")
+            user = self.require_permission("evaluation.goals.manage")
             data = self.read_json()
             job_title_id = as_int(data.get("job_title_id"), "job_title_id", 1)
             if self.db.execute("SELECT 1 FROM job_titles WHERE id=?", (job_title_id,)).fetchone() is None:
@@ -9364,7 +9423,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(201, {"template": dict(row) | {"active": bool(row["active"])}})
 
         def api_evaluation_goal_template_patch(self, template_id: int) -> None:
-            user = self.require_permission("reference.manage")
+            user = self.require_permission("evaluation.goals.manage")
             if self.db.execute("SELECT 1 FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone() is None:
                 raise APIError(404, "الهدف الرئيسي غير موجود.", "not_found")
             values = self.parse_goal_template(self.read_json(), partial=True)
@@ -9382,6 +9441,38 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(409, "هذا الهدف موجود مسبقاً للمسمى الوظيفي.", "duplicate_goal_template") from exc
             row = self.db.execute("SELECT * FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone()
             self.send_json(200, {"template": dict(row) | {"active": bool(row["active"])}})
+
+        def api_evaluation_goal_template_delete(self, template_id: int) -> None:
+            """Delete unused templates; archive used ones so historical evaluations remain intact."""
+            user = self.require_permission("evaluation.goals.manage")
+            row = self.db.execute("SELECT * FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "الهدف الرئيسي غير موجود.", "not_found")
+            historical_count = int(self.db.execute(
+                "SELECT COUNT(*) FROM evaluation_goals WHERE source_template_id=?", (template_id,)
+            ).fetchone()[0])
+            with self.db:
+                if historical_count:
+                    self.db.execute(
+                        "UPDATE evaluation_goal_templates SET active=0,updated_at=? WHERE id=?",
+                        (now_iso(), template_id),
+                    )
+                    audit(self.db, user["id"], "evaluation_goal_template.archive", "evaluation_goal_template", template_id, {"historical_usage_count": historical_count})
+                else:
+                    self.db.execute("DELETE FROM evaluation_goal_templates WHERE id=?", (template_id,))
+                    audit(self.db, user["id"], "evaluation_goal_template.delete", "evaluation_goal_template", template_id)
+            if historical_count:
+                self.send_json(200, {
+                    "ok": True, "archived": True, "deleted": False,
+                    "historical_usage_count": historical_count,
+                    "message": "تم تعطيل الهدف وحفظ نسخه الموجودة في التقييمات التاريخية.",
+                })
+            else:
+                self.send_json(200, {
+                    "ok": True, "archived": False, "deleted": True,
+                    "historical_usage_count": 0,
+                    "message": "تم حذف الهدف من المكتبة.",
+                })
 
         def evaluation_access(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
             user = self.current_user(True)
