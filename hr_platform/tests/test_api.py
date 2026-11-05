@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r28")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r29")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2814,7 +2814,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261105-production-r28", index)
+        self.assertIn("build=20261105-production-r29", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3026,7 +3026,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261105-production-r28", index)
+        self.assertIn("build=20261105-production-r29", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5275,7 +5275,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r28", index)
+        self.assertIn("build=20261105-production-r29", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5394,6 +5394,18 @@ class HRAPIEndToEndTests(unittest.TestCase):
         manager = self.client("manager@demo.ae", "Manager@12345")
         hr = self.client("hr@demo.ae", "HR@12345")
         admin = self.client("admin@demo.ae", "Admin@123")
+        manager_employee_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
+        stamp = hr_server.now_iso()
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
+            title_id = db.execute(
+                """INSERT INTO job_titles(name,name_ar,name_en,active,created_at,updated_at)
+                   VALUES('مسؤول الحسابات','مسؤول الحسابات','Accounts Officer',1,?,?)""",
+                (stamp, stamp),
+            ).lastrowid
+            db.execute(
+                "UPDATE employees SET job_title='مسؤول الحسابات',job_title_id=?,updated_at=? WHERE id=?",
+                (title_id, stamp, manager_employee_id),
+            )
         body = {
             "purchase_name": "مستلزمات تشغيل الفرع",
             "amount": 175.50,
@@ -5424,14 +5436,19 @@ class HRAPIEndToEndTests(unittest.TestCase):
             {"action": "approve", "note": "مطابق للسياسة"},
         )["request"]
         self.assertEqual((second["status"], second["current_step"]), ("finance_pending", "finance"))
-        final = admin.request(
+        denied_final = admin.request(
             "POST", f"/api/purchases/{request['id']}/decision",
-            {"action": "approve", "note": "اعتماد مالي نهائي"},
+            {"action": "approve", "note": "محاولة اعتماد إداري"}, expected=403,
+        )
+        self.assertEqual(denied_final["code"], "forbidden")
+        final = manager.request(
+            "POST", f"/api/purchases/{request['id']}/decision",
+            {"action": "approve", "note": "اعتماد مسؤول الحسابات النهائي"},
         )["request"]
         self.assertEqual((final["status"], final["current_step"]), ("approved", "complete"))
         self.assertEqual(final["manager_note"], "تمت مراجعة الحاجة")
         self.assertEqual(final["hr_note"], "مطابق للسياسة")
-        self.assertEqual(final["finance_note"], "اعتماد مالي نهائي")
+        self.assertEqual(final["finance_note"], "اعتماد مسؤول الحسابات النهائي")
 
         employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
         manager_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
@@ -5477,6 +5494,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("state.user.employee_id||adminOnly", app)
         self.assertIn("/api/purchases/requesters", app)
         self.assertIn("body.employee_id=Number(form.employee_id.value)", app)
+        self.assertIn("finance_pending:'عند المحاسب / مسؤول الحسابات'", app)
+        self.assertIn("المحاسب أو مسؤول الحسابات للاعتماد النهائي", index + app)
+        self.assertIn("'عند المحاسب / مسؤول الحسابات':'With Accountant / Accounts Officer'", i18n)
         self.assertIn("'طلب مشتريات':'Purchase request'", i18n)
         self.assertIn("'الموظف صاحب الطلب':'Requesting employee'", i18n)
 
@@ -5815,7 +5835,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r28", index)
+        self.assertIn("build=20261105-production-r29", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6076,7 +6096,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261105-production-r28", index)
+        self.assertIn("build=20261105-production-r29", index)
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

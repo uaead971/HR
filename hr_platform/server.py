@@ -98,7 +98,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "payroll.approve": "اعتماد المسيرات", "payroll.pay": "إثبات دفع المسيرات",
         "advance.view": "عرض السلف", "advance.approve": "اعتماد السلف",
         "purchase.view": "عرض جميع طلبات المشتريات", "purchase.hr_approve": "مراجعة الموارد البشرية لطلبات المشتريات",
-        "purchase.finance_approve": "الاعتماد المالي النهائي لطلبات المشتريات",
+        "purchase.finance_approve": "متابعة الاعتماد النهائي للمشتريات لدى المحاسب أو مسؤول الحسابات",
     },
     "performance": {
         "evaluation.view": "عرض التقييمات", "evaluation.review": "مراجعة الموارد البشرية وحل التظلمات",
@@ -11468,23 +11468,30 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         # Employee purchase requests and their three-step approval workflow
         def finance_purchase_approver(self, user: dict[str, Any]) -> bool:
-            if not has_permission(self.db, user, "purchase.finance_approve"):
-                return False
-            if is_system_admin(user):
-                return True
+            """Restrict final purchase approval to accounting job identities.
+
+            The job title itself is the authorization source for this terminal
+            workflow step. Broad administrative or delegated permissions must
+            not let a non-accounting user issue the final financial decision.
+            """
             employee_id = user.get("employee_id")
             if not employee_id:
                 return False
             row = self.db.execute(
-                """SELECT d.name,d.manager_employee_id
-                     FROM employees e JOIN departments d ON d.id=e.department_id
-                    WHERE e.id=? AND e.active=1 AND d.active=1""",
+                """SELECT e.job_title,jt.name AS job_title_name,
+                          jt.name_ar AS job_title_ar,jt.name_en AS job_title_en
+                     FROM employees e LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+                    WHERE e.id=? AND e.active=1""",
                 (employee_id,),
             ).fetchone()
-            if not row or int(row["manager_employee_id"] or 0) != int(employee_id):
+            if not row:
                 return False
-            name = str(row["name"] or "").strip().casefold()
-            return any(label in name for label in ("المالية", "الماليه", "الحسابات", "finance", "accounts", "accounting"))
+            approved_titles = {"محاسب", "مسؤول الحسابات", "accountant", "accounts officer"}
+            titles = {
+                str(row[key] or "").strip().casefold()
+                for key in ("job_title", "job_title_name", "job_title_ar", "job_title_en")
+            }
+            return bool(titles & approved_titles)
 
         def purchase_request_row(self, request_id: int) -> sqlite3.Row:
             row = self.db.execute(
@@ -11734,7 +11741,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 elif fields["status"] == "finance_pending":
                     recipients = self.purchase_finance_recipient_ids(int(user["id"]))
                     if not recipients:
-                        raise APIError(409, "لا يوجد مدير حسابات مخول للاعتماد النهائي. عيّن مديراً لقسم المالية وامنحه صلاحية الاعتماد المالي.", "purchase_finance_approver_missing")
+                        raise APIError(409, "لا يوجد محاسب أو مسؤول حسابات نشط بحساب مستخدم لاعتماد طلب المشتريات نهائياً.", "purchase_finance_approver_missing")
                 else:
                     employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
                     recipients = [int(employee_user["id"])] if employee_user else []
