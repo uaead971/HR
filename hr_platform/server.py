@@ -189,6 +189,26 @@ JOB_GRADE_SALARY_SCALE = (
 )
 JOB_GRADE_LEVELS = ("A", "B", "C", "D")
 
+# Approved bilingual source values. Unknown Arabic tenant data is deliberately
+# left without an English value so an administrator can supply the correct
+# organization-specific wording instead of receiving an invented translation.
+DEPARTMENT_NAME_TRANSLATIONS = {
+    "الإدارة العامة": "General Management",
+    "الموارد البشرية": "Human Resources",
+    "العمليات": "Operations",
+    "المالية": "Finance",
+    "المبيعات": "Sales",
+    "المشتريات واللوجستك": "Procurement & Logistics",
+}
+JOB_TITLE_NAME_TRANSLATIONS = {
+    "المدير العام": "General Manager",
+    "مديرة العمليات": "Operations Manager",
+    "مديرة الموارد البشرية": "Human Resources Manager",
+    "أخصائي عمليات": "Operations Specialist",
+    "موظف مبيعات": "Sales Associate",
+    "مسؤول المشتريات واللوجستيك": "Procurement & Logistics Officer",
+}
+
 GENERIC_JOB_GOALS = (
     ("جودة ودقة الإنجاز", "إنجاز المسؤوليات الأساسية وفق الإجراءات المعتمدة وبأقل نسبة أخطاء.", "نسبة الأعمال المقبولة من المرة الأولى", 25),
     ("الإنتاجية والالتزام بالمواعيد", "تحقيق حجم العمل المستهدف وتسليم المهام في مواعيدها.", "نسبة المهام المنجزة ضمن الوقت المستهدف", 25),
@@ -956,10 +976,10 @@ def build_employment_contract_pdf(contract: dict[str, Any]) -> bytes:
     representative_en = _pdf_localized_value(representative, "en")
     nationality_ar = _pdf_localized_value(employee.get("nationality") or "-", "ar")
     nationality_en = _pdf_localized_value(employee.get("nationality") or "-", "en")
-    job_title_ar = _pdf_localized_value(employee.get("job_title") or "-", "ar")
-    job_title_en = _pdf_localized_value(employee.get("job_title") or "-", "en")
-    department_ar = _pdf_localized_value(employee.get("department_name") or "-", "ar")
-    department_en = _pdf_localized_value(employee.get("department_name") or "-", "en")
+    job_title_ar = employee.get("job_title_ar") or _pdf_localized_value(employee.get("job_title") or "-", "ar")
+    job_title_en = employee.get("job_title_en") or _pdf_localized_value(employee.get("job_title") or "-", "en")
+    department_ar = employee.get("department_name_ar") or _pdf_localized_value(employee.get("department_name") or "-", "ar")
+    department_en = employee.get("department_name_en") or _pdf_localized_value(employee.get("department_name") or "-", "en")
     branch_ar = _pdf_localized_value(employee.get("branch_name") or "-", "ar")
     branch_en = _pdf_localized_value(employee.get("branch_name") or "-", "en")
     font_bundle = _pdf_unicode_font()
@@ -1362,7 +1382,8 @@ def refresh_legacy_generated_contracts(db: sqlite3.Connection) -> int:
     """Regenerate legacy auto-created contract PDFs after a template revision."""
     rows = db.execute(
         """SELECT d.id,d.employee_id,d.document_number,d.issued_on,d.expires_on,d.updated_at,
-                  e.*,jt.name AS job_title_name,dep.name AS department_name,b.name AS branch_name
+                  e.*,jt.name AS job_title_name,jt.name_ar AS job_title_ar,jt.name_en AS job_title_en,
+                  dep.name AS department_name,dep.name_ar AS department_name_ar,dep.name_en AS department_name_en,b.name AS branch_name
            FROM employee_documents d
            JOIN employees e ON e.id=d.employee_id
            LEFT JOIN job_titles jt ON jt.id=e.job_title_id
@@ -1414,6 +1435,72 @@ def require_text(data: dict[str, Any], key: str, max_len: int = 500) -> str:
     if len(value) > max_len:
         raise APIError(422, f"الحقل «{key}» أطول من الحد المسموح.", "validation_error", {"field": key})
     return value
+
+
+def migrate_bilingual_reference_names(db: sqlite3.Connection) -> None:
+    """Backfill bilingual organization references without guessing translations."""
+    for table, approved in (
+        ("departments", DEPARTMENT_NAME_TRANSLATIONS),
+        ("job_titles", JOB_TITLE_NAME_TRANSLATIONS),
+    ):
+        columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
+        if not {"name", "name_ar", "name_en"}.issubset(columns):
+            continue
+        for row in db.execute(f"SELECT id,name,name_ar,name_en FROM {table}").fetchall():
+            source = str(row["name"] or "").strip()
+            name_ar = str(row["name_ar"] or "").strip()
+            name_en = str(row["name_en"] or "").strip()
+            contains_arabic = bool(re.search(r"[\u0600-\u06ff]", source))
+            if not name_ar and contains_arabic:
+                name_ar = source
+            if not name_en:
+                name_en = approved.get(source, "" if contains_arabic else source)
+            db.execute(
+                f"UPDATE {table} SET name_ar=?,name_en=? WHERE id=?",
+                (name_ar, name_en, row["id"]),
+            )
+    # Preserve unexpected legacy duplicates instead of aborting startup. API
+    # validation still blocks new duplicates; clean databases additionally get
+    # database-level partial unique indexes.
+    for statement in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_departments_name_ar_unique ON departments(name_ar) WHERE name_ar<>''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_departments_name_en_unique ON departments(name_en COLLATE NOCASE) WHERE name_en<>''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_titles_name_ar_unique ON job_titles(name_ar) WHERE name_ar<>''",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_titles_name_en_unique ON job_titles(name_en COLLATE NOCASE) WHERE name_en<>''",
+    ):
+        try:
+            db.execute(statement)
+        except sqlite3.IntegrityError:
+            pass
+
+
+def bilingual_reference_value(data: dict[str, Any], key: str, max_len: int, language: str) -> str:
+    value = require_text(data, key, max_len)
+    if language == "ar" and not re.search(r"[\u0600-\u06ff]", value):
+        raise APIError(422, "يجب إدخال الاسم العربي باللغة العربية.", "invalid_arabic_name", {"field": key})
+    if language == "en" and (re.search(r"[\u0600-\u06ff]", value) or not re.search(r"[A-Za-z]", value)):
+        raise APIError(422, "يجب إدخال الاسم الإنجليزي باللغة الإنجليزية.", "invalid_english_name", {"field": key})
+    return value
+
+
+def ensure_bilingual_reference_unique(
+    db: sqlite3.Connection,
+    table: str,
+    name_ar: str | None,
+    name_en: str | None,
+    exclude_id: int | None = None,
+) -> None:
+    if table not in {"departments", "job_titles"}:
+        raise ValueError("Unsupported bilingual reference table")
+    suffix = " AND id<>?" if exclude_id is not None else ""
+    if name_ar is not None:
+        params: tuple[Any, ...] = (name_ar, exclude_id) if exclude_id is not None else (name_ar,)
+        if db.execute(f"SELECT 1 FROM {table} WHERE name_ar=?{suffix} LIMIT 1", params).fetchone():
+            raise APIError(409, "الاسم العربي مستخدم مسبقاً.", "duplicate_arabic_name", {"field": "name_ar"})
+    if name_en is not None:
+        params = (name_en, exclude_id) if exclude_id is not None else (name_en,)
+        if db.execute(f"SELECT 1 FROM {table} WHERE name_en=? COLLATE NOCASE{suffix} LIMIT 1", params).fetchone():
+            raise APIError(409, "الاسم الإنجليزي مستخدم مسبقاً.", "duplicate_english_name", {"field": "name_en"})
 
 
 def optional_text(data: dict[str, Any], key: str, max_len: int = 1000) -> str:
@@ -2221,7 +2308,10 @@ def initialize_database(db_path: Path) -> None:
                     "smtp_from_name": "TEXT NOT NULL DEFAULT ''",
                     "smtp_from_email": "TEXT NOT NULL DEFAULT ''",
                 },
-                "departments": {"branch_id": "INTEGER", "updated_at": "TEXT"},
+                "departments": {
+                    "name_ar": "TEXT NOT NULL DEFAULT ''", "name_en": "TEXT NOT NULL DEFAULT ''",
+                    "branch_id": "INTEGER", "updated_at": "TEXT",
+                },
                 "branches": {"license_expires_on": "TEXT"},
                 "employees": {
                     "job_title_id": "INTEGER", "job_grade_id": "INTEGER",
@@ -2252,6 +2342,9 @@ def initialize_database(db_path: Path) -> None:
                     "level_b_salary_cents": "INTEGER NOT NULL DEFAULT 0",
                     "level_c_salary_cents": "INTEGER NOT NULL DEFAULT 0",
                     "level_d_salary_cents": "INTEGER NOT NULL DEFAULT 0",
+                },
+                "job_titles": {
+                    "name_ar": "TEXT NOT NULL DEFAULT ''", "name_en": "TEXT NOT NULL DEFAULT ''",
                 },
                 "users": {
                     "must_change_password": "INTEGER NOT NULL DEFAULT 0",
@@ -2341,6 +2434,10 @@ def initialize_database(db_path: Path) -> None:
                 },
                 "document_expiry_alerts": {"alert_window_days": "INTEGER NOT NULL DEFAULT 90"},
                 "payroll_items": {
+                    "job_title_ar": "TEXT NOT NULL DEFAULT ''",
+                    "job_title_en": "TEXT NOT NULL DEFAULT ''",
+                    "department_name_ar": "TEXT NOT NULL DEFAULT ''",
+                    "department_name_en": "TEXT NOT NULL DEFAULT ''",
                     "bonus_cents": "INTEGER NOT NULL DEFAULT 0",
                     "variable_allowance_cents": "INTEGER NOT NULL DEFAULT 0",
                     "base_deductions_cents": "INTEGER NOT NULL DEFAULT 0",
@@ -2408,6 +2505,7 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            migrate_bilingual_reference_names(db)
             # V6.2 gives the catalogue classification its own immutable snapshot
             # dimension.  The existing evaluation ``goal_type`` remains the
             # result/behaviour/development dimension and is intentionally not
@@ -2502,6 +2600,11 @@ def initialize_database(db_path: Path) -> None:
                        manager_id INTEGER,
                        approval_employee_id INTEGER,
                        job_title TEXT NOT NULL DEFAULT '',
+                       job_title_ar TEXT NOT NULL DEFAULT '',
+                       job_title_en TEXT NOT NULL DEFAULT '',
+                       department_name TEXT NOT NULL DEFAULT '',
+                       department_name_ar TEXT NOT NULL DEFAULT '',
+                       department_name_en TEXT NOT NULL DEFAULT '',
                        job_grade TEXT NOT NULL DEFAULT '',
                        basic_salary REAL NOT NULL DEFAULT 0,
                        gross_salary REAL NOT NULL DEFAULT 0,
@@ -2518,7 +2621,12 @@ def initialize_database(db_path: Path) -> None:
                        FOREIGN KEY (rehired_by) REFERENCES users(id) ON DELETE SET NULL)"""
             )
             history_columns = {row["name"] for row in db.execute("PRAGMA table_info(employee_service_history)")}
-            for column, definition in {"contract_start_on": "TEXT", "contract_end_on": "TEXT"}.items():
+            for column, definition in {
+                "contract_start_on": "TEXT", "contract_end_on": "TEXT",
+                "job_title_ar": "TEXT NOT NULL DEFAULT ''", "job_title_en": "TEXT NOT NULL DEFAULT ''",
+                "department_name": "TEXT NOT NULL DEFAULT ''",
+                "department_name_ar": "TEXT NOT NULL DEFAULT ''", "department_name_en": "TEXT NOT NULL DEFAULT ''",
+            }.items():
                 if column not in history_columns:
                     db.execute(f"ALTER TABLE employee_service_history ADD COLUMN {column} {definition}")
             db.execute("CREATE INDEX IF NOT EXISTS idx_employee_service_history_employee ON employee_service_history(employee_id, period_no DESC)")
@@ -2778,7 +2886,10 @@ def initialize_database(db_path: Path) -> None:
                 "الإدارة العامة", "الموارد البشرية", "العمليات", "المالية",
                 "المبيعات", "المشتريات واللوجستك",
             ):
-                db.execute("INSERT OR IGNORE INTO departments(name,created_at) VALUES(?,?)", (name, stamp))
+                db.execute(
+                    "INSERT OR IGNORE INTO departments(name,name_ar,name_en,created_at) VALUES(?,?,?,?)",
+                    (name, name, DEPARTMENT_NAME_TRANSLATIONS[name], stamp),
+                )
             for code, name, level_a, level_b, level_c, level_d in JOB_GRADE_SALARY_SCALE:
                 salaries = (level_a * 100, level_b * 100, level_c * 100, level_d * 100)
                 db.execute(
@@ -2802,8 +2913,8 @@ def initialize_database(db_path: Path) -> None:
                 ("مسؤول المشتريات واللوجستيك", procurement_dept),
             ):
                 db.execute(
-                    "INSERT OR IGNORE INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)",
-                    (title, department_id, stamp, stamp),
+                    "INSERT OR IGNORE INTO job_titles(name,name_ar,name_en,department_id,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (title, title, JOB_TITLE_NAME_TRANSLATIONS[title], department_id, stamp, stamp),
                 )
             db.execute(
                 "INSERT OR IGNORE INTO branches(name,address,latitude,longitude,radius_m,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -2825,7 +2936,10 @@ def initialize_database(db_path: Path) -> None:
             ]
             employee_ids: dict[str, int] = {}
             for employee_no, name, email, title, grade, dept, manager, salary in employee_seed:
-                db.execute("INSERT OR IGNORE INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)", (title, dept, stamp, stamp))
+                db.execute(
+                    "INSERT OR IGNORE INTO job_titles(name,name_ar,name_en,department_id,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (title, title, JOB_TITLE_NAME_TRANSLATIONS[title], dept, stamp, stamp),
+                )
                 db.execute(
                     "INSERT OR IGNORE INTO employees(employee_no,full_name,email,job_title,job_grade,department_id,branch_id,manager_id,hire_date,salary,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (employee_no, name, email, title, grade, dept, branch_id, manager, "2023-01-01", salary, stamp, stamp),
@@ -3536,9 +3650,11 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
     sensitive_marker = "1" if include_sensitive else "0"
     return f"""
         SELECT e.id,e.employee_no,e.full_name,e.email,e.phone,e.gender,
-               COALESCE(jt.name,e.job_title) AS job_title,COALESCE(jg.code,e.job_grade) AS job_grade,
+               COALESCE(jt.name,e.job_title) AS job_title,jt.name_ar AS job_title_ar,jt.name_en AS job_title_en,
+               COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
-               e.department_id,d.name AS department_name,e.branch_id,b.name AS branch_name,
+               e.department_id,d.name AS department_name,d.name_ar AS department_name_ar,d.name_en AS department_name_en,
+               e.branch_id,b.name AS branch_name,
                e.passport_expires_on,e.emirates_id_expires_on,
                e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,e.rest_days_override,{salary}{salary_components},e.photo_data,e.active,
                e.termination_date,e.termination_type,e.termination_reason,e.termination_notes,e.notice_end_on,
@@ -3575,10 +3691,10 @@ def organization_employee_query() -> str:
     """
     return """
         SELECT e.id,e.employee_no,e.full_name,e.gender,
-               COALESCE(jt.name,e.job_title) AS job_title,
+               COALESCE(jt.name,e.job_title) AS job_title,jt.name_ar AS job_title_ar,jt.name_en AS job_title_en,
                COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
-               e.department_id,d.name AS department_name,
+               e.department_id,d.name AS department_name,d.name_ar AS department_name_ar,d.name_en AS department_name_en,
                e.branch_id,b.name AS branch_name,
                e.manager_id,m.full_name AS manager_name,
                e.hire_date,e.active,e.updated_at
@@ -5078,7 +5194,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if search: conditions.append("(e.full_name LIKE ? OR e.employee_no LIKE ? OR e.job_title LIKE ?)"); term=f"%{search}%"; params.extend((term,term,term))
             employees = [dict(row) for row in self.db.execute(organization_employee_query()+" WHERE "+" AND ".join(conditions)+" ORDER BY e.full_name", params)]
             departments = []
-            dept_rows = self.db.execute("SELECT d.id,d.name,d.branch_id,b.name AS branch_name,d.manager_employee_id,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id WHERE d.active=1 ORDER BY d.name").fetchall()
+            dept_rows = self.db.execute("SELECT d.id,d.name,d.name_ar,d.name_en,d.branch_id,b.name AS branch_name,d.manager_employee_id,m.full_name AS manager_name FROM departments d LEFT JOIN branches b ON b.id=d.branch_id LEFT JOIN employees m ON m.id=d.manager_employee_id WHERE d.active=1 ORDER BY d.name").fetchall()
             for row in dept_rows:
                 members=[e for e in employees if e and e.get("department_id")==row["id"]]
                 if members or (not branch and not department and not search): departments.append(dict(row)|{"employees":members})
@@ -5095,14 +5211,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for row in rows:
                 data = dict(row) | {"active": bool(row["active"])}
                 if not privileged:
-                    data = {key: data.get(key) for key in ("id", "name", "branch_id", "branch_name", "active")}
+                    data = {key: data.get(key) for key in ("id", "name", "name_ar", "name_en", "branch_id", "branch_name", "active")}
                 items.append(data)
             self.send_json(200, {"items": items})
 
         def parse_department(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             result: dict[str, Any] = {}
-            if not partial or "name" in data:
-                result["name"] = require_text(data, "name", 150)
+            if not partial:
+                result["name_ar"] = bilingual_reference_value(data, "name_ar", 150, "ar")
+                result["name_en"] = bilingual_reference_value(data, "name_en", 150, "en")
+                result["name"] = result["name_ar"]
+            else:
+                if "name_ar" in data:
+                    result["name_ar"] = bilingual_reference_value(data, "name_ar", 150, "ar")
+                    result["name"] = result["name_ar"]
+                if "name_en" in data:
+                    result["name_en"] = bilingual_reference_value(data, "name_en", 150, "en")
             for key in ("branch_id", "manager_employee_id"):
                 if key in data:
                     result[key] = as_int(data[key], key, 1) if data[key] not in (None, "") else None
@@ -5115,10 +5239,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_department_post(self) -> None:
             user = self.require_permission("department.manage")
             values = self.parse_department(self.read_json())
+            ensure_bilingual_reference_unique(self.db, "departments", values["name_ar"], values["name_en"])
             stamp = now_iso()
             try:
                 with self.db:
-                    cur = self.db.execute("INSERT INTO departments(name,branch_id,manager_employee_id,active,created_at,updated_at) VALUES(?,?,?,?,?,?)", (values["name"], values.get("branch_id"), values.get("manager_employee_id"), values["active"], stamp, stamp))
+                    cur = self.db.execute(
+                        "INSERT INTO departments(name,name_ar,name_en,branch_id,manager_employee_id,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (values["name"], values["name_ar"], values["name_en"], values.get("branch_id"), values.get("manager_employee_id"), values["active"], stamp, stamp),
+                    )
                     audit(self.db, user["id"], "department.create", "department", cur.lastrowid, values)
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "يوجد قسم بالاسم نفسه أو مرجع غير صالح.", "department_conflict") from exc
@@ -5133,6 +5261,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             values = self.parse_department(self.read_json(), True)
             if not values:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            ensure_bilingual_reference_unique(
+                self.db, "departments", values.get("name_ar"), values.get("name_en"), department_id
+            )
             previous_manager_id = int(existing["manager_employee_id"]) if existing["manager_employee_id"] else None
             values["updated_at"] = now_iso()
             try:
@@ -5296,13 +5427,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200,{"ok":True})
 
         def api_job_titles_get(self) -> None:
-            self.require_permission("reference.manage"); rows=self.db.execute("SELECT jt.*,d.name AS department_name FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id ORDER BY jt.name").fetchall(); self.send_json(200,{"items":[dict(r)|{"active":bool(r["active"])} for r in rows]})
+            self.require_permission("reference.manage"); rows=self.db.execute("SELECT jt.*,d.name AS department_name,d.name_ar AS department_name_ar,d.name_en AS department_name_en FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id ORDER BY jt.name").fetchall(); self.send_json(200,{"items":[dict(r)|{"active":bool(r["active"])} for r in rows]})
 
         def api_job_titles_post(self) -> None:
-            user=self.require_permission("reference.manage"); data=self.read_json(); stamp=now_iso(); name=require_text(data,"name",180); department_id=as_int(data["department_id"],"department_id",1) if data.get("department_id") else None
+            user=self.require_permission("reference.manage"); data=self.read_json(); stamp=now_iso(); name_ar=bilingual_reference_value(data,"name_ar",180,"ar"); name_en=bilingual_reference_value(data,"name_en",180,"en"); department_id=as_int(data["department_id"],"department_id",1) if data.get("department_id") else None
+            ensure_bilingual_reference_unique(self.db,"job_titles",name_ar,name_en)
             try:
                 with self.db:
-                    cur=self.db.execute("INSERT INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)",(name,department_id,stamp,stamp))
+                    cur=self.db.execute("INSERT INTO job_titles(name,name_ar,name_en,department_id,created_at,updated_at) VALUES(?,?,?,?,?,?)",(name_ar,name_ar,name_en,department_id,stamp,stamp))
                     audit(self.db,user["id"],"job_title.create","job_title",cur.lastrowid)
             except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(201,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(cur.lastrowid,)).fetchone())})
@@ -5311,10 +5443,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user=self.require_permission("reference.manage"); data=self.read_json(); existing=self.db.execute("SELECT id FROM job_titles WHERE id=?",(title_id,)).fetchone()
             if existing is None: raise APIError(404,"المسمى غير موجود.","not_found")
             values={}
-            if "name" in data: values["name"]=require_text(data,"name",180)
+            if "name_ar" in data:
+                values["name_ar"]=bilingual_reference_value(data,"name_ar",180,"ar"); values["name"]=values["name_ar"]
+            if "name_en" in data: values["name_en"]=bilingual_reference_value(data,"name_en",180,"en")
             if "active" in data: values["active"]=1 if bool(data["active"]) else 0
             if "department_id" in data: values["department_id"]=as_int(data["department_id"],"department_id",1) if data["department_id"] else None
             if not values: raise APIError(422,"لا توجد تغييرات.","validation_error")
+            ensure_bilingual_reference_unique(self.db,"job_titles",values.get("name_ar"),values.get("name_en"),title_id)
             values["updated_at"]=now_iso()
             try:
                 with self.db:
@@ -6138,7 +6273,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def service_history_rows(self, employee_id: int) -> list[dict[str, Any]]:
             rows = self.db.execute(
-                """SELECT sh.*,d.name AS department_name,b.name AS branch_name,m.full_name AS manager_name,
+                """SELECT sh.*,d.name AS current_department_name,d.name_ar AS current_department_name_ar,
+                          d.name_en AS current_department_name_en,b.name AS branch_name,m.full_name AS manager_name,
                           a.full_name AS approval_employee_name,u.display_name AS terminated_by_name
                      FROM employee_service_history sh
                      LEFT JOIN departments d ON d.id=sh.department_id
@@ -6152,6 +6288,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             result = []
             for row in rows:
                 item = dict(row)
+                current_department_name = item.pop("current_department_name", "")
+                current_department_name_ar = item.pop("current_department_name_ar", "")
+                current_department_name_en = item.pop("current_department_name_en", "")
+                item["department_name"] = item.get("department_name") or current_department_name
+                item["department_name_ar"] = item.get("department_name_ar") or current_department_name_ar or item["department_name"]
+                item["department_name_en"] = item.get("department_name_en") or current_department_name_en
                 item["termination_type_label"] = TERMINATION_TYPE_LABELS_AR.get(item.get("termination_type"), item.get("termination_type") or "")
                 result.append(item)
             return result
@@ -6323,6 +6465,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "SELECT issued_on,expires_on FROM employee_documents WHERE employee_id=? AND document_type='contract' AND archived=0 ORDER BY expires_on DESC,id DESC LIMIT 1",
                 (employee_id,),
             ).fetchone()
+            reference_snapshot = self.db.execute(
+                """SELECT COALESCE(jt.name,e.job_title) AS job_title,
+                          COALESCE(jt.name_ar,jt.name,e.job_title) AS job_title_ar,jt.name_en AS job_title_en,
+                          d.name AS department_name,COALESCE(d.name_ar,d.name) AS department_name_ar,d.name_en AS department_name_en
+                     FROM employees e
+                     LEFT JOIN job_titles jt ON jt.id=e.job_title_id
+                     LEFT JOIN departments d ON d.id=e.department_id
+                    WHERE e.id=?""",
+                (employee_id,),
+            ).fetchone()
+            assert reference_snapshot is not None
             period_no = int(self.db.execute("SELECT COALESCE(MAX(period_no),0)+1 FROM employee_service_history WHERE employee_id=?", (employee_id,)).fetchone()[0])
             try:
                 with self.db:
@@ -6330,13 +6483,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         """INSERT INTO employee_service_history(
                                employee_id,period_no,hire_date,termination_date,contract_start_on,contract_end_on,termination_type,termination_reason,termination_notes,
                                notice_end_on,final_settlement_status,final_settlement_amount,department_id,branch_id,manager_id,
-                               approval_employee_id,job_title,job_grade,basic_salary,gross_salary,previous_user_role,terminated_by,terminated_at,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               approval_employee_id,job_title,job_title_ar,job_title_en,department_name,department_name_ar,department_name_en,
+                               job_grade,basic_salary,gross_salary,previous_user_role,terminated_by,terminated_at,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (employee_id, period_no, existing["hire_date"], termination_date,
                          contract["issued_on"] if contract else None, contract["expires_on"] if contract else None,
                          termination_type, reason, notes,
                          notice_end_on, settlement_status, settlement_amount, existing["department_id"], existing["branch_id"],
-                         existing["manager_id"], existing["approval_employee_id"], existing["job_title"], existing["job_grade"],
+                         existing["manager_id"], existing["approval_employee_id"], reference_snapshot["job_title"],
+                         reference_snapshot["job_title_ar"] or "", reference_snapshot["job_title_en"] or "",
+                         reference_snapshot["department_name"] or "", reference_snapshot["department_name_ar"] or "",
+                         reference_snapshot["department_name_en"] or "", existing["job_grade"],
                          float(existing["basic_salary"] or 0), float(existing["salary"] or 0), account["role"] if account else "",
                          user["id"], stamp, stamp, stamp),
                     )
@@ -9413,7 +9570,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if requested is not None and requested != job_title_id:
                     raise APIError(403, "لا يمكنك عرض أهداف مسمى وظيفي آخر.", "forbidden")
             title = self.db.execute(
-                """SELECT jt.id,jt.name,jt.active,jt.department_id,d.name AS department_name
+                """SELECT jt.id,jt.name,jt.name_ar,jt.name_en,jt.active,jt.department_id,
+                          d.name AS department_name,d.name_ar AS department_name_ar,d.name_en AS department_name_en
                      FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id
                     WHERE jt.id=?""",
                 (job_title_id,),
@@ -9432,8 +9590,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             active_rows = [row for row in rows if bool(row["active"])]
             self.send_json(200, {
                 "job_title": {
-                    "id": title["id"], "name": title["name"], "active": bool(title["active"]),
-                    "department_id": title["department_id"], "department_name": title["department_name"],
+                    "id": title["id"], "name": title["name"], "name_ar": title["name_ar"], "name_en": title["name_en"],
+                    "active": bool(title["active"]), "department_id": title["department_id"],
+                    "department_name": title["department_name"], "department_name_ar": title["department_name_ar"],
+                    "department_name_en": title["department_name_en"],
                 },
                 "items": [dict(row) | {"active": bool(row["active"])} for row in rows],
                 "weight_total": round(sum(float(row["default_weight"]) for row in active_rows), 2),
@@ -9446,11 +9606,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             """Return the complete department → job title → goal management tree."""
             self.require_permission("evaluation.goals.manage")
             departments = [dict(row) | {"active": bool(row["active"]), "job_titles": []} for row in self.db.execute(
-                "SELECT id,name,active FROM departments ORDER BY active DESC,name,id"
+                "SELECT id,name,name_ar,name_en,active FROM departments ORDER BY active DESC,name,id"
             ).fetchall()]
             by_department = {int(item["id"]): item for item in departments}
             titles = [dict(row) | {"active": bool(row["active"]), "goals": []} for row in self.db.execute(
-                """SELECT jt.id,jt.name,jt.department_id,jt.active,d.name AS department_name,
+                """SELECT jt.id,jt.name,jt.name_ar,jt.name_en,jt.department_id,jt.active,
+                          d.name AS department_name,d.name_ar AS department_name_ar,d.name_en AS department_name_en,
                           (SELECT COUNT(*) FROM employees e
                             WHERE e.job_title_id=jt.id AND e.active=1 AND e.deleted_at IS NULL) AS employee_count
                      FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id
@@ -10417,11 +10578,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def evaluation_row(self, evaluation_id: int) -> sqlite3.Row:
             row = self.db.execute(
                 """SELECT e.*,c.year,c.name AS cycle_name,emp.full_name,emp.employee_no,
+                          COALESCE(jt.name,emp.job_title) AS job_title,jt.name_ar AS job_title_ar,jt.name_en AS job_title_en,
+                          dep.name AS department_name,dep.name_ar AS department_name_ar,dep.name_en AS department_name_en,
                           c.period_start,c.period_end,c.self_opens_on,c.self_due_on,c.manager_due_on,c.hr_due_on,
                           c.status AS cycle_status,c.announcement_title,c.announcement_body,c.announced_at,
                           mgr.full_name AS manager_name,hr.display_name AS hr_reviewer_name
                      FROM evaluations e JOIN evaluation_cycles c ON c.id=e.cycle_id
                      JOIN employees emp ON emp.id=e.employee_id
+                     LEFT JOIN job_titles jt ON jt.id=emp.job_title_id
+                     LEFT JOIN departments dep ON dep.id=emp.department_id
                      LEFT JOIN employees mgr ON mgr.id=e.manager_employee_id
                      LEFT JOIN users hr ON hr.id=e.hr_reviewed_by WHERE e.id=?""",
                 (evaluation_id,),
@@ -12158,13 +12323,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             )
             calculation={"formula_version":"payroll-v2","rounding":"half_up_to_cent","inputs":{"basic_cents":basic,"allowances_cents":allowances,"service_units":service_units,"divisor_days":divisor,"unpaid_units":unpaid_units,"absence_units":float(facts["absence_days"]),"overtime_minutes":overtime_minutes,"overtime_multiplier":float(multiplier)},"warnings":warnings}
             cursor=self.db.execute(
-                """INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_grade,department_name,branch_name,
+                """INSERT INTO payroll_items(run_id,employee_id,employee_no,employee_name,job_title,job_title_ar,job_title_en,
+                   job_grade,department_name,department_name_ar,department_name_en,branch_name,
                    hire_date,termination_date,period_days,divisor_days,entitlement_days,working_days,attendance_days,absence_days,
                    unpaid_leave_days,late_minutes,overtime_minutes,basic_cents,allowances_cents,overtime_cents,leave_sale_cents,
                    employer_contribution_cents,proration_deduction_cents,absence_deduction_cents,unpaid_leave_deduction_cents,
                    insurance_cents,tax_cents,base_deductions_cents,deductions_cents,advance_cents,net_cents,calculation_json)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (run["id"],employee["id"],employee["employee_no"],employee["full_name"],employee.get("job_title") or "",employee.get("job_grade") or "",employee.get("department_name") or "",employee.get("branch_name") or "",employee.get("hire_date"),employee.get("termination_date"),period_days,divisor,max(0,service_units-unpaid_units),facts["working_days"],facts["attendance_days"],facts["absence_days"],facts["unpaid_leave_days"],facts["late_minutes"],overtime_minutes,basic,allowances,overtime,leave_sale,employer,proration,absence,unpaid,insurance,tax,base_deductions,base_deductions,advance,gross-base_deductions-advance,json_text(calculation)),
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (run["id"],employee["id"],employee["employee_no"],employee["full_name"],employee.get("job_title") or "",
+                 employee.get("job_title_ar") or "",employee.get("job_title_en") or "",employee.get("job_grade") or "",
+                 employee.get("department_name") or "",employee.get("department_name_ar") or "",employee.get("department_name_en") or "",
+                 employee.get("branch_name") or "",employee.get("hire_date"),employee.get("termination_date"),period_days,divisor,
+                 max(0,service_units-unpaid_units),facts["working_days"],facts["attendance_days"],facts["absence_days"],facts["unpaid_leave_days"],facts["late_minutes"],overtime_minutes,basic,allowances,overtime,leave_sale,employer,proration,absence,unpaid,insurance,tax,base_deductions,base_deductions,advance,gross-base_deductions-advance,json_text(calculation)),
             )
             item_id=int(cursor.lastrowid); stamp=now_iso()
             if sales:
@@ -12365,15 +12535,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     )
                     item_cur=self.db.execute(
                         """INSERT INTO payroll_items(
-                               run_id,employee_id,employee_no,employee_name,job_title,job_grade,department_name,branch_name,
+                               run_id,employee_id,employee_no,employee_name,job_title,job_title_ar,job_title_en,
+                               job_grade,department_name,department_name_ar,department_name_en,branch_name,
                                hire_date,termination_date,period_days,divisor_days,entitlement_days,working_days,attendance_days,
                                absence_days,unpaid_leave_days,late_minutes,overtime_minutes,basic_cents,allowances_cents,
                                overtime_cents,leave_sale_cents,employer_contribution_cents,proration_deduction_cents,
                                absence_deduction_cents,unpaid_leave_deduction_cents,insurance_cents,tax_cents,
                                base_deductions_cents,deductions_cents,advance_cents,net_cents,calculation_json
-                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],employee["job_grade"],
-                         employee["department_name"] or "",employee["branch_name"] or "",employee["hire_date"],employee["termination_date"],
+                           ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (run_id,employee["id"],employee["employee_no"],employee["full_name"],employee["job_title"],
+                         employee.get("job_title_ar") or "",employee.get("job_title_en") or "",employee["job_grade"],
+                         employee["department_name"] or "",employee.get("department_name_ar") or "",employee.get("department_name_en") or "",
+                         employee["branch_name"] or "",employee["hire_date"],employee["termination_date"],
                          period_days,divisor_days,max(0,service_units-unpaid_units),facts["working_days"],facts["attendance_days"],
                          facts["absence_days"],facts["unpaid_leave_days"],facts["late_minutes"],overtime_minutes,basic,total_allowances,
                          overtime_cents,leave_sale_cents,employer_contribution_cents,proration_deduction,absence_deduction,
@@ -13158,7 +13331,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not self.has_privileged_people_access(user, "salary.view"):
                 raise APIError(403, "عرض مبالغ السلف والخصومات يتطلب صلاحية الرواتب.", "forbidden", {"permission": "salary.view"})
             department_id = as_int(self.query.get("department_id"), "department_id", 1)
-            department = self.db.execute("SELECT id,name FROM departments WHERE id=?", (department_id,)).fetchone()
+            department = self.db.execute("SELECT id,name,name_ar,name_en FROM departments WHERE id=?", (department_id,)).fetchone()
             if department is None:
                 raise APIError(404, "القسم غير موجود.", "not_found")
             today = local_now().date()
@@ -13169,8 +13342,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if date_to > today or (date_to - date_from).days > 366:
                 raise APIError(422, "فترة التقرير يجب ألا تتجاوز سنة وألا تنتهي في المستقبل.", "validation_error")
             employees = self.db.execute(
-                """SELECT e.id,e.employee_no,e.full_name,e.job_title
-                     FROM employees e WHERE e.department_id=?
+                """SELECT e.id,e.employee_no,e.full_name,COALESCE(jt.name,e.job_title) AS job_title,
+                          jt.name_ar AS job_title_ar,jt.name_en AS job_title_en
+                     FROM employees e LEFT JOIN job_titles jt ON jt.id=e.job_title_id WHERE e.department_id=?
                        AND (e.hire_date IS NULL OR e.hire_date<=?)
                        AND (e.termination_date IS NULL OR e.termination_date>=?)
                      ORDER BY e.full_name""",
@@ -13181,6 +13355,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 int(row["id"]): {
                     "employee_id": int(row["id"]), "employee_no": row["employee_no"],
                     "employee_name": row["full_name"], "job_title": row["job_title"],
+                    "job_title_ar": row["job_title_ar"], "job_title_en": row["job_title_en"],
                     "leave_days": 0.0, "absence_days": 0, "advance_cents": 0,
                     "advance_remaining_cents": 0, "deductions_cents": 0,
                     "violation_count": 0, "early_exit_days": 0, "early_exit_minutes": 0,

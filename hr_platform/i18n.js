@@ -509,6 +509,22 @@
     'ينعكس الهدف النشط مباشرة في مكتبة موظفي هذا المسمى والتقييمات القابلة للتعديل.':'An active goal is immediately reflected in this job title’s employee library and editable evaluations.'
   });
 
+  Object.assign(english, {
+    'هوية القسم باللغتين':'Bilingual department identity','هوية المسمى باللغتين':'Bilingual job-title identity',
+    'الاسم بالعربية':'Arabic name','الاسم بالإنجليزية':'English name',
+    'الترجمة الإنجليزية مطلوبة':'English translation required',
+    'دون فرع':'No branch','دون قسم':'No department','دون مسمى':'No job title',
+    'إضافة قسم':'Add department','تعديل القسم':'Edit department','حفظ القسم':'Save department','تم حفظ القسم':'Department saved','لا توجد أقسام.':'No departments.',
+    'رئيس القسم':'Department head','رئيس القسم / المسؤول المباشر':'Department head / line manager',
+    'يصبح رئيس القسم المسؤول الافتراضي عن جميع موظفي القسم الذين لا يملكون مسؤولاً مباشراً، وتُرسل إليه طلبات الإجازة والتقييم.':'The department head becomes the default approver for employees without a direct manager and receives their leave and performance-review requests.',
+    'إضافة مسمى وظيفي':'Add job title','تعديل مسمى وظيفي':'Edit job title','القسم المرجعي':'Reference department',
+    'مسمى نشط ومتاح للاختيار':'Active and available for selection','حفظ المسمى':'Save job title','تم تحديث المسمى الوظيفي':'Job title updated',
+    'يجب إدخال الاسم العربي باللغة العربية.':'Enter the Arabic name in Arabic.',
+    'يجب إدخال الاسم الإنجليزي باللغة الإنجليزية.':'Enter the English name in English.',
+    'الاسم العربي مستخدم مسبقاً.':'This Arabic name is already in use.',
+    'الاسم الإنجليزي مستخدم مسبقاً.':'This English name is already in use.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

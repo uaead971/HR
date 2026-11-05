@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r27")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r28")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -1326,7 +1326,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         hr = self.client("hr@demo.ae", "HR@12345")
         employee = next(x for x in hr.request("GET", "/api/employees")["items"] if x["employee_no"] == "EMP-1024")
         branch = hr.request("GET", "/api/branches")["items"][0]
-        created = hr.request("POST", "/api/departments", {"name": "قسم الجودة", "branch_id": branch["id"], "active": True}, expected=201)["department"]
+        created = hr.request("POST", "/api/departments", {"name_ar": "قسم الجودة", "name_en": "Quality Department", "branch_id": branch["id"], "active": True}, expected=201)["department"]
         assigned = hr.request("POST", f"/api/departments/{created['id']}/assign", {"employee_id": employee["id"]})["employee"]
         self.assertEqual(assigned["department_id"], created["id"])
         hierarchy = hr.request("GET", "/api/org/hierarchy")
@@ -1430,7 +1430,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         employee_id = next(x["id"] for x in hr.request("GET", "/api/employees")["items"] if x["employee_no"] == "EMP-1024")
         suffix = uuid.uuid4().hex[:6]
         grade = hr.request("POST", "/api/job-grades", {"code": f"GX-{suffix}", "name": "درجة تخصصية", "min_salary": 9000, "max_salary": 18000}, expected=201)["job_grade"]
-        title = hr.request("POST", "/api/job-titles", {"name": f"خبير جودة {suffix}"}, expected=201)["job_title"]
+        title = hr.request("POST", "/api/job-titles", {"name_ar": f"خبير جودة {suffix}", "name_en": f"Quality Expert {suffix}"}, expected=201)["job_title"]
         updated = hr.request("PATCH", f"/api/employees/{employee_id}", {"job_grade_id": grade["id"], "job_title_id": title["id"]})["employee"]
         card = hr.request("GET", f"/api/employees/{employee_id}/card")["card"]["employee"]
         certificate = hr.request("POST", "/api/salary-certificates", {"employee_id": employee_id, "purpose": "اختبار التوافق"}, expected=201)["certificate"]["employee"]
@@ -2475,7 +2475,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIsNone(custom["source_template_id"])
 
         new_title = hr.request(
-            "POST", "/api/job-titles", {"name": f"منسق ابتكار {suffix}"}, expected=201
+            "POST", "/api/job-titles", {"name_ar": f"منسق ابتكار {suffix}", "name_en": f"Innovation Coordinator {suffix}"}, expected=201
         )["job_title"]
         generic = hr.request("GET", f"/api/evaluation-goal-templates?job_title_id={new_title['id']}&include_inactive=1")
         self.assertEqual(generic["items"], [])
@@ -2485,11 +2485,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         # selects goals from the master catalogue.
         admin = self.client("admin@demo.ae", "Admin@123")
         sales_department = admin.request(
-            "POST", "/api/departments", {"name": f"المبيعات {suffix}"}, expected=201
+            "POST", "/api/departments", {"name_ar": f"المبيعات {suffix}", "name_en": f"Sales {suffix}"}, expected=201
         )["department"]
         sales_title = hr.request(
             "POST", "/api/job-titles",
-            {"name": f"موظف متجر {suffix}", "department_id": sales_department["id"]},
+            {"name_ar": f"موظف متجر {suffix}", "name_en": f"Store Associate {suffix}", "department_id": sales_department["id"]},
             expected=201,
         )["job_title"]
         sales_library = hr.request(
@@ -2501,7 +2501,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(sales_library["weight_total"], 0)
 
         movable_title = hr.request(
-            "POST", "/api/job-titles", {"name": f"منسق متجر {suffix}"}, expected=201
+            "POST", "/api/job-titles", {"name_ar": f"منسق متجر {suffix}", "name_en": f"Store Coordinator {suffix}"}, expected=201
         )["job_title"]
         before_move = hr.request(
             "GET", f"/api/evaluation-goal-templates?job_title_id={movable_title['id']}&include_inactive=1"
@@ -2527,11 +2527,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(customized_after_move["items"], [])
 
         procurement_department = admin.request(
-            "POST", "/api/departments", {"name": f"المشتريات واللوجستك {suffix}"}, expected=201
+            "POST", "/api/departments", {"name_ar": f"المشتريات واللوجستك {suffix}", "name_en": f"Procurement and Logistics {suffix}"}, expected=201
         )["department"]
         procurement_title = hr.request(
             "POST", "/api/job-titles",
-            {"name": f"مسؤول التوريد {suffix}", "department_id": procurement_department["id"]},
+            {"name_ar": f"مسؤول التوريد {suffix}", "name_en": f"Supply Officer {suffix}", "department_id": procurement_department["id"]},
             expected=201,
         )["job_title"]
         procurement_library = hr.request(
@@ -2588,7 +2588,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("كتابة هدف مخصص", index + app)
         self.assertIn("/api/evaluation-goal-templates", app)
         self.assertIn("data-add-all-goal-templates", app)
-        self.assertIn("jobTitle.department_name", app)
+        self.assertIn("localizedField(jobTitle,'department_name')", app)
         self.assertIn("recommended-goal-grid", styles)
 
     def test_32b_v59_goals_library_rbac_aggregation_safe_archive_and_frontend(self):
@@ -2744,7 +2744,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual([goal["id"] for goal in archived_list["items"]], [created["id"]])
 
         title = hr.request(
-            "POST", "/api/job-titles", {"name": f"مسمى مكتبة {suffix}"}, expected=201
+            "POST", "/api/job-titles", {"name_ar": f"مسمى مكتبة {suffix}", "name_en": f"Library Role {suffix}"}, expected=201
         )["job_title"]
         self.assertEqual(
             hr.request("GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1")["items"],
@@ -2814,7 +2814,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261105-production-r27", index)
+        self.assertIn("build=20261105-production-r28", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -2901,7 +2901,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 "sort_order": 992, "active": True,
             }, expected=201,
         )["goal"]
-        title = hr.request("POST", "/api/job-titles", {"name": f"وظيفة مزامنة {suffix}"}, expected=201)["job_title"]
+        title = hr.request("POST", "/api/job-titles", {"name_ar": f"وظيفة مزامنة {suffix}", "name_en": f"Synchronization Role {suffix}"}, expected=201)["job_title"]
         hr.request(
             "POST", "/api/evaluation-goal-templates/from-catalog",
             {"job_title_id": title["id"], "catalog_goal_ids": [catalog_goal["id"], bulk_goal["id"]]},
@@ -3026,7 +3026,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261105-production-r27", index)
+        self.assertIn("build=20261105-production-r28", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3937,7 +3937,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         )["employee"]
         department = hr.request(
             "POST", "/api/departments",
-            {"name": f"قسم اعتماد {suffix}", "branch_id": branch_id, "manager_employee_id": head["id"]}, expected=201,
+            {"name_ar": f"قسم اعتماد {suffix}", "name_en": f"Approval Department {suffix}", "branch_id": branch_id, "manager_employee_id": head["id"]}, expected=201,
         )["department"]
         hr.request("PATCH", "/api/org", {"general_manager_employee_id": employees[0]["id"]})
         org = hr.request("GET", "/api/org")["organization"]
@@ -5275,7 +5275,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r27", index)
+        self.assertIn("build=20261105-production-r28", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5815,7 +5815,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r27", index)
+        self.assertIn("build=20261105-production-r28", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -5974,8 +5974,105 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(len(matching), 2)
         self.assertEqual(sum(item["status"] == "cancelled" for item in matching), 1)
 
+    def test_88_bilingual_department_and_job_title_contract(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        suffix = uuid.uuid4().hex[:8]
+        missing = admin.request(
+            "POST", "/api/departments", {"name_ar": f"قسم ناقص {suffix}"}, expected=422,
+        )
+        self.assertEqual(missing["code"], "validation_error")
+        department = admin.request(
+            "POST", "/api/departments",
+            {"name_ar": f"قسم ثنائي {suffix}", "name_en": f"Bilingual Department {suffix}"},
+            expected=201,
+        )["department"]
+        self.assertEqual(department["name"], department["name_ar"])
+        self.assertEqual(department["name_en"], f"Bilingual Department {suffix}")
+        duplicate = admin.request(
+            "POST", "/api/departments",
+            {"name_ar": f"قسم مختلف {suffix}", "name_en": f"bilingual department {suffix}"},
+            expected=409,
+        )
+        self.assertEqual(duplicate["code"], "duplicate_english_name")
+        patched = admin.request(
+            "PATCH", f"/api/departments/{department['id']}", {"active": False},
+        )["department"]
+        self.assertEqual((patched["name_ar"], patched["name_en"]), (department["name_ar"], department["name_en"]))
+
+        title = admin.request(
+            "POST", "/api/job-titles",
+            {"name_ar": f"مسمى ثنائي {suffix}", "name_en": f"Bilingual Role {suffix}", "department_id": department["id"]},
+            expected=201,
+        )["job_title"]
+        title_rows = admin.request("GET", "/api/job-titles")["items"]
+        saved = next(row for row in title_rows if row["id"] == title["id"])
+        self.assertEqual((saved["name_ar"], saved["name_en"]), (f"مسمى ثنائي {suffix}", f"Bilingual Role {suffix}"))
+        self.assertEqual((saved["department_name_ar"], saved["department_name_en"]), (department["name_ar"], department["name_en"]))
+        library = admin.request("GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1")
+        self.assertEqual(library["job_title"]["name_en"], title["name_en"])
+        self.assertEqual(library["job_title"]["department_name_en"], department["name_en"])
+
 
 class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
+    def test_bilingual_reference_migration_and_frontend_contract(self):
+        root = Path(__file__).parents[1]
+        with tempfile.TemporaryDirectory(prefix="hr-bilingual-") as folder:
+            db_path = Path(folder) / "bilingual.sqlite3"
+            hr_server.initialize_database(db_path)
+            with sqlite3.connect(db_path) as db:
+                db.execute("UPDATE departments SET name_ar='',name_en='' WHERE name='الموارد البشرية'")
+                db.execute("INSERT INTO departments(name,name_ar,name_en,active,created_at) VALUES('Legacy English','','',1,datetime('now'))")
+                db.execute("INSERT INTO departments(name,name_ar,name_en,active,created_at) VALUES('قسم يحتاج ترجمة','','',1,datetime('now'))")
+                db.commit()
+            hr_server.initialize_database(db_path)
+            hr_server.initialize_database(db_path)
+            with sqlite3.connect(db_path) as db:
+                self.assertEqual(
+                    db.execute("SELECT name_ar,name_en FROM departments WHERE name='الموارد البشرية'").fetchone(),
+                    ("الموارد البشرية", "Human Resources"),
+                )
+                self.assertEqual(
+                    db.execute("SELECT name_ar,name_en FROM departments WHERE name='Legacy English'").fetchone(),
+                    ("", "Legacy English"),
+                )
+                self.assertEqual(
+                    db.execute("SELECT name_ar,name_en FROM departments WHERE name='قسم يحتاج ترجمة'").fetchone(),
+                    ("قسم يحتاج ترجمة", ""),
+                )
+
+        app = (root / "app.js").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        schema = (root / "schema.sql").read_text(encoding="utf-8")
+        server = (root / "server.py").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        self.assertIn("function localizedName(record)", app)
+        self.assertIn("function localizedField(record,field)", app)
+        self.assertIn("function localizeReferencePayload", app)
+        self.assertIn('name="name_ar" dir="rtl" required', app)
+        self.assertIn('name="name_en" dir="ltr" required', app)
+        self.assertIn("$('.department-summary',chip)", app)
+        self.assertNotIn("const summary=$('div > small',chip)", app)
+        self.assertIn("${tr('حفظ القسم')}", app)
+        self.assertIn("${tr('القسم المرجعي')}", app)
+        self.assertIn("${tr(editing?'حفظ التعديلات':'حفظ المسمى')}", app)
+        english = dict(re.findall(r"'([^']+)':'([^']*)'", translations))
+        for arabic, expected in {
+            "إضافة قسم": "Add department",
+            "تعديل القسم": "Edit department",
+            "رئيس القسم / المسؤول المباشر": "Department head / line manager",
+            "حفظ القسم": "Save department",
+            "إضافة مسمى وظيفي": "Add job title",
+            "تعديل مسمى وظيفي": "Edit job title",
+            "القسم المرجعي": "Reference department",
+            "مسمى نشط ومتاح للاختيار": "Active and available for selection",
+            "حفظ المسمى": "Save job title",
+        }.items():
+            self.assertEqual(english.get(arabic), expected, arabic)
+        self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
+        self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
+        self.assertIn("migrate_bilingual_reference_names(db)", server)
+        self.assertIn("build=20261105-production-r28", index)
+
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]
         app = (root / "app.js").read_text(encoding="utf-8")
