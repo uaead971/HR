@@ -489,7 +489,7 @@
   Object.assign(english, {
     'أدر أهداف كل وظيفة أو اختر أهدافاً جاهزة من المكتبة المركزية باسمها ومعيارها ووزنها.':'Manage each job’s goals or select ready-made goals from the central library with their name, criterion and weight.',
     'أهداف الوظائف':'Job goals','مكتبة الأهداف':'Goals library','التصنيفات':'Categories','كل الأهداف':'All goals','عامة':'General','تخصصية':'Specialized',
-    'المصدر المركزي':'Central source','الأهداف هنا مستقلة؛ عند اختيارها لوظيفة تُحفظ نسخة لا تتأثر بالتعديلات اللاحقة.':'Goals here are independent. Selecting one for a job saves a snapshot that is unaffected by later edits.',
+    'المصدر المركزي':'Central source','تنعكس تعديلات المكتبة على أهداف الوظائف والتقييمات القابلة للتعديل، وتبقى السجلات المرسلة والتاريخية ثابتة.':'Library changes flow to job goals and editable evaluations, while submitted and historical records remain fixed.',
     '+ إضافة هدف للمكتبة':'+ Add goal to library','ابحث في التصنيف أو الهدف أو المعيار…':'Search a category, goal or criterion…','التصنيف':'Category','كل التصنيفات':'All categories','النوع':'Type','كل الأنواع':'All types','عام':'General','تخصصي':'Specialized','الحالة':'Status','الكل':'All','مؤرشف':'Archived','جارٍ تحميل مكتبة الأهداف…':'Loading the goals library…',
     'لا توجد أهداف مطابقة':'No matching goals','غيّر البحث أو التصنيف أو نوع الهدف أو حالته.':'Change the search, category, goal type or status.','تصنيف':'Category','هدف':'goal','تعديل':'Edit','أرشفة':'Archive','استعادة':'Restore',
     'اختر أهدافاً جاهزة من المكتبة أو أضف هدفاً يدوياً.':'Choose ready-made goals from the library or add one manually.','إضافة هدف للمكتبة':'Add goal to library','تعديل هدف المكتبة':'Edit library goal','نوع الهدف':'Goal type','الوزن الافتراضي':'Default weight','هدف نشط ومتاح للاختيار':'Active goal available for selection','إضافة الهدف للمكتبة':'Add goal to library',
@@ -499,6 +499,14 @@
     'نتيجة إضافة الأهداف':'Goal assignment result','تمت الإضافة':'Added','مضافة مسبقاً':'Already assigned','تعارض في الاسم':'Title conflict','لا يوجد':'None','لم يتم استبدال أي هدف يدوي يحمل الاسم نفسه.':'No manual goal with the same title was overwritten.','تم':'Done',
     'تمت إضافة المسمى الوظيفي؛ اختر أهدافه من المكتبة':'Job title added; choose its goals from the library',
     'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.','تجاوز المجموع 100% — الاختيار مسموح لأنه إرشادي، راجع الأوزان قبل الاعتماد.':'The total exceeds 100%. Selection remains allowed as guidance; review weights before approval.','مجموع الوزن مكتمل 100%.':'The total weight is complete at 100%.','المجموع أقل من 100% — يمكنك متابعة الاختيار.':'The total is below 100%; you can continue selecting.'
+  });
+
+  Object.assign(english, {
+    'الأهداف التخصصية':'Specialized goals','{count} من 2':'{count} of 2','اكتمل الحد الأدنى للأهداف التخصصية.':'The specialized-goal minimum is complete.',
+    'أضف {count} من الأهداف التخصصية قبل الإرسال.':'Add {count} specialized goal(s) before submission.','اختر الأهداف قبل الإرسال. يجب أن يتضمن تقييمك هدفين تخصصيين على الأقل.':'Select goals before submission. Your evaluation must include at least two specialized goals.',
+    'تصنيف الهدف':'Goal classification','نوع القياس':'Measurement type','يلزم هدفان تخصصيان على الأقل قبل الإرسال.':'At least two specialized goals are required before submission.','التصنيف معتمد من مكتبة الوظيفة.':'Classification is controlled by the job goals library.',
+    'أكمل هدفين تخصصيين':'Complete two specialized goals','اختر أهدافك أو اكتب هدفاً مخصصاً؛ لن يقبل الإرسال إلا عند اكتمال الحقول ومجموع ١٠٠ ووجود هدفين تخصصيين على الأقل.':'Select goals or write a custom goal. Submission requires complete fields, a total weight of 100, and at least two specialized goals.',
+    'ينعكس الهدف النشط مباشرة في مكتبة موظفي هذا المسمى والتقييمات القابلة للتعديل.':'An active goal is immediately reflected in this job title’s employee library and editable evaluations.'
   });
 
   const originals = new WeakMap();

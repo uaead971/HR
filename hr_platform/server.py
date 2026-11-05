@@ -2187,6 +2187,9 @@ def initialize_database(db_path: Path) -> None:
             db.executescript(schema)
             goal_columns_before_v51 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goals)")}
             backfill_v50_goals = "progress_status" not in goal_columns_before_v51
+            template_columns_before_v62 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goal_templates)")}
+            template_objective_type_missing = "objective_type" not in template_columns_before_v62
+            goal_objective_type_missing = "objective_type" not in goal_columns_before_v51
             payroll_columns_before_v58 = {row["name"] for row in db.execute("PRAGMA table_info(payroll_items)")}
             backfill_v58_payroll_deductions = "base_deductions_cents" not in payroll_columns_before_v58
             migrations = {
@@ -2320,9 +2323,11 @@ def initialize_database(db_path: Path) -> None:
                 },
                 "evaluation_goal_templates": {
                     "source_catalog_goal_id": "INTEGER",
+                    "objective_type": "TEXT NOT NULL DEFAULT 'general' CHECK (objective_type IN ('general','specialized'))",
                 },
                 "evaluation_goals": {
                     "source_template_id": "INTEGER",
+                    "objective_type": "TEXT NOT NULL DEFAULT 'general' CHECK (objective_type IN ('general','specialized'))",
                     "awarded_points": "REAL",
                     "goal_type": "TEXT NOT NULL DEFAULT 'result'",
                     "start_date": "TEXT",
@@ -2403,6 +2408,27 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            # V6.2 gives the catalogue classification its own immutable snapshot
+            # dimension.  The existing evaluation ``goal_type`` remains the
+            # result/behaviour/development dimension and is intentionally not
+            # reused.  Only first-run backfills copy classification into legacy
+            # rows; historical content and employee-entered text stay untouched.
+            if template_objective_type_missing:
+                db.execute(
+                    """UPDATE evaluation_goal_templates
+                          SET objective_type=COALESCE((
+                                SELECT c.goal_type FROM evaluation_goal_catalog c
+                                 WHERE c.id=evaluation_goal_templates.source_catalog_goal_id
+                              ),'general')"""
+                )
+            if goal_objective_type_missing:
+                db.execute(
+                    """UPDATE evaluation_goals
+                          SET objective_type=COALESCE((
+                                SELECT t.objective_type FROM evaluation_goal_templates t
+                                 WHERE t.id=evaluation_goals.source_template_id
+                              ),'general')"""
+                )
             # Expand payroll adjustment components without losing historical
             # bonuses, deductions or their audit reasons from older databases.
             payroll_adjustment_schema = db.execute(
@@ -2680,6 +2706,43 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("ALTER TABLE employee_documents_v44 RENAME TO employee_documents")
             stamp = now_iso()
             seed_evaluation_goal_catalog(db, stamp)
+            if template_objective_type_missing:
+                # Bring pre-r27 catalogue assignments onto the live-sync
+                # contract once.  A manual template with the new title wins the
+                # uniqueness conflict; all non-conflicting catalogue fields and
+                # classifications still migrate safely.
+                db.execute(
+                    """UPDATE evaluation_goal_templates AS t
+                          SET title=CASE WHEN NOT EXISTS (
+                                  SELECT 1 FROM evaluation_goal_templates other
+                                   WHERE other.job_title_id=t.job_title_id
+                                     AND other.id<>t.id
+                                     AND other.title=(SELECT c.title FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id)
+                              ) THEN (SELECT c.title FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id)
+                              ELSE t.title END,
+                              description=(SELECT c.description FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              measure=(SELECT c.measure FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              default_weight=(SELECT c.default_weight FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              objective_type=(SELECT c.goal_type FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              active=(SELECT c.active FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              updated_at=?
+                        WHERE source_catalog_goal_id IS NOT NULL
+                          AND EXISTS (SELECT 1 FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id)""",
+                    (stamp,),
+                )
+                db.execute(
+                    """UPDATE evaluation_goals AS g
+                          SET title=(SELECT t.title FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              description=(SELECT t.description FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              measure=(SELECT t.measure FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              weight=(SELECT t.default_weight FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              objective_type=(SELECT t.objective_type FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              updated_at=?
+                        WHERE source_template_id IS NOT NULL
+                          AND evaluation_id IN (SELECT id FROM evaluations WHERE status IN ('draft','returned'))
+                          AND EXISTS (SELECT 1 FROM evaluation_goal_templates t WHERE t.id=g.source_template_id)""",
+                    (stamp,),
+                )
             default_document_libraries = (
                 ("company_licenses", "رخص الشركة"),
                 ("company_policies", "قوانين الشركة"),
@@ -9366,13 +9429,16 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not include_inactive:
                 sql += " AND active=1"
             rows = self.db.execute(sql + " ORDER BY sort_order,id", (title["id"],)).fetchall()
+            active_rows = [row for row in rows if bool(row["active"])]
             self.send_json(200, {
                 "job_title": {
                     "id": title["id"], "name": title["name"], "active": bool(title["active"]),
                     "department_id": title["department_id"], "department_name": title["department_name"],
                 },
                 "items": [dict(row) | {"active": bool(row["active"])} for row in rows],
-                "weight_total": round(sum(float(row["default_weight"]) for row in rows if bool(row["active"])), 2),
+                "weight_total": round(sum(float(row["default_weight"]) for row in active_rows), 2),
+                "general_count": sum(row["objective_type"] == "general" for row in active_rows),
+                "specialized_count": sum(row["objective_type"] == "specialized" for row in active_rows),
                 "can_manage": has_permission(self.db, user, "evaluation.goals.manage"),
             })
 
@@ -9406,6 +9472,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 active_goals = [goal for goal in title["goals"] if goal["active"]]
                 title["goal_count"] = len(title["goals"])
                 title["active_goal_count"] = len(active_goals)
+                title["general_goal_count"] = sum(goal["objective_type"] == "general" for goal in active_goals)
+                title["specialized_goal_count"] = sum(goal["objective_type"] == "specialized" for goal in active_goals)
                 title["weight_total"] = round(sum(float(goal["default_weight"]) for goal in active_goals), 2)
                 department = by_department.get(int(title["department_id"])) if title["department_id"] else None
                 if department is None:
@@ -9426,6 +9494,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "department_count": len(departments),
                 "job_title_count": len(titles),
                 "active_goal_count": sum(1 for goal in goals if goal["active"]),
+                "general_goal_count": sum(1 for goal in goals if goal["active"] and goal["objective_type"] == "general"),
+                "specialized_goal_count": sum(1 for goal in goals if goal["active"] and goal["objective_type"] == "specialized"),
                 "employee_count": int(self.db.execute(
                     "SELECT COUNT(*) FROM employees WHERE active=1 AND deleted_at IS NULL AND job_title_id IS NOT NULL"
                 ).fetchone()[0]),
@@ -9519,6 +9589,49 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 values["active"] = 1 if bool(data["active"]) else 0
             return values
 
+        def sync_template_to_editable_evaluations(self, template_id: int, stamp: str) -> int:
+            """Refresh linked draft/returned snapshots without touching history."""
+            template = self.db.execute(
+                "SELECT * FROM evaluation_goal_templates WHERE id=?", (template_id,)
+            ).fetchone()
+            if template is None:
+                return 0
+            cursor = self.db.execute(
+                """UPDATE evaluation_goals
+                      SET title=?,description=?,measure=?,weight=?,objective_type=?,updated_at=?
+                    WHERE source_template_id=?
+                      AND evaluation_id IN (
+                          SELECT id FROM evaluations WHERE status IN ('draft','returned')
+                      )""",
+                (template["title"], template["description"], template["measure"],
+                 template["default_weight"], template["objective_type"], stamp, template_id),
+            )
+            return int(cursor.rowcount)
+
+        def sync_catalog_goal_to_linked_templates(self, goal_id: int, stamp: str) -> dict[str, int]:
+            """Propagate one master goal through its linked editable snapshots."""
+            goal = self.db.execute(
+                "SELECT * FROM evaluation_goal_catalog WHERE id=?", (goal_id,)
+            ).fetchone()
+            if goal is None:
+                return {"template_count": 0, "evaluation_goal_count": 0}
+            templates = self.db.execute(
+                "SELECT id FROM evaluation_goal_templates WHERE source_catalog_goal_id=? ORDER BY id",
+                (goal_id,),
+            ).fetchall()
+            self.db.execute(
+                """UPDATE evaluation_goal_templates
+                      SET title=?,description=?,measure=?,default_weight=?,objective_type=?,active=?,updated_at=?
+                    WHERE source_catalog_goal_id=?""",
+                (goal["title"], goal["description"], goal["measure"], goal["default_weight"],
+                 goal["goal_type"], goal["active"], stamp, goal_id),
+            )
+            evaluation_goal_count = sum(
+                self.sync_template_to_editable_evaluations(int(template["id"]), stamp)
+                for template in templates
+            )
+            return {"template_count": len(templates), "evaluation_goal_count": evaluation_goal_count}
+
         def api_evaluation_goal_catalog_post(self) -> None:
             user = self.require_permission("evaluation.goals.manage")
             values = self.parse_catalog_goal(self.read_json())
@@ -9544,28 +9657,33 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             values = self.parse_catalog_goal(self.read_json(), partial=True)
             if not values:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
-            values["updated_at"] = now_iso()
+            stamp = now_iso()
+            values["updated_at"] = stamp
+            sync_counts = {"template_count": 0, "evaluation_goal_count": 0}
             try:
                 with self.db:
                     self.db.execute(
                         "UPDATE evaluation_goal_catalog SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
                         (*values.values(), goal_id),
                     )
+                    sync_counts = self.sync_catalog_goal_to_linked_templates(goal_id, stamp)
                     audit(self.db, user["id"], "evaluation_goal_catalog.update", "evaluation_goal_catalog", goal_id, values)
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "يوجد هدف بالاسم نفسه داخل هذا التصنيف.", "duplicate_catalog_goal") from exc
             row = self.db.execute("SELECT * FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone()
-            self.send_json(200, {"goal": dict(row) | {"active": bool(row["active"])}})
+            self.send_json(200, {"goal": dict(row) | {"active": bool(row["active"])}, "synchronized": sync_counts})
 
         def api_evaluation_goal_catalog_delete(self, goal_id: int) -> None:
             user = self.require_permission("evaluation.goals.manage")
             row = self.db.execute("SELECT * FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone()
             if row is None:
                 raise APIError(404, "هدف المكتبة غير موجود.", "not_found")
+            stamp = now_iso()
             with self.db:
-                self.db.execute("UPDATE evaluation_goal_catalog SET active=0,updated_at=? WHERE id=?", (now_iso(), goal_id))
+                self.db.execute("UPDATE evaluation_goal_catalog SET active=0,updated_at=? WHERE id=?", (stamp, goal_id))
+                sync_counts = self.sync_catalog_goal_to_linked_templates(goal_id, stamp)
                 audit(self.db, user["id"], "evaluation_goal_catalog.archive", "evaluation_goal_catalog", goal_id)
-            self.send_json(200, {"ok": True, "archived": True, "message": "تمت أرشفة الهدف وبقيت النسخ المضافة للوظائف والتقييمات محفوظة."})
+            self.send_json(200, {"ok": True, "archived": True, "synchronized": sync_counts, "message": "تمت أرشفة الهدف وبقيت النسخ المضافة للوظائف والتقييمات محفوظة."})
 
         def api_evaluation_goal_templates_from_catalog(self) -> None:
             """Copy catalogue goals as independent job-title snapshots in one transaction."""
@@ -9614,9 +9732,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         continue
                     cursor = self.db.execute(
                         """INSERT INTO evaluation_goal_templates
-                           (job_title_id,source_catalog_goal_id,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,1,?,?)""",
-                        (job_title_id, goal_id, goal["title"], goal["description"], goal["measure"],
+                           (job_title_id,source_catalog_goal_id,objective_type,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
+                        (job_title_id, goal_id, goal["goal_type"], goal["title"], goal["description"], goal["measure"],
                          goal["default_weight"], next_order, stamp, stamp),
                     )
                     template_id = int(cursor.lastrowid)
@@ -9637,6 +9755,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def parse_goal_template(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             values: dict[str, Any] = {}
+            if not partial or "objective_type" in data:
+                objective_type = str(data.get("objective_type", "general"))
+                if objective_type not in {"general", "specialized"}:
+                    raise APIError(422, "تصنيف الهدف يجب أن يكون عاماً أو تخصصياً.", "invalid_objective_type")
+                values["objective_type"] = objective_type
             if not partial or "title" in data:
                 values["title"] = require_text(data, "title", 240)
             for key, max_len in (("description", 2000), ("measure", 500)):
@@ -9679,18 +9802,21 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             values = self.parse_goal_template(self.read_json(), partial=True)
             if not values:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
-            values["updated_at"] = now_iso()
+            stamp = now_iso()
+            values["updated_at"] = stamp
+            synchronized_goal_count = 0
             try:
                 with self.db:
                     self.db.execute(
                         "UPDATE evaluation_goal_templates SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
                         (*values.values(), template_id),
                     )
+                    synchronized_goal_count = self.sync_template_to_editable_evaluations(template_id, stamp)
                     audit(self.db, user["id"], "evaluation_goal_template.update", "evaluation_goal_template", template_id, values)
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "هذا الهدف موجود مسبقاً للمسمى الوظيفي.", "duplicate_goal_template") from exc
             row = self.db.execute("SELECT * FROM evaluation_goal_templates WHERE id=?", (template_id,)).fetchone()
-            self.send_json(200, {"template": dict(row) | {"active": bool(row["active"])}})
+            self.send_json(200, {"template": dict(row) | {"active": bool(row["active"])}, "synchronized_evaluation_goal_count": synchronized_goal_count})
 
         def api_evaluation_goal_template_delete(self, template_id: int) -> None:
             """Delete unused templates; archive used ones so historical evaluations remain intact."""
@@ -9787,6 +9913,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def parse_goal(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             result: dict[str, Any] = {}
+            if not partial or "objective_type" in data:
+                objective_type = str(data.get("objective_type", "general"))
+                if objective_type not in {"general", "specialized"}:
+                    raise APIError(422, "تصنيف الهدف يجب أن يكون عاماً أو تخصصياً.", "invalid_objective_type")
+                result["objective_type"] = objective_type
             if not partial or "title" in data:
                 result["title"] = require_text(data, "title", 240)
             if not partial or "measure" in data:
@@ -9814,6 +9945,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return result
 
         def validate_evaluation_goal(self, evaluation: sqlite3.Row | dict[str, Any], goal: dict[str, Any], require_evidence: bool = False) -> None:
+            if str(goal.get("objective_type") or "") not in {"general", "specialized"}:
+                raise APIError(422, "تصنيف الهدف يجب أن يكون عاماً أو تخصصياً.", "invalid_objective_type")
             if str(goal.get("goal_type") or "") not in {"result", "behaviour", "development"}:
                 raise APIError(422, "نوع الهدف غير صالح.", "invalid_goal_type")
             start = parse_date(goal.get("start_date"), "start_date")
@@ -9848,6 +9981,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     raise APIError(403, "الهدف المختار لا يتبع مسماك الوظيفي أو أنه متوقف.", "invalid_goal_template")
                 values = {
                     "source_template_id": template_id,
+                    "objective_type": template["objective_type"],
                     "title": template["title"],
                     "description": template["description"],
                     "weight": float(template["default_weight"]),
@@ -9872,7 +10006,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     cols = ["evaluation_id"] + list(values) + ["created_at", "updated_at"]
                     cur = self.db.execute(f"INSERT INTO evaluation_goals({','.join(cols)}) VALUES({','.join('?' for _ in cols)})", (evaluation_id, *values.values(), stamp, stamp))
                     goal_id = int(cur.lastrowid)
-                    audit(self.db, user["id"], "evaluation.goal_create", "evaluation_goal", goal_id, {"source_template_id": template_id, "goal_type": values.get("goal_type"), "start_date": values.get("start_date"), "end_date": values.get("end_date")})
+                    audit(self.db, user["id"], "evaluation.goal_create", "evaluation_goal", goal_id, {"source_template_id": template_id, "objective_type": values.get("objective_type"), "goal_type": values.get("goal_type"), "start_date": values.get("start_date"), "end_date": values.get("end_date")})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "سبق اختيار هذا الهدف الرئيسي في تقييمك.", "duplicate_goal_template") from exc
             self.send_json(201, self.evaluation_payload(evaluation_id))
@@ -9915,10 +10049,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 for template in rows:
                     cursor = self.db.execute(
                         """INSERT INTO evaluation_goals
-                           (evaluation_id,source_template_id,title,description,weight,measure,achievement,employee_comment,
+                           (evaluation_id,source_template_id,objective_type,title,description,weight,measure,achievement,employee_comment,
                             goal_type,start_date,end_date,progress_status,evidence_note,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,0,'','result',?,?,'not_completed','',?,?)""",
-                        (evaluation_id, template["id"], template["title"], template["description"], template["default_weight"], template["measure"], evaluation["period_start"], evaluation["period_end"], stamp, stamp),
+                           VALUES(?,?,?,?,?,?,?,0,'','result',?,?,'not_completed','',?,?)""",
+                        (evaluation_id, template["id"], template["objective_type"], template["title"], template["description"], template["default_weight"], template["measure"], evaluation["period_start"], evaluation["period_end"], stamp, stamp),
                     )
                     added_ids.append(int(cursor.lastrowid))
                 audit(self.db, user["id"], "evaluation.goals_from_templates", "evaluation", evaluation_id, {"template_ids": [int(row["id"]) for row in rows], "goal_ids": added_ids})
@@ -9932,6 +10066,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             values = self.parse_goal(self.read_json(), partial=True)
             if not values:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            if goal["source_template_id"] is not None and "objective_type" in values and values["objective_type"] != goal["objective_type"]:
+                raise APIError(409, "تصنيف الهدف المعتمد يتبع مكتبة الوظيفة ولا يمكن تغييره من التقييم.", "objective_type_locked")
             if "weight" in values:
                 other = float(self.db.execute("SELECT COALESCE(SUM(weight),0) FROM evaluation_goals WHERE evaluation_id=? AND id<>?", (goal["evaluation_id"], goal_id)).fetchone()[0])
                 if other + values["weight"] > 100.000001:
@@ -10341,6 +10477,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     goal.pop("awarded_points", None)
             grievance = dict(grievance_row) if grievance_row and (own or hr_reviewer) else None
             weight_total = sum(float(goal["weight"]) for goal in goal_rows)
+            specialized_goal_count = sum(goal.get("objective_type") == "specialized" for goal in goal_rows)
+            general_goal_count = sum(goal.get("objective_type") == "general" for goal in goal_rows)
             score_visible = published or (not own and (direct_manager or hr_reviewer))
             score_total = sum(float(goal.get("awarded_points") or 0) for goal in goal_rows) if score_visible else None
             evaluation_data.update({
@@ -10350,8 +10488,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
                 "can_grieve": bool(own and published and grievance_row is None),
                 "score_total": round(score_total, 2) if score_total is not None else None,
+                "specialized_goal_count": specialized_goal_count,
+                "general_goal_count": general_goal_count,
+                "required_specialized_goal_count": 2,
+                "specialized_goal_complete": specialized_goal_count >= 2,
             })
-            return {"evaluation": evaluation_data, "goals": goal_rows, "weight_total": weight_total, "approvals": approvals, "grievance": grievance}
+            return {
+                "evaluation": evaluation_data, "goals": goal_rows, "weight_total": weight_total,
+                "general_goal_count": general_goal_count,
+                "specialized_goal_count": specialized_goal_count,
+                "required_specialized_goal_count": 2,
+                "specialized_goal_complete": specialized_goal_count >= 2,
+                "approvals": approvals, "grievance": grievance,
+            }
 
         def evaluation_summary_for_user(self, evaluation_id: int) -> dict[str, Any]:
             payload = self.evaluation_payload(evaluation_id)
@@ -10434,6 +10583,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 total = sum(float(goal["weight"]) for goal in goals)
                 if not goals or abs(total - 100.0) > 0.000001:
                     raise APIError(422, "لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.", "invalid_weight_total")
+                specialized_count = sum(goal["objective_type"] == "specialized" for goal in goals)
+                if specialized_count < 2:
+                    raise APIError(422, "اختر هدفين تخصصيين على الأقل قبل إرسال التقييم.", "specialized_goals_required", {
+                        "specialized_count": specialized_count, "required_count": 2,
+                        "missing_count": 2 - specialized_count,
+                    })
                 chain = self.build_approval_chain(evaluation["employee_id"])
                 stamp = now_iso()
                 score = sum(float(goal["weight"]) * float(goal["achievement"]) / 100 for goal in goals)
@@ -10449,6 +10604,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             total = sum(float(goal["weight"]) for goal in goals)
             if not goals or abs(total - 100.0) > 0.000001:
                 raise APIError(422, "لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.", "invalid_weight_total", {"weight_total": total})
+            specialized_count = sum(goal["objective_type"] == "specialized" for goal in goals)
+            if specialized_count < 2:
+                raise APIError(422, "اختر هدفين تخصصيين على الأقل قبل إرسال التقييم.", "specialized_goals_required", {
+                    "specialized_count": specialized_count, "required_count": 2,
+                    "missing_count": 2 - specialized_count,
+                })
             for goal in goals:
                 self.validate_evaluation_goal(evaluation, dict(goal), require_evidence=True)
             manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))

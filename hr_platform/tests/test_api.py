@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r26")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r27")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -1204,7 +1204,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         evaluation_id = evaluation_payload["evaluation"]["id"]
         first = employee.request(
             "POST", f"/api/evaluations/{evaluation_id}/goals",
-            {"title": "رفع جودة العمليات", "description": "تقليل الأخطاء", "weight": 90, "measure": "نسبة الدقة", "achievement": 95, "employee_comment": "تحسن مستمر", "goal_type": "result", "start_date": f"{current_year}-01-01", "end_date": f"{current_year}-12-31", "progress_status": "in_progress", "evidence_note": "انخفضت الأخطاء وفق تقرير الجودة."},
+            {"title": "رفع جودة العمليات", "description": "تقليل الأخطاء", "weight": 90, "measure": "نسبة الدقة", "achievement": 95, "employee_comment": "تحسن مستمر", "objective_type": "specialized", "goal_type": "result", "start_date": f"{current_year}-01-01", "end_date": f"{current_year}-12-31", "progress_status": "in_progress", "evidence_note": "انخفضت الأخطاء وفق تقرير الجودة."},
             expected=201,
         )
         self.assertEqual(first["weight_total"], 90)
@@ -1218,7 +1218,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(over_weight["code"], "invalid_weight_total")
         employee.request(
             "POST", f"/api/evaluations/{evaluation_id}/goals",
-            {"title": "التطوير المهني", "description": "إتمام تدريب", "weight": 10, "measure": "الإكمال", "achievement": 80, "employee_comment": "تم", "goal_type": "development", "start_date": f"{current_year}-01-01", "end_date": f"{current_year}-12-31", "progress_status": "in_progress", "evidence_note": "شهادة إتمام التدريب محفوظة."},
+            {"title": "التطوير المهني", "description": "إتمام تدريب", "weight": 10, "measure": "الإكمال", "achievement": 80, "employee_comment": "تم", "objective_type": "specialized", "goal_type": "development", "start_date": f"{current_year}-01-01", "end_date": f"{current_year}-12-31", "progress_status": "in_progress", "evidence_note": "شهادة إتمام التدريب محفوظة."},
             expected=201,
         )
         submitted = employee.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
@@ -2402,6 +2402,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(len(approved_library["items"]), 5)
         self.assertEqual(sum(item["default_weight"] for item in approved_library["items"]), 100)
         self.assertTrue(all(item["measure"] and item["description"] for item in approved_library["items"]))
+        for template in approved_library["items"][:2]:
+            hr.request(
+                "PATCH", f"/api/evaluation-goal-templates/{template['id']}",
+                {"objective_type": "specialized"},
+            )
 
         suffix = uuid.uuid4().hex[:8]
         email = f"goals-{suffix}@demo.ae"
@@ -2772,18 +2777,19 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1"
         )["items"]
         snapshot = next(item for item in templates if item["source_catalog_goal_id"] == first["id"])
+        self.assertEqual(snapshot["objective_type"], first["goal_type"])
         original = {key: first[key] for key in ("title", "measure", "default_weight")}
         hr.request(
             "PATCH", f"/api/evaluation-goal-catalog/{first['id']}",
             {"title": f"تعديل لاحق {suffix}", "measure": "معيار جديد", "default_weight": 33},
         )
-        preserved = hr.request(
+        synchronized = hr.request(
             "GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1"
         )["items"]
-        preserved_snapshot = next(item for item in preserved if item["id"] == snapshot["id"])
+        synchronized_snapshot = next(item for item in synchronized if item["id"] == snapshot["id"])
         self.assertEqual(
-            (preserved_snapshot["title"], preserved_snapshot["measure"], preserved_snapshot["default_weight"]),
-            (snapshot["title"], snapshot["measure"], snapshot["default_weight"]),
+            (synchronized_snapshot["title"], synchronized_snapshot["measure"], synchronized_snapshot["default_weight"]),
+            (f"تعديل لاحق {suffix}", "معيار جديد", 33),
         )
         hr.request("PATCH", f"/api/evaluation-goal-catalog/{first['id']}", original)
 
@@ -2808,7 +2814,219 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261105-production-r26", index)
+        self.assertIn("build=20261105-production-r27", index)
+
+    def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
+        # Legacy databases gain a separate classification dimension without
+        # repurposing the result/behaviour/development goal type.
+        with tempfile.TemporaryDirectory(prefix="hr-goal-objective-type-") as folder:
+            legacy_path = Path(folder) / "legacy-r26.sqlite3"
+            hr_server.initialize_database(legacy_path)
+            with contextlib.closing(sqlite3.connect(legacy_path)) as legacy:
+                legacy.row_factory = sqlite3.Row
+                legacy.execute("PRAGMA foreign_keys=OFF")
+                specialized_id = legacy.execute(
+                    "SELECT id FROM evaluation_goal_catalog WHERE goal_type='specialized' ORDER BY id LIMIT 1"
+                ).fetchone()["id"]
+                template = legacy.execute("SELECT * FROM evaluation_goal_templates ORDER BY id LIMIT 1").fetchone()
+                evaluation_id = legacy.execute("SELECT id FROM evaluations ORDER BY id LIMIT 1").fetchone()["id"]
+                stamp = datetime.now().isoformat(timespec="seconds")
+                legacy.execute(
+                    "UPDATE evaluation_goal_templates SET source_catalog_goal_id=? WHERE id=?",
+                    (specialized_id, template["id"]),
+                )
+                linked_goal_id = legacy.execute(
+                    """INSERT INTO evaluation_goals(
+                           evaluation_id,source_template_id,objective_type,title,description,weight,measure,
+                           achievement,goal_type,start_date,end_date,progress_status,evidence_note,
+                           employee_comment,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,0,'result','2026-01-01','2026-12-31','not_completed','','',?,?)""",
+                    (evaluation_id, template["id"], "general", "هدف مرتبط قديم", "", 10, "قياس قديم", stamp, stamp),
+                ).lastrowid
+                manual_template_id = legacy.execute(
+                    """INSERT INTO evaluation_goal_templates(
+                           job_title_id,objective_type,title,description,measure,default_weight,sort_order,active,created_at,updated_at
+                       ) VALUES(?, 'general', ?, '', ?, 10, 999, 1, ?, ?)""",
+                    (template["job_title_id"], "هدف يدوي قديم", "قياس يدوي", stamp, stamp),
+                ).lastrowid
+                manual_goal_id = legacy.execute(
+                    """INSERT INTO evaluation_goals(
+                           evaluation_id,source_template_id,objective_type,title,description,weight,measure,
+                           achievement,goal_type,start_date,end_date,progress_status,evidence_note,
+                           employee_comment,created_at,updated_at
+                       ) VALUES(?,NULL,'general',?,'',10,?,0,'result','2026-01-01','2026-12-31','not_completed','','',?,?)""",
+                    (evaluation_id, "هدف تقييم يدوي قديم", "قياس يدوي", stamp, stamp),
+                ).lastrowid
+                legacy.executescript("""
+                    CREATE TABLE evaluation_goal_templates_r26 AS
+                      SELECT id,job_title_id,source_catalog_goal_id,title,description,measure,default_weight,
+                             sort_order,active,created_at,updated_at FROM evaluation_goal_templates;
+                    DROP TABLE evaluation_goal_templates;
+                    ALTER TABLE evaluation_goal_templates_r26 RENAME TO evaluation_goal_templates;
+                    CREATE TABLE evaluation_goals_r26 AS
+                      SELECT id,evaluation_id,source_template_id,title,description,weight,measure,achievement,
+                             goal_type,start_date,end_date,progress_status,evidence_note,awarded_points,
+                             employee_comment,created_at,updated_at FROM evaluation_goals;
+                    DROP TABLE evaluation_goals;
+                    ALTER TABLE evaluation_goals_r26 RENAME TO evaluation_goals;
+                """)
+                legacy.commit()
+            hr_server.initialize_database(legacy_path)
+            with contextlib.closing(sqlite3.connect(legacy_path)) as migrated:
+                self.assertIn("objective_type", {row[1] for row in migrated.execute("PRAGMA table_info(evaluation_goal_templates)")})
+                self.assertIn("objective_type", {row[1] for row in migrated.execute("PRAGMA table_info(evaluation_goals)")})
+                self.assertEqual(migrated.execute("SELECT objective_type FROM evaluation_goal_templates WHERE id=?", (template["id"],)).fetchone()[0], "specialized")
+                self.assertEqual(migrated.execute("SELECT objective_type FROM evaluation_goals WHERE id=?", (linked_goal_id,)).fetchone()[0], "specialized")
+                self.assertEqual(migrated.execute("SELECT objective_type FROM evaluation_goal_templates WHERE id=?", (manual_template_id,)).fetchone()[0], "general")
+                self.assertEqual(migrated.execute("SELECT objective_type FROM evaluation_goals WHERE id=?", (manual_goal_id,)).fetchone()[0], "general")
+
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        manager_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
+        category = hr.request("GET", "/api/evaluation-goal-catalog")["categories"][0]
+        suffix = uuid.uuid4().hex[:8]
+        catalog_goal = hr.request(
+            "POST", "/api/evaluation-goal-catalog",
+            {
+                "category_id": category["id"], "goal_type": "general", "title": f"هدف مزامنة {suffix}",
+                "description": "نسخة المصدر", "measure": "المعيار الأول", "default_weight": 40,
+                "sort_order": 991, "active": True,
+            }, expected=201,
+        )["goal"]
+        bulk_goal = hr.request(
+            "POST", "/api/evaluation-goal-catalog",
+            {
+                "category_id": category["id"], "goal_type": "specialized", "title": f"هدف جمعي {suffix}",
+                "description": "للإضافة الجماعية", "measure": "المعيار الجمعي", "default_weight": 10,
+                "sort_order": 992, "active": True,
+            }, expected=201,
+        )["goal"]
+        title = hr.request("POST", "/api/job-titles", {"name": f"وظيفة مزامنة {suffix}"}, expected=201)["job_title"]
+        hr.request(
+            "POST", "/api/evaluation-goal-templates/from-catalog",
+            {"job_title_id": title["id"], "catalog_goal_ids": [catalog_goal["id"], bulk_goal["id"]]},
+        )
+        hr.request(
+            "POST", "/api/evaluation-goal-templates",
+            {"job_title_id": title["id"], "objective_type": "invalid", "title": "تصنيف مرفوض", "measure": "—", "default_weight": 1},
+            expected=422,
+        )
+        templates = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1"
+        )["items"]
+        source_template = next(item for item in templates if item["source_catalog_goal_id"] == catalog_goal["id"])
+        bulk_template = next(item for item in templates if item["source_catalog_goal_id"] == bulk_goal["id"])
+        self.assertEqual((source_template["title"], source_template["measure"], source_template["default_weight"], source_template["objective_type"]),
+                         (catalog_goal["title"], catalog_goal["measure"], catalog_goal["default_weight"], catalog_goal["goal_type"]))
+
+        grade_id = hr.request("GET", "/api/job-grades")["items"][0]["id"]
+        branch_id = hr.request("GET", "/api/branches")["items"][0]["id"]
+        email = f"sync-{suffix}@demo.ae"
+        hr.request(
+            "POST", "/api/employees",
+            {
+                "employee_no": f"SYNC-{suffix}", "full_name": "موظف مزامنة الأهداف", "email": email,
+                "job_title_id": title["id"], "job_grade_id": grade_id, "branch_id": branch_id,
+                "manager_id": manager_id, "hire_date": "2024-01-01", "salary": 9000,
+                "create_user": True, "password": "Sync@12345", "role": "employee",
+            }, expected=201,
+        )
+        worker = self.client(email, "Sync@12345")
+        evaluation = worker.request("POST", "/api/evaluations", {"year": date.today().year})["evaluation"]
+        evaluation_id = evaluation["id"]
+        worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            {"title": "تصنيف غير صالح", "weight": 1, "measure": "—", "objective_type": "invalid"},
+            expected=422,
+        )
+        single_payload = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals", {"template_id": source_template["id"]}, expected=201,
+        )
+        linked_goal = next(goal for goal in single_payload["goals"] if goal["source_template_id"] == source_template["id"])
+        self.assertEqual(linked_goal["objective_type"], "general")
+        locked = worker.request(
+            "PATCH", f"/api/evaluation-goals/{linked_goal['id']}",
+            {"objective_type": "specialized"}, expected=409,
+        )
+        self.assertEqual(locked["code"], "objective_type_locked")
+        bulk_payload = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals/from-templates",
+            {"template_ids": [bulk_template["id"]]}, expected=201,
+        )
+        copied_bulk = next(goal for goal in bulk_payload["goals"] if goal["source_template_id"] == bulk_template["id"])
+        self.assertEqual(copied_bulk["objective_type"], "specialized")
+        worker.request("DELETE", f"/api/evaluation-goals/{copied_bulk['id']}")
+        custom = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            {
+                "title": "هدف مكمل عام", "description": "هدف مخصص", "weight": 60, "measure": "نسبة الإنجاز",
+                "objective_type": "general", "goal_type": "result", "start_date": evaluation["period_start"],
+                "end_date": evaluation["period_end"], "progress_status": "completed", "achievement": 100,
+                "evidence_note": "دليل الهدف المخصص.",
+            }, expected=201,
+        )["goals"][-1]
+        worker.request("PATCH", f"/api/evaluation-goals/{linked_goal['id']}", {"evidence_note": "دليل الهدف المرتبط."})
+        missing_zero = worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {}, expected=422)
+        self.assertEqual((missing_zero["code"], missing_zero["details"]["specialized_count"]), ("specialized_goals_required", 0))
+
+        synced = hr.request(
+            "PATCH", f"/api/evaluation-goal-catalog/{catalog_goal['id']}",
+            {"goal_type": "specialized", "title": f"هدف مزامن معدل {suffix}", "measure": "المعيار المتزامن", "default_weight": 40},
+        )
+        self.assertGreaterEqual(synced["synchronized"]["template_count"], 1)
+        draft_payload = worker.request("GET", f"/api/evaluations/{evaluation_id}")
+        draft_linked = next(goal for goal in draft_payload["goals"] if goal["id"] == linked_goal["id"])
+        self.assertEqual((draft_linked["title"], draft_linked["measure"], draft_linked["objective_type"]),
+                         (f"هدف مزامن معدل {suffix}", "المعيار المتزامن", "specialized"))
+        missing_one = worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {}, expected=422)
+        self.assertEqual((missing_one["code"], missing_one["details"]["specialized_count"]), ("specialized_goals_required", 1))
+        ready = worker.request("PATCH", f"/api/evaluation-goals/{custom['id']}", {"objective_type": "specialized"})
+        self.assertEqual((ready["specialized_goal_count"], ready["required_specialized_goal_count"]), (2, 2))
+        submitted = worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
+        historical_linked = next(goal for goal in submitted["goals"] if goal["id"] == linked_goal["id"])
+
+        hr.request(
+            "PATCH", f"/api/evaluation-goal-catalog/{catalog_goal['id']}",
+            {"goal_type": "general", "title": f"تغيير بعد الإرسال {suffix}", "measure": "معيار لاحق", "default_weight": 35},
+        )
+        still_submitted = worker.request("GET", f"/api/evaluations/{evaluation_id}")
+        submitted_linked = next(goal for goal in still_submitted["goals"] if goal["id"] == linked_goal["id"])
+        self.assertEqual(
+            (submitted_linked["title"], submitted_linked["measure"], submitted_linked["weight"], submitted_linked["objective_type"]),
+            (historical_linked["title"], historical_linked["measure"], historical_linked["weight"], historical_linked["objective_type"]),
+        )
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            db.execute("UPDATE evaluations SET status='returned' WHERE id=?", (evaluation_id,))
+            db.commit()
+        hr.request(
+            "PATCH", f"/api/evaluation-goal-catalog/{catalog_goal['id']}",
+            {"goal_type": "specialized", "title": f"تغيير للمعاد {suffix}", "measure": "معيار المعاد", "default_weight": 40},
+        )
+        returned_payload = worker.request("GET", f"/api/evaluations/{evaluation_id}")
+        returned_linked = next(goal for goal in returned_payload["goals"] if goal["id"] == linked_goal["id"])
+        self.assertEqual((returned_linked["title"], returned_linked["objective_type"]), (f"تغيير للمعاد {suffix}", "specialized"))
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            db.execute("UPDATE evaluations SET status='submitted' WHERE id=?", (evaluation_id,))
+            db.commit()
+        archived = hr.request("DELETE", f"/api/evaluation-goal-catalog/{catalog_goal['id']}")
+        self.assertTrue(archived["archived"])
+        archived_template = next(item for item in hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1"
+        )["items"] if item["id"] == source_template["id"])
+        self.assertFalse(archived_template["active"])
+        self.assertTrue(any(goal["id"] == linked_goal["id"] for goal in worker.request("GET", f"/api/evaluations/{evaluation_id}")["goals"]))
+
+        root = Path(__file__).parents[1]
+        index = (root / "index.html").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('id="specializedGoalsRule"', index)
+        self.assertIn("specializedCount>=2", app)
+        self.assertIn("objective_type:formControl(form,'objective_type').value", app)
+        self.assertIn(".specialized-rule", styles)
+        self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
+        self.assertIn("build=20261105-production-r27", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -2834,13 +3052,18 @@ class HRAPIEndToEndTests(unittest.TestCase):
         evaluation_id = evaluation["evaluation"]["id"]
         goal = worker.request(
             "POST", f"/api/evaluations/{evaluation_id}/goals",
-            {"title": "تحسين زمن الخدمة", "description": "خفض زمن المعاملة", "weight": 100, "measure": "متوسط الزمن", "achievement": 75, "goal_type": "result", "start_date": evaluation["evaluation"]["period_start"], "end_date": evaluation["evaluation"]["period_end"], "progress_status": "in_progress", "evidence_note": "تقرير متوسط زمن الخدمة للفترة."},
+            {"title": "تحسين زمن الخدمة", "description": "خفض زمن المعاملة", "weight": 50, "measure": "متوسط الزمن", "achievement": 75, "objective_type": "specialized", "goal_type": "result", "start_date": evaluation["evaluation"]["period_start"], "end_date": evaluation["evaluation"]["period_end"], "progress_status": "in_progress", "evidence_note": "تقرير متوسط زمن الخدمة للفترة."},
             expected=201,
         )["goals"][0]
+        second_goal = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            {"title": "دقة معالجة الطلبات", "description": "تقليل إعادة العمل", "weight": 50, "measure": "نسبة الدقة", "achievement": 75, "objective_type": "specialized", "goal_type": "result", "start_date": evaluation["evaluation"]["period_start"], "end_date": evaluation["evaluation"]["period_end"], "progress_status": "in_progress", "evidence_note": "تقرير تدقيق الطلبات للفترة."},
+            expected=201,
+        )["goals"][1]
         worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
         manager.request(
             "POST", f"/api/evaluations/{evaluation_id}/manager-review",
-            {"manager_report": "التقرير الأول يحتاج تدقيق HR.", "goals": [{"id": goal["id"], "awarded_points": 72}]},
+            {"manager_report": "التقرير الأول يحتاج تدقيق HR.", "goals": [{"id": goal["id"], "awarded_points": 36}, {"id": second_goal["id"], "awarded_points": 36}]},
         )
         hr.request(
             "POST", f"/api/evaluations/{evaluation_id}/hr-review",
@@ -2855,7 +3078,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(manager_view["evaluation"]["hr_comment"], "أعد مطابقة النتيجة مع مؤشر زمن الخدمة.")
         manager.request(
             "POST", f"/api/evaluations/{evaluation_id}/manager-review",
-            {"manager_report": "تمت إعادة المطابقة مع السجلات التشغيلية.", "goals": [{"id": goal["id"], "awarded_points": 78}]},
+            {"manager_report": "تمت إعادة المطابقة مع السجلات التشغيلية.", "goals": [{"id": goal["id"], "awarded_points": 39}, {"id": second_goal["id"], "awarded_points": 39}]},
         )
         disclosure = date.today() + timedelta(days=1)
         hr.request(
@@ -3147,8 +3370,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         evaluation = worker.request("POST", "/api/evaluations", {"cycle_id": cycle["id"]})["evaluation"]
         evaluation_id = evaluation["id"]
         base_goal = {
-            "title": "تحسين جودة الخدمة", "description": "خفض إعادة العمل", "weight": 100,
-            "measure": "نسبة المعاملات الصحيحة", "goal_type": "result",
+            "title": "تحسين جودة الخدمة", "description": "خفض إعادة العمل", "weight": 50,
+            "measure": "نسبة المعاملات الصحيحة", "objective_type": "specialized", "goal_type": "result",
             "start_date": cycle["period_start"], "end_date": cycle["period_end"],
             "progress_status": "in_progress", "achievement": 65, "evidence_note": "",
         }
@@ -3157,6 +3380,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         mismatch = dict(base_goal, progress_status="completed", achievement=65)
         self.assertEqual(worker.request("POST", f"/api/evaluations/{evaluation_id}/goals", mismatch, expected=422)["code"], "goal_progress_mismatch")
         goal = worker.request("POST", f"/api/evaluations/{evaluation_id}/goals", base_goal, expected=201)["goals"][0]
+        second_goal = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            dict(base_goal, title="تحسين دقة المعالجة", evidence_note="تقرير تدقيق المعاملات."),
+            expected=201,
+        )["goals"][1]
         self.assertEqual(worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {}, expected=422)["code"], "goal_evidence_required")
         worker.request("PATCH", f"/api/evaluation-goals/{goal['id']}", {"evidence_note": "أظهر تقرير الجودة انخفاض إعادة العمل إلى 4%."})
 
@@ -3176,7 +3404,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(manager_view["goals"][0]["evidence_note"], "أظهر تقرير الجودة انخفاض إعادة العمل إلى 4%.")
         reviewed = manager.request(
             "POST", f"/api/evaluations/{evaluation_id}/manager-review",
-            {"manager_report": "النتيجة موثقة ومتسقة مع مؤشر الجودة.", "goals": [{"id": goal["id"], "awarded_points": 82}]},
+            {"manager_report": "النتيجة موثقة ومتسقة مع مؤشر الجودة.", "goals": [{"id": goal["id"], "awarded_points": 41}, {"id": second_goal["id"], "awarded_points": 41}]},
         )
         self.assertEqual(reviewed["evaluation"]["status"], "in_review")
         approved = hr.request(
@@ -3250,11 +3478,15 @@ class HRAPIEndToEndTests(unittest.TestCase):
         hr.request("POST", f"/api/evaluation-cycles/{cycle['id']}/announce", {})
         evaluation = worker.request("POST", "/api/evaluations", {"cycle_id": cycle["id"]})["evaluation"]
         goal = {
-            "title": "هدف متأخر موثق", "description": "نتيجة تشغيلية", "weight": 100, "measure": "نسبة الإنجاز",
-            "goal_type": "behaviour", "start_date": cycle["period_start"], "end_date": cycle["period_end"],
+            "title": "هدف متأخر موثق", "description": "نتيجة تشغيلية", "weight": 50, "measure": "نسبة الإنجاز",
+            "objective_type": "specialized", "goal_type": "behaviour", "start_date": cycle["period_start"], "end_date": cycle["period_end"],
             "progress_status": "completed", "achievement": 100, "evidence_note": "محضر إنجاز موقع من الفريق.",
         }
         worker.request("POST", f"/api/evaluations/{evaluation['id']}/goals", goal, expected=201)
+        worker.request(
+            "POST", f"/api/evaluations/{evaluation['id']}/goals",
+            dict(goal, title="هدف متأخر تخصصي ثانٍ"), expected=201,
+        )
         submitted = worker.request("POST", f"/api/evaluations/{evaluation['id']}/submit", {})
         self.assertTrue(submitted["evaluation"]["submitted_late"])
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
@@ -5043,7 +5275,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r26", index)
+        self.assertIn("build=20261105-production-r27", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5583,7 +5815,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r26", index)
+        self.assertIn("build=20261105-production-r27", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
