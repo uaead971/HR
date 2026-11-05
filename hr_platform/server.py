@@ -7038,6 +7038,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raw_department_id = data.get("department_head_department_id")
                 if raw_department_id not in (None, ""):
                     target_head_department_id = as_int(raw_department_id, "department_head_department_id", 1)
+                    effective_department_id = values.get("department_id", existing_employee["department_id"])
+                    if not effective_department_id:
+                        raise APIError(
+                            422,
+                            "يجب تعيين الموظف في قسم قبل اختياره رئيساً للقسم.",
+                            "department_head_requires_department",
+                            {"field": "department_head_department_id"},
+                        )
+                    if int(effective_department_id) != target_head_department_id:
+                        raise APIError(
+                            422,
+                            "يمكن تعيين الموظف رئيساً للقسم الذي يعمل فيه فقط.",
+                            "department_head_department_mismatch",
+                            {
+                                "field": "department_head_department_id",
+                                "employee_department_id": int(effective_department_id),
+                            },
+                        )
                     target_department = self.db.execute(
                         "SELECT id FROM departments WHERE id=? AND active=1",
                         (target_head_department_id,),
@@ -7049,9 +7067,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             "validation_error",
                             {"field": "department_head_department_id"},
                         )
-                    # The head belongs to the department they lead and cannot
-                    # report to themselves.
-                    values["department_id"] = target_head_department_id
+                    # A department head always leads the department already
+                    # selected in their employee profile and cannot report to
+                    # themselves.
                     values["manager_id"] = None
             else:
                 effective_department_id = values.get("department_id", existing_employee["department_id"])

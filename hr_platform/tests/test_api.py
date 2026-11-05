@@ -6076,6 +6076,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
             {"name_ar": f"قسم إشراف {suffix}", "name_en": f"Supervision Department {suffix}"},
             expected=201,
         )["department"]
+        other_department = admin.request(
+            "POST", "/api/departments",
+            {"name_ar": f"قسم آخر {suffix}", "name_en": f"Other Department {suffix}"},
+            expected=201,
+        )["department"]
         existing_manager = next(
             employee for employee in admin.request("GET", "/api/employees")["items"]
             if employee["employee_no"] == "EMP-1002"
@@ -6102,6 +6107,16 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 },
                 expected=201,
             )["employee"])
+
+        mismatch = admin.request(
+            "PATCH", f"/api/employees/{head['id']}",
+            {"department_head_department_id": other_department["id"]},
+            expected=422,
+        )
+        self.assertEqual(mismatch["code"], "department_head_department_mismatch")
+        unchanged = admin.request("GET", f"/api/employees/{head['id']}")["employee"]
+        self.assertEqual(unchanged["department_id"], department["id"])
+        self.assertIsNone(unchanged["department_head_department_id"])
 
         assigned = admin.request(
             "PATCH", f"/api/employees/{head['id']}",
@@ -6138,8 +6153,30 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(later_member["manager_id"], head["id"])
         self.assertEqual(later_member["manager_name"], head["full_name"])
 
+        replacement = admin.request(
+            "POST", "/api/employees",
+            {
+                "employee_no": f"HEAD2-{suffix}", "full_name": "رئيس القسم البديل",
+                "department_id": department["id"],
+            },
+            expected=201,
+        )["employee"]
+        replacement = admin.request(
+            "PATCH", f"/api/employees/{replacement['id']}",
+            {"department_head_department_id": department["id"]},
+        )["employee"]
+        self.assertEqual(replacement["department_head_department_id"], department["id"])
+        replaced_head = admin.request("GET", f"/api/employees/{head['id']}")["employee"]
+        self.assertIsNone(replaced_head["department_head_department_id"])
+        self.assertEqual(replaced_head["manager_id"], replacement["id"])
+        saved_department = next(
+            item for item in admin.request("GET", "/api/departments")["items"]
+            if item["id"] == department["id"]
+        )
+        self.assertEqual(saved_department["manager_employee_id"], replacement["id"])
+
         cleared = admin.request(
-            "PATCH", f"/api/employees/{head['id']}",
+            "PATCH", f"/api/employees/{replacement['id']}",
             {"department_head_department_id": None},
         )["employee"]
         self.assertIsNone(cleared["department_head_department_id"])
@@ -6148,7 +6185,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             if item["id"] == department["id"]
         )
         self.assertIsNone(saved_department["manager_employee_id"])
-        for member_id in [member["id"] for member in members] + [later_member["id"]]:
+        for member_id in [head["id"], *[member["id"] for member in members], later_member["id"]]:
             profile = admin.request("GET", f"/api/employees/{member_id}")["employee"]
             self.assertIsNone(profile["manager_id"])
         self.assertEqual(head_session.request("GET", "/api/auth/me")["user"]["role"], "manager")
@@ -6157,6 +6194,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         translations = (Path(__file__).parents[1] / "i18n.js").read_text(encoding="utf-8")
         self.assertIn('name="department_head_department_id"', app)
         self.assertIn("prepareDepartmentHeadField", app)
+        self.assertIn("data-current-department-option", app)
         self.assertIn("'رئاسة القسم':'Department leadership'", translations)
 
 

@@ -547,6 +547,13 @@
     'رئاسة القسم':'Department leadership',
     'تعيين الموظف رئيساً للقسم':'Assign employee as department head',
     'ليس رئيساً لأي قسم':'Not a department head',
+    'تعيين الموظف رئيساً لقسمه الحالي':'Assign employee as head of their current department',
+    'ليس رئيساً للقسم':'Not the department head',
+    'رئيس القسم الحالي':'Head of the current department',
+    'يجب اختيار قسم للموظف أولاً.':'Select the employee’s department first.',
+    'موظف آخر':'another employee',
+    'الرئيس الحالي لهذا القسم هو {name} وسيتم استبداله عند الحفظ.':'The current head of this department is {name} and will be replaced when you save.',
+    'يمكن تعيين الموظف رئيساً للقسم الذي يعمل فيه فقط. عند الحفظ يصبح المسؤول المباشر لموظفي القسم وتُنقل إليه المسارات المعلقة.':'An employee can only be assigned as head of the department they work in. After saving, they become the line manager for that department’s employees and pending workflows are reassigned to them.',
     'عند الحفظ يصبح هذا الموظف المسؤول المباشر لجميع موظفي القسم، وتُنقل إليه مسارات التقييم والإجازات المعلقة. إذا كان حسابه موظفاً عادياً يُرقّى تلقائياً إلى مسؤول مباشر.':'After saving, this employee becomes the line manager for everyone in the department, and pending performance reviews and leave requests are reassigned to them. If their account is an Employee account, it is automatically promoted to Line Manager.'
   });
 
