@@ -552,9 +552,40 @@ CREATE TABLE IF NOT EXISTS evaluations (
   FOREIGN KEY (hr_reviewed_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS evaluation_goal_catalog_categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  stable_key TEXT UNIQUE,
+  name TEXT NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evaluation_goal_catalog (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  category_id INTEGER NOT NULL,
+  stable_key TEXT UNIQUE,
+  goal_type TEXT NOT NULL CHECK (goal_type IN ('general','specialized')),
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  measure TEXT NOT NULL DEFAULT '',
+  default_weight REAL NOT NULL CHECK (default_weight > 0 AND default_weight <= 100),
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(category_id, title),
+  FOREIGN KEY (category_id) REFERENCES evaluation_goal_catalog_categories(id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_evaluation_goal_catalog_category
+  ON evaluation_goal_catalog(category_id, active, goal_type, sort_order);
+
 CREATE TABLE IF NOT EXISTS evaluation_goal_templates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_title_id INTEGER NOT NULL,
+  source_catalog_goal_id INTEGER,
   title TEXT NOT NULL,
   description TEXT NOT NULL DEFAULT '',
   measure TEXT NOT NULL DEFAULT '',
@@ -564,7 +595,8 @@ CREATE TABLE IF NOT EXISTS evaluation_goal_templates (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(job_title_id, title),
-  FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE CASCADE
+  FOREIGN KEY (job_title_id) REFERENCES job_titles(id) ON DELETE CASCADE,
+  FOREIGN KEY (source_catalog_goal_id) REFERENCES evaluation_goal_catalog(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS evaluation_goals (

@@ -486,6 +486,21 @@
     'دون وصف':'No description','غير محدد':'Not specified','نشط':'Active','متوقف':'Disabled','تفعيل':'Enable','إلغاء':'Cancel'
   });
 
+  Object.assign(english, {
+    'أدر أهداف كل وظيفة أو اختر أهدافاً جاهزة من المكتبة المركزية باسمها ومعيارها ووزنها.':'Manage each job’s goals or select ready-made goals from the central library with their name, criterion and weight.',
+    'أهداف الوظائف':'Job goals','مكتبة الأهداف':'Goals library','التصنيفات':'Categories','كل الأهداف':'All goals','عامة':'General','تخصصية':'Specialized',
+    'المصدر المركزي':'Central source','الأهداف هنا مستقلة؛ عند اختيارها لوظيفة تُحفظ نسخة لا تتأثر بالتعديلات اللاحقة.':'Goals here are independent. Selecting one for a job saves a snapshot that is unaffected by later edits.',
+    '+ إضافة هدف للمكتبة':'+ Add goal to library','ابحث في التصنيف أو الهدف أو المعيار…':'Search a category, goal or criterion…','التصنيف':'Category','كل التصنيفات':'All categories','النوع':'Type','كل الأنواع':'All types','عام':'General','تخصصي':'Specialized','الحالة':'Status','الكل':'All','مؤرشف':'Archived','جارٍ تحميل مكتبة الأهداف…':'Loading the goals library…',
+    'لا توجد أهداف مطابقة':'No matching goals','غيّر البحث أو التصنيف أو نوع الهدف أو حالته.':'Change the search, category, goal type or status.','تصنيف':'Category','هدف':'goal','تعديل':'Edit','أرشفة':'Archive','استعادة':'Restore',
+    'اختر أهدافاً جاهزة من المكتبة أو أضف هدفاً يدوياً.':'Choose ready-made goals from the library or add one manually.','إضافة هدف للمكتبة':'Add goal to library','تعديل هدف المكتبة':'Edit library goal','نوع الهدف':'Goal type','الوزن الافتراضي':'Default weight','هدف نشط ومتاح للاختيار':'Active goal available for selection','إضافة الهدف للمكتبة':'Add goal to library',
+    'تم تحديث هدف المكتبة':'Library goal updated','تمت إضافة الهدف إلى المكتبة':'Goal added to the library','أرشفة هذا الهدف؟ ستبقى نسخه المضافة للوظائف والتقييمات محفوظة.':'Archive this goal? Copies already added to jobs and evaluations will remain preserved.','تمت استعادة الهدف وإتاحته للاختيار':'Goal restored and available for selection',
+    'اختر أهدافاً جاهزة أو أنشئ هدفاً خاصاً بهذه الوظيفة.':'Choose ready-made goals or create a goal specifically for this job.','اختيار من مكتبة الأهداف':'Choose from goals library','اختيار عدة أهداف جاهزة مع الاسم والمعيار والوزن':'Select several ready-made goals with their name, criterion and weight','إضافة يدوية':'Add manually','إنشاء هدف خاص بهذه الوظيفة فقط':'Create a goal for this job only',
+    'الوصفة المقترحة':'Suggested recipe','4 أهداف عامة × 10% + 3 أهداف تخصصية × 20% = 100%. إرشاد فقط ويمكنك اختيار غير ذلك.':'4 general goals × 10% + 3 specialized goals × 20% = 100%. This is guidance only; you may choose a different mix.','بحث':'Search','اسم الهدف أو المعيار':'Goal name or criterion','جرّب تصنيفاً آخر أو امسح عبارة البحث.':'Try another category or clear the search.','المحدد':'Selected','مجموع الوزن':'Total weight','إضافة الأهداف المحددة':'Add selected goals','جارٍ إضافة الأهداف…':'Adding goals…',
+    'نتيجة إضافة الأهداف':'Goal assignment result','تمت الإضافة':'Added','مضافة مسبقاً':'Already assigned','تعارض في الاسم':'Title conflict','لا يوجد':'None','لم يتم استبدال أي هدف يدوي يحمل الاسم نفسه.':'No manual goal with the same title was overwritten.','تم':'Done',
+    'تمت إضافة المسمى الوظيفي؛ اختر أهدافه من المكتبة':'Job title added; choose its goals from the library',
+    'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.','تجاوز المجموع 100% — الاختيار مسموح لأنه إرشادي، راجع الأوزان قبل الاعتماد.':'The total exceeds 100%. Selection remains allowed as guidance; review weights before approval.','مجموع الوزن مكتمل 100%.':'The total weight is complete at 100%.','المجموع أقل من 100% — يمكنك متابعة الاختيار.':'The total is below 100%; you can continue selecting.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

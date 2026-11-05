@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r25")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r26")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2473,18 +2473,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "POST", "/api/job-titles", {"name": f"منسق ابتكار {suffix}"}, expected=201
         )["job_title"]
         generic = hr.request("GET", f"/api/evaluation-goal-templates?job_title_id={new_title['id']}&include_inactive=1")
-        self.assertEqual(len(generic["items"]), 5)
-        self.assertEqual(generic["weight_total"], 100)
-        edited = hr.request(
-            "PATCH", f"/api/evaluation-goal-templates/{generic['items'][0]['id']}",
-            {"title": "جودة الإنجاز المحدثة", "default_weight": 30, "active": False},
-        )["template"]
-        self.assertEqual(edited["title"], "جودة الإنجاز المحدثة")
-        self.assertEqual(edited["default_weight"], 30)
-        self.assertFalse(edited["active"])
+        self.assertEqual(generic["items"], [])
+        self.assertEqual(generic["weight_total"], 0)
 
-        # Goal libraries are assigned by both job title and department.  The
-        # sales profile mirrors the supplied annual sales evaluation form.
+        # Newly created and moved job titles stay empty until HR explicitly
+        # selects goals from the master catalogue.
         admin = self.client("admin@demo.ae", "Admin@123")
         sales_department = admin.request(
             "POST", "/api/departments", {"name": f"المبيعات {suffix}"}, expected=201
@@ -2499,19 +2492,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         )
         self.assertEqual(sales_library["job_title"]["department_id"], sales_department["id"])
         self.assertEqual(sales_library["job_title"]["department_name"], sales_department["name"])
-        self.assertEqual(
-            [item["title"] for item in sales_library["items"]],
-            [
-                "أداء المبيعات", "خدمة العملاء ورضا العملاء", "المعرفة بالمنتجات وطريقة عرضها",
-                "الالتزام بالحضور والمواعيد", "التعاون مع الفريق والالتزام بسياسات الشركة",
-            ],
-        )
-        self.assertEqual([item["default_weight"] for item in sales_library["items"]], [35, 25, 20, 10, 10])
-        self.assertEqual(sales_library["weight_total"], 100)
-        self.assertIn("تحقيق 100% فأكثر", sales_library["items"][0]["measure"])
+        self.assertEqual(sales_library["items"], [])
+        self.assertEqual(sales_library["weight_total"], 0)
 
-        # Moving an untouched system library to Sales refreshes it in place,
-        # while a library edited by HR remains untouched.
         movable_title = hr.request(
             "POST", "/api/job-titles", {"name": f"منسق متجر {suffix}"}, expected=201
         )["job_title"]
@@ -2527,7 +2510,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "GET", f"/api/evaluation-goal-templates?job_title_id={movable_title['id']}&include_inactive=1"
         )
         self.assertEqual([item["id"] for item in after_move["items"]], original_ids)
-        self.assertEqual(after_move["items"][0]["title"], "أداء المبيعات")
+        self.assertEqual(after_move["items"], [])
 
         hr.request(
             "PATCH", f"/api/job-titles/{new_title['id']}",
@@ -2536,8 +2519,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         customized_after_move = hr.request(
             "GET", f"/api/evaluation-goal-templates?job_title_id={new_title['id']}&include_inactive=1"
         )
-        self.assertEqual(customized_after_move["items"][0]["title"], "جودة الإنجاز المحدثة")
-        self.assertFalse(customized_after_move["items"][0]["active"])
+        self.assertEqual(customized_after_move["items"], [])
 
         procurement_department = admin.request(
             "POST", "/api/departments", {"name": f"المشتريات واللوجستك {suffix}"}, expected=201
@@ -2551,23 +2533,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "GET", f"/api/evaluation-goal-templates?job_title_id={procurement_title['id']}&include_inactive=1"
         )
         self.assertEqual(procurement_library["job_title"]["department_name"], procurement_department["name"])
-        self.assertEqual(
-            [item["title"] for item in procurement_library["items"]],
-            [
-                "الحصول على أفضل الأسعار وشروط التوريد",
-                "دقة ومتابعة أوامر الشراء ومواعيد التسليم",
-                "دقة والتزام مواعيد الشحن والتخليص الجمركي",
-                "إدارة علاقات الموردين وشركات الشحن والتفاوض",
-                "الالتزام بالحضور والمواعيد",
-                "التعاون مع الفريق والالتزام بسياسات الشركة",
-            ],
-        )
-        self.assertEqual(
-            [item["default_weight"] for item in procurement_library["items"]],
-            [20, 20, 25, 15, 10, 10],
-        )
-        self.assertEqual(procurement_library["weight_total"], 100)
-        self.assertIn("مخالفات جمركية", procurement_library["items"][2]["measure"])
+        self.assertEqual(procurement_library["items"], [])
+        self.assertEqual(procurement_library["weight_total"], 0)
 
         # A real V4.8-shaped evaluation_goals table must migrate before the
         # unique source-template index is created, while preserving old goals.
@@ -2713,6 +2680,135 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".goal-title-weight.unbalanced", styles)
         self.assertIn("'الأهداف':'Goals'", translations)
         self.assertIn("'إدارة مكتبة أهداف التقييم حسب الوظيفة':'Manage the evaluation goals library by job title'", translations)
+
+    def test_32c_v60_master_goal_catalog_seed_crud_assignment_snapshots_and_frontend(self):
+        hr = self.client("hr@demo.ae", "HR@12345")
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        employee.request("GET", "/api/evaluation-goal-catalog", expected=403)
+        employee.request(
+            "POST", "/api/evaluation-goal-catalog",
+            {"category_id": 1, "goal_type": "general", "title": "غير مصرح", "measure": "—", "default_weight": 10},
+            expected=403,
+        )
+
+        catalog = hr.request("GET", "/api/evaluation-goal-catalog?status=all")
+        self.assertEqual(catalog["summary"]["category_count"], 11)
+        self.assertEqual(catalog["summary"]["total_count"], 165)
+        self.assertEqual(catalog["summary"]["general_count"], 55)
+        self.assertEqual(catalog["summary"]["specialized_count"], 110)
+        self.assertEqual(catalog["summary"]["active_count"], 165)
+        self.assertEqual(len(catalog["categories"]), 11)
+        for category in catalog["categories"]:
+            self.assertEqual(len(category["goals"]), 15)
+            self.assertEqual(sum(goal["goal_type"] == "general" for goal in category["goals"]), 5)
+            self.assertEqual(sum(goal["goal_type"] == "specialized" for goal in category["goals"]), 10)
+            self.assertTrue(all(goal["default_weight"] == (10 if goal["goal_type"] == "general" else 20) for goal in category["goals"]))
+
+        # Reinitialization never duplicates seeded data, overwrites an HR edit,
+        # or reactivates a seeded goal that HR archived.
+        with tempfile.TemporaryDirectory(prefix="hr-goal-catalog-") as folder:
+            db_path = Path(folder) / "catalog.sqlite3"
+            hr_server.initialize_database(db_path)
+            with sqlite3.connect(db_path) as db:
+                goal_id = db.execute("SELECT id FROM evaluation_goal_catalog ORDER BY id LIMIT 1").fetchone()[0]
+                db.execute("UPDATE evaluation_goal_catalog SET title='هدف معدل محفوظ',active=0 WHERE id=?", (goal_id,))
+                db.commit()
+            hr_server.initialize_database(db_path)
+            with sqlite3.connect(db_path) as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM evaluation_goal_catalog").fetchone()[0], 165)
+                self.assertEqual(db.execute("SELECT title,active FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone(), ("هدف معدل محفوظ", 0))
+
+        category = catalog["categories"][0]
+        suffix = uuid.uuid4().hex[:8]
+        created = hr.request(
+            "POST", "/api/evaluation-goal-catalog",
+            {
+                "category_id": category["id"], "goal_type": "general", "title": f"هدف مكتبة مخصص {suffix}",
+                "description": "وصف مستقل", "measure": "نسبة الإنجاز المثبتة", "default_weight": 12,
+                "sort_order": 90, "active": True,
+            }, expected=201,
+        )["goal"]
+        updated = hr.request(
+            "PATCH", f"/api/evaluation-goal-catalog/{created['id']}",
+            {"title": f"هدف مكتبة معدل {suffix}", "default_weight": 14},
+        )["goal"]
+        self.assertEqual((updated["title"], updated["default_weight"]), (f"هدف مكتبة معدل {suffix}", 14))
+        archived = hr.request("DELETE", f"/api/evaluation-goal-catalog/{created['id']}")
+        self.assertTrue(archived["archived"])
+        archived_list = hr.request("GET", f"/api/evaluation-goal-catalog?status=archived&q={suffix}")
+        self.assertEqual([goal["id"] for goal in archived_list["items"]], [created["id"]])
+
+        title = hr.request(
+            "POST", "/api/job-titles", {"name": f"مسمى مكتبة {suffix}"}, expected=201
+        )["job_title"]
+        self.assertEqual(
+            hr.request("GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1")["items"],
+            [],
+        )
+        active_goals = [goal for goal in catalog["items"] if goal["active"]]
+        first, second, conflict_goal = active_goals[:3]
+        assignment = hr.request(
+            "POST", "/api/evaluation-goal-templates/from-catalog",
+            {"job_title_id": title["id"], "catalog_goal_ids": [first["id"], second["id"]]},
+        )
+        self.assertEqual((assignment["added_count"], assignment["already_assigned_count"], assignment["conflict_count"]), (2, 0, 0))
+        repeated = hr.request(
+            "POST", "/api/evaluation-goal-templates/from-catalog",
+            {"job_title_id": title["id"], "catalog_goal_ids": [first["id"], second["id"]]},
+        )
+        self.assertEqual((repeated["added_count"], repeated["already_assigned_count"]), (0, 2))
+        hr.request(
+            "POST", "/api/evaluation-goal-templates",
+            {"job_title_id": title["id"], "title": conflict_goal["title"], "measure": "معيار يدوي", "default_weight": 7, "sort_order": 30},
+            expected=201,
+        )
+        conflict = hr.request(
+            "POST", "/api/evaluation-goal-templates/from-catalog",
+            {"job_title_id": title["id"], "catalog_goal_ids": [conflict_goal["id"]]},
+        )
+        self.assertEqual((conflict["added_count"], conflict["conflict_count"]), (0, 1))
+
+        templates = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1"
+        )["items"]
+        snapshot = next(item for item in templates if item["source_catalog_goal_id"] == first["id"])
+        original = {key: first[key] for key in ("title", "measure", "default_weight")}
+        hr.request(
+            "PATCH", f"/api/evaluation-goal-catalog/{first['id']}",
+            {"title": f"تعديل لاحق {suffix}", "measure": "معيار جديد", "default_weight": 33},
+        )
+        preserved = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={title['id']}&include_inactive=1"
+        )["items"]
+        preserved_snapshot = next(item for item in preserved if item["id"] == snapshot["id"])
+        self.assertEqual(
+            (preserved_snapshot["title"], preserved_snapshot["measure"], preserved_snapshot["default_weight"]),
+            (snapshot["title"], snapshot["measure"], snapshot["default_weight"]),
+        )
+        hr.request("PATCH", f"/api/evaluation-goal-catalog/{first['id']}", original)
+
+        root = Path(__file__).parents[1]
+        index = (root / "index.html").read_text(encoding="utf-8")
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('data-goals-library-tab="assigned"', index)
+        self.assertIn('data-goals-library-tab="catalog"', index)
+        self.assertIn('id="goalCatalogShelves"', index)
+        self.assertIn("/api/evaluation-goal-templates/from-catalog", app)
+        self.assertIn("data-catalog-choice", app)
+        self.assertIn("4 أهداف عامة × 10% + 3 أهداف تخصصية × 20% = 100%", app)
+        self.assertIn("handleGoalsLibraryTabKeydown", app)
+        self.assertIn("addEventListener('keydown',handleGoalsLibraryTabKeydown)", app)
+        self.assertIn("'sales','branch','retail','store'", app)
+        self.assertIn("'human resources','human resource','hr','hr department'", app)
+        self.assertIn("تجاوز المجموع 100%", app)
+        self.assertIn(".goal-catalog-shelf", styles)
+        self.assertIn(".catalog-selection-meter", styles)
+        self.assertIn(".catalog-selection-meter.over-limit", styles)
+        self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
+        self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
+        self.assertIn("build=20261105-production-r26", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -4947,7 +5043,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r25", index)
+        self.assertIn("build=20261105-production-r26", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5487,7 +5583,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r25", index)
+        self.assertIn("build=20261105-production-r26", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

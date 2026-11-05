@@ -307,6 +307,54 @@ SPECIALIZED_JOB_GOALS = {
 }
 
 
+# Stable, tenant-independent source catalogue supplied by the organization.
+# The first five lines in every category are general goals (10%); the next
+# ten are specialized goals (20%).  INSERT OR IGNORE seeding below deliberately
+# preserves every HR edit, including archived seeded goals, across restarts.
+EVALUATION_GOAL_CATALOG_SEED = (
+    ("sales_branches", "قسم المبيعات – موظفو الفروع", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بأنظمة الشركة وسياساتها وتعليمات المسؤول المباشر.|المحافظة على مستوى مرتفع من الإنتاجية وإنجاز المهام اليومية.|تنفيذ الأعمال بدقة وتقليل الأخطاء والملاحظات المتكررة.|التعاون مع الزملاء والأقسام الأخرى وتحمل مسؤولية العمل.|تحقيق مستهدف المبيعات الشهري والسنوي المحدد للفرع.|زيادة متوسط قيمة الفاتورة من خلال البيع الإضافي.|تحسين معدل تحويل زوار الفرع إلى عملاء مشترين.|تقديم معلومات صحيحة عن المنتجات والأسعار والعروض.|المحافظة على مستوى مرتفع من رضا العملاء.|معالجة شكاوى العملاء وملاحظاتهم في الوقت المحدد.|المحافظة على ترتيب المنتجات ونظافة مناطق العرض.|متابعة توفر المنتجات والإبلاغ المبكر عن النواقص.|الالتزام بدقة الفواتير والتحصيلات النقدية والعهد.|تطوير المعرفة بالمنتجات ومهارات البيع وخدمة العملاء."""),
+    ("procurement", "قسم المشتريات", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بسياسات الشركة والنزاهة في التعامل مع الموردين.|المحافظة على مستوى مرتفع من الإنتاجية وإنجاز طلبات الشراء.|تنفيذ المعاملات بدقة وتقليل الأخطاء والتأخير.|التعاون مع المخازن والحسابات واللوجستيات والأقسام الطالبة.|توفير المنتجات والكميات المطلوبة ضمن المواعيد المحددة.|الحصول على أفضل الأسعار وشروط الدفع والتوريد.|مقارنة عروض الأسعار واختيار العرض الأنسب.|متابعة الموردين والتأكد من التزامهم بمواعيد التوريد.|التأكد من مطابقة المنتجات للمواصفات والجودة المطلوبة.|تقليل حالات نفاد المخزون الناتجة عن تأخر الشراء.|تطوير قاعدة بيانات الموردين والبحث عن موردين بديلين.|تقييم أداء الموردين ومعالجة حالات ضعف الأداء.|استكمال أوامر الشراء والعقود والموافقات والمستندات.|توقع الاحتياجات المستقبلية والتنسيق مع المخازن والمبيعات."""),
+    ("warehouses", "قسم المخازن", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بأنظمة الشركة وتعليمات الأمن والسلامة.|المحافظة على مستوى مرتفع من الإنتاجية في عمليات المخزن.|تنفيذ عمليات الاستلام والصرف والتجهيز بدقة.|التعاون مع المشتريات والمبيعات واللوجستيات والحسابات.|المحافظة على تطابق المخزون الفعلي مع النظام.|استلام المنتجات وفحصها وتسجيلها وتسكينها في الوقت المحدد.|تجهيز طلبات الفروع والعملاء دون نقص أو أخطاء.|تسليم الطلبات إلى قسم النقل أو الجهة الطالبة في موعدها.|تقليل التلف والفقد والكسر وفروقات المخزون.|تسجيل جميع حركات المخزون في النظام فور تنفيذها.|تنفيذ الجرد الدوري والسنوي ومعالجة الفروقات.|المحافظة على نظافة وتنظيم وسلامة المخزن.|تطبيق طرق التخزين المناسبة لكل نوع من المنتجات.|متابعة المنتجات الراكدة أو القريبة من انتهاء الصلاحية."""),
+    ("human_resources", "قسم الموارد البشرية", """الالتزام بمواعيد العمل والظهور بصورة مهنية.|الالتزام بسياسات الشركة والمحافظة على سرية المعلومات.|المحافظة على مستوى مرتفع من الإنتاجية وإنجاز المعاملات.|تنفيذ الأعمال بدقة وتقليل الأخطاء الإدارية.|التعاون مع جميع الأقسام وتقديم الدعم المطلوب.|استقطاب وتوظيف الكفاءات المطلوبة في الوقت المحدد.|استكمال إجراءات مباشرة الموظفين وبرامج التهيئة الوظيفية.|إنشاء وتحديث ملفات الموظفين والتأكد من اكتمالها.|المحافظة على دقة بيانات الحضور والإجازات والغياب.|مراجعة بيانات الرواتب والمستحقات وتقليل الأخطاء.|إنجاز طلبات الموظفين واستفساراتهم وشكاواهم.|متابعة تقييم أداء الموظفين واستكمال التقييمات.|إعداد وتنفيذ خطط التدريب والتطوير المهني.|متابعة العقود والإقامات والتأمينات والمستندات.|ضمان الالتزام بقانون العمل وسياسات الموارد البشرية."""),
+    ("logistics", "قسم اللوجستيات", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بأنظمة الشركة وإجراءات السلامة والنقل.|المحافظة على مستوى مرتفع من الإنتاجية وسرعة الإنجاز.|تنفيذ الأعمال والمستندات بدقة وتقليل الأخطاء.|التعاون مع المشتريات والمخازن والمبيعات والحسابات.|توفير المنتجات والشحنات ضمن المواعيد المطلوبة.|إعداد ومتابعة خطط الشحن والنقل وسلاسل التوريد.|متابعة الشحنات وتحديث حالتها والإبلاغ عن التأخير.|إنجاز معاملات التخليص الجمركي ضمن المدة المستهدفة.|التأكد من دقة واكتمال مستندات الشحن والجمارك.|تقليل تكاليف النقل ورسوم التأخير والأرضيات والغرامات.|وضع بدائل لمواجهة تعطل أو تأخر سلسلة التوريد.|ضمان تسليم البضائع كاملة وسليمة وفي الموعد.|متابعة سلامة السائقين والمركبات والبضائع.|استلام إثباتات التسليم والمستندات وإغلاق الرحلات."""),
+    ("ecommerce", "قسم التجارة الإلكترونية ومبيعات الأون لاين", """الالتزام بمواعيد العمل وأوقات تغطية الموقع وقنوات التواصل.|الالتزام بسياسات الشركة والمحافظة على سرية بيانات العملاء.|المحافظة على مستوى مرتفع من الإنتاجية وإنجاز المهام والطلبات.|تنفيذ العمليات بدقة وتقليل أخطاء الطلبات والبيانات والأسعار.|التعاون مع المخازن واللوجستيات والحسابات والتسويق.|إدارة محتوى الموقع والتأكد من جاهزية الصفحات والأقسام.|إضافة المنتجات والصور والأوصاف والمواصفات والتصنيفات.|تحديث الأسعار والكميات والمخزون والعروض على الموقع.|استلام الطلبات ومراجعة بيانات العميل والعنوان وطريقة الدفع.|متابعة تجهيز الطلبات والتأكد من صحتها واكتمالها.|تسليم الطلبات للعملاء أو لشركات التوصيل ومتابعتها.|تحقيق مستهدف مبيعات التجارة الإلكترونية ورفع معدل التحويل.|الرد على استفسارات العملاء ومعالجة الشكاوى.|إدارة الإلغاء والاستبدال والاسترجاع ومشكلات الدفع الإلكتروني.|إعداد تقارير التجارة الإلكترونية ومتابعة أداء الموقع."""),
+    ("marketing", "قسم التسويق", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بسياسات الشركة والهوية التجارية.|المحافظة على مستوى مرتفع من الإنتاجية.|تسليم الأعمال والحملات ضمن المواعيد المحددة.|التعاون مع المبيعات والتجارة الإلكترونية والتصميم.|إعداد وتنفيذ الخطة التسويقية وفق الأهداف المعتمدة.|إطلاق الحملات التسويقية والإعلانية في مواعيدها.|تحقيق مستهدف العملاء المحتملين والمبيعات من الحملات.|تحسين العائد على الإنفاق الإعلاني.|ضبط تكلفة الحصول على العميل المحتمل أو الجديد.|إعداد وتنفيذ خطة المحتوى والنشر.|زيادة الوصول والتفاعل مع الجمهور المستهدف.|الالتزام بميزانية التسويق والمصروفات المعتمدة.|تحليل نتائج الحملات وتقديم توصيات للتحسين.|متابعة السوق والمنافسين واقتراح أفكار جديدة."""),
+    ("graphic_design", "قسم التصميم الجرافيكي", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بسياسات الشركة وحقوق استخدام المواد البصرية.|المحافظة على مستوى مرتفع من الإنتاجية.|تسليم الأعمال ضمن المواعيد المحددة.|التعاون مع التسويق والتجارة الإلكترونية وبقية الأقسام.|إعداد التصاميم وفق المواصفات والهدف المطلوب.|الالتزام بالهوية البصرية المعتمدة للشركة.|المحافظة على جودة التصاميم فنياً وتسويقياً.|تقليل الأخطاء الإملائية والفنية قبل النشر.|رفع نسبة اعتماد التصاميم من المراجعة الأولى.|تنفيذ العدد المطلوب من التصاميم مع المحافظة على الجودة.|تنظيم الملفات والنسخ المصدرية والقوالب.|تجهيز التصاميم بالمقاسات والصيغ المناسبة لكل منصة.|تنفيذ ملاحظات التعديل ضمن الوقت المحدد.|تطوير أفكار وقوالب بصرية جديدة."""),
+    ("maintenance", "قسم الصيانة", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بتعليمات الأمن والسلامة أثناء الصيانة.|المحافظة على مستوى مرتفع من الإنتاجية.|تنفيذ أعمال الصيانة بدقة وتقليل الأخطاء.|التعاون مع الفروع والمخازن والمشتريات والحسابات.|إنجاز العدد المستهدف من عمليات إصلاح الأجهزة.|الاستجابة لبلاغات الصيانة والبدء في معالجتها بسرعة.|إصلاح الأجهزة بصورة صحيحة من المرة الأولى.|تقليل تكرار الأعطال وعودة الجهاز بالعطل نفسه.|الالتزام بالمدة المحددة لفحص وإصلاح وتسليم الأجهزة.|توفير قطع الغيار الأساسية ومتابعة الحد الأدنى للمخزون.|المحافظة على دقة أرصدة وحركات قطع الغيار.|تنفيذ خطة الصيانة الوقائية للأجهزة والمعدات.|توثيق الأعطال والإصلاحات والقطع والضمانات.|المحافظة على رضا المستفيدين وجودة التعامل."""),
+    ("accounts", "قسم الحسابات", """الالتزام بمواعيد الحضور والانصراف وساعات العمل المعتمدة.|الالتزام بالسياسات المالية والمحافظة على سرية المعلومات.|المحافظة على مستوى مرتفع من الإنتاجية.|إنجاز المعاملات والتقارير ضمن المواعيد المحددة.|التعاون مع الأقسام وتقديم المعلومات المالية المطلوبة.|تسجيل القيود والمعاملات المالية بصورة دقيقة وفي وقتها.|تنفيذ الإقفال الشهري والسنوي ضمن الجدول المعتمد.|إعداد التقارير المالية والإدارية بصورة صحيحة.|إجراء التسويات البنكية وتسويات الحسابات دورياً.|متابعة تحصيل المبالغ المستحقة على العملاء.|تنفيذ ومراجعة دفعات الموردين عند الاستحقاق.|المحافظة على دقة النقد والصناديق والعهد.|مراجعة الفواتير والمستندات والموافقات قبل الصرف.|الالتزام بالمتطلبات الضريبية والرقابية.|تحليل الانحرافات والمصروفات ودعم القرارات."""),
+    ("leadership", "الإدارة ومديرو الفروع والمدير العام", """الالتزام بمواعيد العمل والظهور كقدوة مهنية.|الالتزام بالحوكمة والأنظمة والسياسات.|المحافظة على سرية معلومات الشركة وقراراتها.|تعزيز التعاون والتنسيق بين الأقسام والفروع.|اتخاذ القرارات في الوقت المناسب ومتابعة تنفيذها.|تحقيق مستهدفات الإيرادات والمبيعات والربحية.|متابعة مؤشرات أداء الأقسام والفروع.|تنفيذ الخطة الاستراتيجية والمبادرات المعتمدة.|ضبط المصروفات والالتزام بالميزانية.|إدارة أداء المسؤولين والموظفين وتطوير قدراتهم.|ضمان توفر الموارد والمنتجات اللازمة لاستمرار العمل.|متابعة المخاطر والمخالفات وخطط المعالجة.|رفع مستوى رضا العملاء وتحسين جودة الخدمات.|إعداد التقارير الإدارية الدقيقة في مواعيدها.|ضمان استمرارية الأعمال والاستعداد للأزمات."""),
+)
+
+
+def seed_evaluation_goal_catalog(db: sqlite3.Connection, stamp: str) -> None:
+    """Seed the canonical 11×15 catalogue without overwriting tenant edits."""
+    for category_order, (stable_key, category_name, titles_text) in enumerate(EVALUATION_GOAL_CATALOG_SEED, 1):
+        db.execute(
+            """INSERT OR IGNORE INTO evaluation_goal_catalog_categories
+               (stable_key,name,sort_order,active,created_at,updated_at)
+               VALUES(?,?,?,1,?,?)""",
+            (stable_key, category_name, category_order, stamp, stamp),
+        )
+        category = db.execute(
+            "SELECT id FROM evaluation_goal_catalog_categories WHERE stable_key=?", (stable_key,)
+        ).fetchone()
+        assert category is not None
+        titles = tuple(title.strip() for title in titles_text.split("|") if title.strip())
+        if len(titles) != 15:
+            raise RuntimeError(f"Invalid goal catalogue category {stable_key}: expected 15, got {len(titles)}")
+        for goal_order, title in enumerate(titles, 1):
+            goal_type = "general" if goal_order <= 5 else "specialized"
+            default_weight = 10 if goal_type == "general" else 20
+            measure = f"نسبة تحقيق الهدف وفق المستهدف المعتمد: {title.rstrip('.')}"
+            db.execute(
+                """INSERT OR IGNORE INTO evaluation_goal_catalog
+                   (category_id,stable_key,goal_type,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
+                (category["id"], f"{stable_key}:{goal_order:02d}", goal_type, title, "", measure,
+                 default_weight, goal_order, stamp, stamp),
+            )
+
+
 def job_goal_templates(job_title_name: str, department_name: str | None = None) -> tuple[tuple[str, str, str, int], ...]:
     """Choose approved goals by exact role first, then by department context."""
     if job_title_name in SPECIALIZED_JOB_GOALS:
@@ -2270,6 +2318,9 @@ def initialize_database(db_path: Path) -> None:
                     "disclosure_date": "TEXT",
                     "submitted_late": "INTEGER NOT NULL DEFAULT 0",
                 },
+                "evaluation_goal_templates": {
+                    "source_catalog_goal_id": "INTEGER",
+                },
                 "evaluation_goals": {
                     "source_template_id": "INTEGER",
                     "awarded_points": "REAL",
@@ -2608,6 +2659,9 @@ def initialize_database(db_path: Path) -> None:
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluation_goal_template_once ON evaluation_goals(evaluation_id,source_template_id) WHERE source_template_id IS NOT NULL"
             )
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_evaluation_goal_template_catalog_once ON evaluation_goal_templates(job_title_id,source_catalog_goal_id) WHERE source_catalog_goal_id IS NOT NULL"
+            )
             document_schema = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='employee_documents'").fetchone()
             if document_schema and "'residency'" not in str(document_schema["sql"]):
                 db.execute("""CREATE TABLE employee_documents_v44 (
@@ -2625,6 +2679,7 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("DROP TABLE employee_documents")
                 db.execute("ALTER TABLE employee_documents_v44 RENAME TO employee_documents")
             stamp = now_iso()
+            seed_evaluation_goal_catalog(db, stamp)
             default_document_libraries = (
                 ("company_licenses", "رخص الشركة"),
                 ("company_policies", "قوانين الشركة"),
@@ -2716,17 +2771,20 @@ def initialize_database(db_path: Path) -> None:
                 title_id = db.execute("SELECT id FROM job_titles WHERE name=?", (title,)).fetchone()[0]
                 grade_id = db.execute("SELECT id FROM job_grades WHERE code=?", (grade,)).fetchone()[0]
                 db.execute("UPDATE employees SET job_title_id=COALESCE(job_title_id,?),job_grade_id=COALESCE(job_grade_id,?) WHERE employee_no=?", (title_id, grade_id, employee_no))
-            for title_row in db.execute(
-                """SELECT jt.id,jt.name,d.name AS department_name
-                     FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id"""
-            ).fetchall():
-                seed_job_goal_templates(
-                    db,
-                    int(title_row["id"]),
-                    str(title_row["name"]),
-                    stamp,
-                    str(title_row["department_name"]) if title_row["department_name"] else None,
-                )
+            if not production:
+                # Deterministic local fixtures retain their historic templates;
+                # production job titles now start empty and use the master catalogue.
+                for title_row in db.execute(
+                    """SELECT jt.id,jt.name,d.name AS department_name
+                         FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id"""
+                ).fetchall():
+                    seed_job_goal_templates(
+                        db,
+                        int(title_row["id"]),
+                        str(title_row["name"]),
+                        stamp,
+                        str(title_row["department_name"]) if title_row["department_name"] else None,
+                    )
             if employee_ids:
                 gm_emp = employee_ids["EMP-1001"]
                 manager_emp = employee_ids["EMP-1002"]
@@ -3759,6 +3817,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/employees/(\d+)/evaluations/history", self.api_employee_evaluation_history),
                     ("GET", r"/api/evaluation-goal-templates", self.api_evaluation_goal_templates_get),
                     ("GET", r"/api/evaluation-goals-library", self.api_evaluation_goals_library_get),
+                    ("GET", r"/api/evaluation-goal-catalog", self.api_evaluation_goal_catalog_get),
+                    ("POST", r"/api/evaluation-goal-catalog", self.api_evaluation_goal_catalog_post),
+                    ("PATCH", r"/api/evaluation-goal-catalog/(\d+)", self.api_evaluation_goal_catalog_patch),
+                    ("DELETE", r"/api/evaluation-goal-catalog/(\d+)", self.api_evaluation_goal_catalog_delete),
+                    ("POST", r"/api/evaluation-goal-templates/from-catalog", self.api_evaluation_goal_templates_from_catalog),
                     ("POST", r"/api/evaluation-goal-templates", self.api_evaluation_goal_template_post),
                     ("PATCH", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_patch),
                     ("DELETE", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_delete),
@@ -5177,8 +5240,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     cur=self.db.execute("INSERT INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)",(name,department_id,stamp,stamp))
-                    department = self.db.execute("SELECT name FROM departments WHERE id=?", (department_id,)).fetchone() if department_id else None
-                    seed_job_goal_templates(self.db, int(cur.lastrowid), name, stamp, str(department["name"]) if department else None)
                     audit(self.db,user["id"],"job_title.create","job_title",cur.lastrowid)
             except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(201,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(cur.lastrowid,)).fetchone())})
@@ -5195,20 +5256,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
-                    if "name" in values or "department_id" in values:
-                        updated = self.db.execute(
-                            """SELECT jt.name,d.name AS department_name
-                                 FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id
-                                WHERE jt.id=?""",
-                            (title_id,),
-                        ).fetchone()
-                        seed_job_goal_templates(
-                            self.db,
-                            title_id,
-                            str(updated["name"]),
-                            str(values["updated_at"]),
-                            str(updated["department_name"]) if updated["department_name"] else None,
-                        )
                     audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
             except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(200,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(title_id,)).fetchone())})
@@ -9384,6 +9431,209 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ).fetchone()[0]),
             }
             self.send_json(200, {"summary": summary, "departments": departments})
+
+        def evaluation_goal_catalog_payload(self) -> dict[str, Any]:
+            """Return the filtered master catalogue and unfiltered library totals."""
+            self.require_permission("evaluation.goals.manage")
+            category_id = as_int(self.query["category_id"], "category_id", 1) if self.query.get("category_id") else None
+            goal_type = self.query.get("type", "").strip()
+            if goal_type and goal_type not in {"general", "specialized"}:
+                raise APIError(422, "نوع الهدف غير صالح.", "validation_error")
+            status = self.query.get("status", "all").strip() or "all"
+            if status not in {"all", "active", "archived"}:
+                raise APIError(422, "حالة الهدف غير صالحة.", "validation_error")
+            search = self.query.get("q", "").strip().lower()
+            categories = [dict(row) | {"active": bool(row["active"]), "goals": []} for row in self.db.execute(
+                "SELECT * FROM evaluation_goal_catalog_categories ORDER BY sort_order,name,id"
+            ).fetchall()]
+            clauses: list[str] = []
+            params: list[Any] = []
+            if category_id is not None:
+                clauses.append("g.category_id=?")
+                params.append(category_id)
+            if goal_type:
+                clauses.append("g.goal_type=?")
+                params.append(goal_type)
+            if status != "all":
+                clauses.append("g.active=?")
+                params.append(1 if status == "active" else 0)
+            if search:
+                clauses.append("(LOWER(g.title) LIKE ? OR LOWER(g.description) LIKE ? OR LOWER(g.measure) LIKE ? OR LOWER(c.name) LIKE ?)")
+                term = f"%{search}%"
+                params.extend((term, term, term, term))
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            goals = [dict(row) | {"active": bool(row["active"])} for row in self.db.execute(
+                """SELECT g.*,c.name AS category_name,c.stable_key AS category_key
+                     FROM evaluation_goal_catalog g
+                     JOIN evaluation_goal_catalog_categories c ON c.id=g.category_id"""
+                + where + " ORDER BY c.sort_order,g.sort_order,g.id",
+                params,
+            ).fetchall()]
+            category_by_id = {int(category["id"]): category for category in categories}
+            for goal in goals:
+                category = category_by_id.get(int(goal["category_id"]))
+                if category is not None:
+                    category["goals"].append(goal)
+            counts = self.db.execute(
+                """SELECT COUNT(*) AS total_count,
+                          SUM(CASE WHEN goal_type='general' THEN 1 ELSE 0 END) AS general_count,
+                          SUM(CASE WHEN goal_type='specialized' THEN 1 ELSE 0 END) AS specialized_count,
+                          SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) AS active_count
+                     FROM evaluation_goal_catalog"""
+            ).fetchone()
+            summary = {
+                "category_count": int(self.db.execute("SELECT COUNT(*) FROM evaluation_goal_catalog_categories").fetchone()[0]),
+                "total_count": int(counts["total_count"] or 0),
+                "general_count": int(counts["general_count"] or 0),
+                "specialized_count": int(counts["specialized_count"] or 0),
+                "active_count": int(counts["active_count"] or 0),
+                "filtered_count": len(goals),
+            }
+            return {"summary": summary, "categories": categories, "items": goals}
+
+        def api_evaluation_goal_catalog_get(self) -> None:
+            self.send_json(200, self.evaluation_goal_catalog_payload())
+
+        def parse_catalog_goal(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
+            values: dict[str, Any] = {}
+            if not partial or "category_id" in data:
+                category_id = as_int(data.get("category_id"), "category_id", 1)
+                if self.db.execute("SELECT 1 FROM evaluation_goal_catalog_categories WHERE id=?", (category_id,)).fetchone() is None:
+                    raise APIError(404, "تصنيف مكتبة الأهداف غير موجود.", "not_found")
+                values["category_id"] = category_id
+            if not partial or "goal_type" in data:
+                goal_type = require_text(data, "goal_type", 20)
+                if goal_type not in {"general", "specialized"}:
+                    raise APIError(422, "نوع الهدف غير صالح.", "validation_error")
+                values["goal_type"] = goal_type
+            if not partial or "title" in data:
+                values["title"] = require_text(data, "title", 240)
+            for key, max_len in (("description", 2000), ("measure", 500)):
+                if key in data or not partial:
+                    values[key] = optional_text(data, key, max_len)
+            if not partial or "default_weight" in data:
+                values["default_weight"] = as_float(data.get("default_weight"), "default_weight", 0.01, 100)
+            if "sort_order" in data or not partial:
+                values["sort_order"] = as_int(data.get("sort_order", 0), "sort_order", 0, 999)
+            if "active" in data:
+                values["active"] = 1 if bool(data["active"]) else 0
+            return values
+
+        def api_evaluation_goal_catalog_post(self) -> None:
+            user = self.require_permission("evaluation.goals.manage")
+            values = self.parse_catalog_goal(self.read_json())
+            stamp = now_iso()
+            try:
+                with self.db:
+                    columns = [*values.keys(), "created_at", "updated_at"]
+                    cursor = self.db.execute(
+                        f"INSERT INTO evaluation_goal_catalog({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                        (*values.values(), stamp, stamp),
+                    )
+                    goal_id = int(cursor.lastrowid)
+                    audit(self.db, user["id"], "evaluation_goal_catalog.create", "evaluation_goal_catalog", goal_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد هدف بالاسم نفسه داخل هذا التصنيف.", "duplicate_catalog_goal") from exc
+            row = self.db.execute("SELECT * FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone()
+            self.send_json(201, {"goal": dict(row) | {"active": bool(row["active"])}})
+
+        def api_evaluation_goal_catalog_patch(self, goal_id: int) -> None:
+            user = self.require_permission("evaluation.goals.manage")
+            if self.db.execute("SELECT 1 FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone() is None:
+                raise APIError(404, "هدف المكتبة غير موجود.", "not_found")
+            values = self.parse_catalog_goal(self.read_json(), partial=True)
+            if not values:
+                raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
+            values["updated_at"] = now_iso()
+            try:
+                with self.db:
+                    self.db.execute(
+                        "UPDATE evaluation_goal_catalog SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?",
+                        (*values.values(), goal_id),
+                    )
+                    audit(self.db, user["id"], "evaluation_goal_catalog.update", "evaluation_goal_catalog", goal_id, values)
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "يوجد هدف بالاسم نفسه داخل هذا التصنيف.", "duplicate_catalog_goal") from exc
+            row = self.db.execute("SELECT * FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone()
+            self.send_json(200, {"goal": dict(row) | {"active": bool(row["active"])}})
+
+        def api_evaluation_goal_catalog_delete(self, goal_id: int) -> None:
+            user = self.require_permission("evaluation.goals.manage")
+            row = self.db.execute("SELECT * FROM evaluation_goal_catalog WHERE id=?", (goal_id,)).fetchone()
+            if row is None:
+                raise APIError(404, "هدف المكتبة غير موجود.", "not_found")
+            with self.db:
+                self.db.execute("UPDATE evaluation_goal_catalog SET active=0,updated_at=? WHERE id=?", (now_iso(), goal_id))
+                audit(self.db, user["id"], "evaluation_goal_catalog.archive", "evaluation_goal_catalog", goal_id)
+            self.send_json(200, {"ok": True, "archived": True, "message": "تمت أرشفة الهدف وبقيت النسخ المضافة للوظائف والتقييمات محفوظة."})
+
+        def api_evaluation_goal_templates_from_catalog(self) -> None:
+            """Copy catalogue goals as independent job-title snapshots in one transaction."""
+            user = self.require_permission("evaluation.goals.manage")
+            data = self.read_json()
+            job_title_id = as_int(data.get("job_title_id"), "job_title_id", 1)
+            if self.db.execute("SELECT 1 FROM job_titles WHERE id=?", (job_title_id,)).fetchone() is None:
+                raise APIError(404, "المسمى الوظيفي غير موجود.", "not_found")
+            raw_ids = data.get("catalog_goal_ids")
+            if not isinstance(raw_ids, list) or not raw_ids:
+                raise APIError(422, "اختر هدفاً واحداً على الأقل من المكتبة.", "validation_error")
+            if len(raw_ids) > 165:
+                raise APIError(422, "عدد الأهداف المحددة أكبر من الحد المسموح.", "validation_error")
+            goal_ids: list[int] = []
+            for raw_id in raw_ids:
+                goal_id = as_int(raw_id, "catalog_goal_ids", 1)
+                if goal_id not in goal_ids:
+                    goal_ids.append(goal_id)
+            placeholders = ",".join("?" for _ in goal_ids)
+            goals_by_id = {int(row["id"]): row for row in self.db.execute(
+                f"SELECT * FROM evaluation_goal_catalog WHERE id IN ({placeholders}) AND active=1", goal_ids
+            ).fetchall()}
+            missing = [goal_id for goal_id in goal_ids if goal_id not in goals_by_id]
+            if missing:
+                raise APIError(422, "تتضمن القائمة أهدافاً مؤرشفة أو غير موجودة.", "catalog_goals_unavailable", {"ids": missing})
+            existing = self.db.execute(
+                "SELECT id,title,source_catalog_goal_id FROM evaluation_goal_templates WHERE job_title_id=?", (job_title_id,)
+            ).fetchall()
+            by_source = {int(row["source_catalog_goal_id"]): row for row in existing if row["source_catalog_goal_id"] is not None}
+            by_title = {str(row["title"]): row for row in existing}
+            next_order = int(self.db.execute(
+                "SELECT COALESCE(MAX(sort_order),0) FROM evaluation_goal_templates WHERE job_title_id=?", (job_title_id,)
+            ).fetchone()[0]) + 1
+            added: list[dict[str, Any]] = []
+            already_assigned: list[dict[str, Any]] = []
+            conflicts: list[dict[str, Any]] = []
+            stamp = now_iso()
+            with self.db:
+                for goal_id in goal_ids:
+                    goal = goals_by_id[goal_id]
+                    if goal_id in by_source:
+                        already_assigned.append({"catalog_goal_id": goal_id, "template_id": by_source[goal_id]["id"], "title": goal["title"]})
+                        continue
+                    if str(goal["title"]) in by_title:
+                        conflicts.append({"catalog_goal_id": goal_id, "template_id": by_title[str(goal["title"])]["id"], "title": goal["title"]})
+                        continue
+                    cursor = self.db.execute(
+                        """INSERT INTO evaluation_goal_templates
+                           (job_title_id,source_catalog_goal_id,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,1,?,?)""",
+                        (job_title_id, goal_id, goal["title"], goal["description"], goal["measure"],
+                         goal["default_weight"], next_order, stamp, stamp),
+                    )
+                    template_id = int(cursor.lastrowid)
+                    added.append({"catalog_goal_id": goal_id, "template_id": template_id, "title": goal["title"]})
+                    by_source[goal_id] = {"id": template_id}
+                    by_title[str(goal["title"])] = {"id": template_id}
+                    next_order += 1
+                audit(self.db, user["id"], "evaluation_goal_catalog.assign", "job_title", job_title_id, {
+                    "catalog_goal_ids": goal_ids, "added_count": len(added),
+                    "already_assigned_count": len(already_assigned), "conflict_count": len(conflicts),
+                })
+            self.send_json(200, {
+                "ok": True, "job_title_id": job_title_id,
+                "added": added, "already_assigned": already_assigned, "conflicts": conflicts,
+                "added_count": len(added), "already_assigned_count": len(already_assigned),
+                "conflict_count": len(conflicts),
+            })
 
         def parse_goal_template(self, data: dict[str, Any], partial: bool = False) -> dict[str, Any]:
             values: dict[str, Any] = {}

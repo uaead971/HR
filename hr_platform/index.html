@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261105-production-r25">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261105-production-r26">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -276,18 +276,43 @@
       </section>
 
       <section class="page goals-library-page" id="goals-library" data-permission="evaluation.goals.manage">
-        <div class="page-head goals-library-head"><div><span class="eyebrow">مكتبة الأداء</span><h1>الأهداف</h1><p>كل هدف يرتبط بمسمى وظيفي، وتظهر الأهداف النشطة تلقائياً لموظفي هذا المسمى ضمن التقييم السنوي.</p></div><span class="status">إدارة مخولة</span></div>
-        <div class="goals-library-summary" id="goalsLibrarySummary" aria-live="polite">
-          <article><small>الأقسام</small><b>—</b></article><article><small>المسميات</small><b>—</b></article><article><small>الأهداف النشطة</small><b>—</b></article><article><small>الموظفون المشمولون</small><b>—</b></article>
+        <div class="page-head goals-library-head"><div><span class="eyebrow">مكتبة الأداء</span><h1>الأهداف</h1><p>أدر أهداف كل وظيفة أو اختر أهدافاً جاهزة من المكتبة المركزية باسمها ومعيارها ووزنها.</p></div><span class="status">إدارة مخولة</span></div>
+        <div class="goals-library-tabs" role="tablist" aria-label="أقسام إدارة الأهداف">
+          <button class="active" id="jobGoalsTab" type="button" role="tab" aria-selected="true" aria-controls="jobGoalsPanel" data-goals-library-tab="assigned">أهداف الوظائف</button>
+          <button id="goalCatalogTab" type="button" role="tab" aria-selected="false" aria-controls="goalCatalogPanel" data-goals-library-tab="catalog">مكتبة الأهداف</button>
         </div>
-        <article class="card goals-library-workspace">
-          <div class="goals-library-toolbar">
-            <label class="goals-library-search" for="goalsLibrarySearch"><span><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg></span><input id="goalsLibrarySearch" type="search" autocomplete="off" placeholder="ابحث في قسم أو مسمى أو هدف أو معيار…"></label>
-            <div class="button-row"><button class="secondary" id="collapseGoalsLibrary" type="button">طي الكل</button><button class="secondary" id="refreshGoalsLibrary" type="button">تحديث</button></div>
+        <section id="jobGoalsPanel" role="tabpanel" aria-labelledby="jobGoalsTab" data-goals-library-panel="assigned">
+          <div class="goals-library-summary" id="goalsLibrarySummary" aria-live="polite">
+            <article><small>الأقسام</small><b>—</b></article><article><small>المسميات</small><b>—</b></article><article><small>الأهداف النشطة</small><b>—</b></article><article><small>الموظفون المشمولون</small><b>—</b></article>
           </div>
-          <div id="goalsLibraryState" class="loading-block" role="status" aria-live="polite">جارٍ تحميل خريطة الأهداف…</div>
-          <div id="goalsLibraryTree" class="goals-library-tree" hidden></div>
-        </article>
+          <article class="card goals-library-workspace">
+            <div class="goals-library-toolbar">
+              <label class="goals-library-search" for="goalsLibrarySearch"><span><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg></span><input id="goalsLibrarySearch" type="search" autocomplete="off" placeholder="ابحث في قسم أو مسمى أو هدف أو معيار…"></label>
+              <div class="button-row"><button class="secondary" id="collapseGoalsLibrary" type="button">طي الكل</button><button class="secondary" id="refreshGoalsLibrary" type="button">تحديث</button></div>
+            </div>
+            <div id="goalsLibraryState" class="loading-block" role="status" aria-live="polite">جارٍ تحميل خريطة الأهداف…</div>
+            <div id="goalsLibraryTree" class="goals-library-tree" hidden></div>
+          </article>
+        </section>
+        <section id="goalCatalogPanel" role="tabpanel" aria-labelledby="goalCatalogTab" data-goals-library-panel="catalog" hidden>
+          <div class="goals-library-summary catalog-summary" id="goalCatalogSummary" aria-live="polite">
+            <article><small>التصنيفات</small><b>—</b></article><article><small>كل الأهداف</small><b>—</b></article><article><small>عامة</small><b>—</b></article><article><small>تخصصية</small><b>—</b></article><article><small>نشطة</small><b>—</b></article>
+          </div>
+          <article class="card goals-library-workspace catalog-workspace">
+            <div class="catalog-command-bar">
+              <div><span class="eyebrow">المصدر المركزي</span><h2>مكتبة الأهداف</h2><p>الأهداف هنا مستقلة؛ عند اختيارها لوظيفة تُحفظ نسخة لا تتأثر بالتعديلات اللاحقة.</p></div>
+              <button class="primary" id="addCatalogGoal" type="button">+ إضافة هدف للمكتبة</button>
+            </div>
+            <div class="goals-library-toolbar catalog-filters">
+              <label class="goals-library-search" for="goalCatalogSearch"><span><svg class="ui-icon" aria-hidden="true"><use href="#icon-search"></use></svg></span><input id="goalCatalogSearch" type="search" autocomplete="off" placeholder="ابحث في التصنيف أو الهدف أو المعيار…"></label>
+              <label>التصنيف<select id="goalCatalogCategoryFilter"><option value="">كل التصنيفات</option></select></label>
+              <label>النوع<select id="goalCatalogTypeFilter"><option value="">كل الأنواع</option><option value="general">عام</option><option value="specialized">تخصصي</option></select></label>
+              <label>الحالة<select id="goalCatalogStatusFilter"><option value="all">الكل</option><option value="active">نشط</option><option value="archived">مؤرشف</option></select></label>
+            </div>
+            <div id="goalCatalogState" class="loading-block" role="status" aria-live="polite">جارٍ تحميل مكتبة الأهداف…</div>
+            <div id="goalCatalogShelves" class="goal-catalog-shelves" hidden></div>
+          </article>
+        </section>
       </section>
 
       <section class="page" id="notifications">
@@ -436,7 +461,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261105-production-r25"></script>
-  <script src="app.js?v=5.8.0&build=20261105-production-r25"></script>
+  <script src="i18n.js?v=5.8.0&build=20261105-production-r26"></script>
+  <script src="app.js?v=5.8.0&build=20261105-production-r26"></script>
 </body>
 </html>
