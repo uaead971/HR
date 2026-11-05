@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.0"
+APP_VERSION = "5.8.1"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -8798,21 +8798,61 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not self.db.execute("SELECT 1 FROM shifts WHERE id=? AND active=1", (shift_id,)).fetchone():
                 raise APIError(404, "المناوبة غير موجودة أو غير نشطة.", "not_found")
             data = self.read_json()
-            employee_id = as_int(data.get("employee_id"), "employee_id", 1)
-            if not self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (employee_id,)).fetchone():
-                raise APIError(404, "الموظف غير موجود.", "not_found")
+            batch_request = "employee_ids" in data
+            if batch_request:
+                raw_employee_ids = data.get("employee_ids")
+                if not isinstance(raw_employee_ids, list) or not raw_employee_ids:
+                    raise APIError(422, "اختر موظفاً واحداً على الأقل.", "validation_error")
+                if len(raw_employee_ids) > 500:
+                    raise APIError(422, "لا يمكن تعيين أكثر من 500 موظف في دفعة واحدة.", "validation_error")
+                employee_ids = []
+                seen_employee_ids: set[int] = set()
+                for raw_employee_id in raw_employee_ids:
+                    employee_id = as_int(raw_employee_id, "employee_ids", 1)
+                    if employee_id not in seen_employee_ids:
+                        seen_employee_ids.add(employee_id)
+                        employee_ids.append(employee_id)
+            else:
+                employee_ids = [as_int(data.get("employee_id"), "employee_id", 1)]
+            placeholders = ",".join("?" for _ in employee_ids)
+            active_employee_ids = {
+                int(row["id"])
+                for row in self.db.execute(
+                    f"SELECT id FROM employees WHERE active=1 AND id IN ({placeholders})",
+                    employee_ids,
+                ).fetchall()
+            }
+            if any(employee_id not in active_employee_ids for employee_id in employee_ids):
+                raise APIError(404, "تتضمن القائمة موظفاً غير موجود أو غير نشط.", "not_found")
             effective_from = parse_date(data.get("effective_from"), "effective_from")
             effective_to = parse_date(data["effective_to"], "effective_to") if data.get("effective_to") else None
             if effective_to and effective_to < effective_from:
                 raise APIError(422, "تاريخ نهاية التعيين يسبق تاريخ بدايته.", "validation_error")
             previous_day = (effective_from - timedelta(days=1)).isoformat()
+            assignment_ids: list[int] = []
+            stamp = now_iso()
             with self.db:
-                self.db.execute("UPDATE employee_shift_assignments SET effective_to=? WHERE employee_id=? AND effective_from<? AND (effective_to IS NULL OR effective_to>=?)", (previous_day, employee_id, effective_from.isoformat(), effective_from.isoformat()))
-                self.db.execute("DELETE FROM employee_shift_assignments WHERE employee_id=? AND effective_from>=? AND (? IS NULL OR effective_from<=?)", (employee_id, effective_from.isoformat(), effective_to.isoformat() if effective_to else None, effective_to.isoformat() if effective_to else None))
-                cur = self.db.execute("INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,effective_to,created_by,created_at) VALUES(?,?,?,?,?,?)", (employee_id, shift_id, effective_from.isoformat(), effective_to.isoformat() if effective_to else None, user["id"], now_iso()))
-                audit(self.db, user["id"], "shift.assign", "employee", employee_id, {"shift_id": shift_id, "assignment_id": cur.lastrowid})
-            assignment = self.db.execute("SELECT a.*,s.name AS shift_name FROM employee_shift_assignments a JOIN shifts s ON s.id=a.shift_id WHERE a.id=?", (cur.lastrowid,)).fetchone()
-            self.send_json(201, {"assignment": dict(assignment)})
+                for employee_id in employee_ids:
+                    self.db.execute("UPDATE employee_shift_assignments SET effective_to=? WHERE employee_id=? AND effective_from<? AND (effective_to IS NULL OR effective_to>=?)", (previous_day, employee_id, effective_from.isoformat(), effective_from.isoformat()))
+                    self.db.execute("DELETE FROM employee_shift_assignments WHERE employee_id=? AND effective_from>=? AND (? IS NULL OR effective_from<=?)", (employee_id, effective_from.isoformat(), effective_to.isoformat() if effective_to else None, effective_to.isoformat() if effective_to else None))
+                    cur = self.db.execute("INSERT INTO employee_shift_assignments(employee_id,shift_id,effective_from,effective_to,created_by,created_at) VALUES(?,?,?,?,?,?)", (employee_id, shift_id, effective_from.isoformat(), effective_to.isoformat() if effective_to else None, user["id"], stamp))
+                    assignment_id = int(cur.lastrowid)
+                    assignment_ids.append(assignment_id)
+                    audit(self.db, user["id"], "shift.assign", "employee", employee_id, {"shift_id": shift_id, "assignment_id": assignment_id, "batch_size": len(employee_ids)})
+            assignment_placeholders = ",".join("?" for _ in assignment_ids)
+            assignment_rows = self.db.execute(
+                f"""SELECT a.*,s.name AS shift_name,e.employee_no,e.full_name AS employee_name
+                    FROM employee_shift_assignments a
+                    JOIN shifts s ON s.id=a.shift_id
+                    JOIN employees e ON e.id=a.employee_id
+                    WHERE a.id IN ({assignment_placeholders}) ORDER BY a.id""",
+                assignment_ids,
+            ).fetchall()
+            assignments = [dict(row) for row in assignment_rows]
+            response: dict[str, Any] = {"assignments": assignments, "assigned_count": len(assignments)}
+            if not batch_request:
+                response["assignment"] = assignments[0]
+            self.send_json(201, response)
 
         # Overtime
         def api_overtime_get(self) -> None:

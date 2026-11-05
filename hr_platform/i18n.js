@@ -557,6 +557,35 @@
     'عند الحفظ يصبح هذا الموظف المسؤول المباشر لجميع موظفي القسم، وتُنقل إليه مسارات التقييم والإجازات المعلقة. إذا كان حسابه موظفاً عادياً يُرقّى تلقائياً إلى مسؤول مباشر.':'After saving, this employee becomes the line manager for everyone in the department, and pending performance reviews and leave requests are reassigned to them. If their account is an Employee account, it is automatically promoted to Line Manager.'
   });
 
+  Object.assign(english, {
+    'موظفو المناوبة':'Shift employees',
+    'موظفو مناوبة {name}':'Employees assigned to {name}',
+    'يبدأ في {date}':'Starts on {date}',
+    'لا يوجد موظفون في هذه المناوبة حالياً.':'No employees are currently assigned to this shift.',
+    'تعيين موظفين':'Assign employees',
+    'تعيين موظفين لمناوبة':'Assign employees to a shift',
+    'اختيار جماعي':'Bulk selection',
+    'اختر الموظفين':'Select employees',
+    'ابحث وحدد أكثر من موظف ثم احفظهم دفعة واحدة.':'Search for and select multiple employees, then save them in one batch.',
+    '{count} موظف محدد':'{count} employees selected',
+    'البحث في الموظفين':'Search employees',
+    'ابحث بالاسم أو الرقم أو القسم أو الفرع':'Search by name, number, department, or branch',
+    'تحديد كل الظاهر':'Select all visible',
+    'مسح التحديد':'Clear selection',
+    'قائمة الموظفين النشطين':'Active employees list',
+    'دون قسم أو فرع':'No department or branch',
+    'مُعيّن بالفعل':'Already assigned',
+    'لا يوجد موظفون يطابقون البحث.':'No employees match your search.',
+    'حفظ تعيينات الموظفين ({count})':'Save employee assignments ({count})',
+    'اختر موظفاً واحداً على الأقل':'Select at least one employee',
+    'اختر موظفاً واحداً على الأقل.':'Select at least one employee.',
+    'جارٍ حفظ تعيينات الموظفين…':'Saving employee assignments…',
+    'تم تعيين موظف واحد للمناوبة المحددة':'One employee was assigned to the selected shift',
+    'تم تعيين {count} موظفاً للمناوبة المحددة':'{count} employees were assigned to the selected shift',
+    'لا يمكن تعيين أكثر من 500 موظف في دفعة واحدة.':'A maximum of 500 employees can be assigned in one batch.',
+    'تتضمن القائمة موظفاً غير موجود أو غير نشط.':'The list includes an employee who does not exist or is inactive.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();
