@@ -6023,6 +6023,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
                 db.execute("UPDATE departments SET name_ar='',name_en='' WHERE name='الموارد البشرية'")
                 db.execute("INSERT INTO departments(name,name_ar,name_en,active,created_at) VALUES('Legacy English','','',1,datetime('now'))")
                 db.execute("INSERT INTO departments(name,name_ar,name_en,active,created_at) VALUES('قسم يحتاج ترجمة','','',1,datetime('now'))")
+                db.execute("INSERT INTO job_titles(name,name_ar,name_en,created_at,updated_at) VALUES('رئيس قسم','','',datetime('now'),datetime('now'))")
                 db.commit()
             hr_server.initialize_database(db_path)
             hr_server.initialize_database(db_path)
@@ -6038,6 +6039,10 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
                 self.assertEqual(
                     db.execute("SELECT name_ar,name_en FROM departments WHERE name='قسم يحتاج ترجمة'").fetchone(),
                     ("قسم يحتاج ترجمة", ""),
+                )
+                self.assertEqual(
+                    db.execute("SELECT name_ar,name_en FROM job_titles WHERE name='رئيس قسم'").fetchone(),
+                    ("رئيس قسم", "Department Head"),
                 )
 
         app = (root / "app.js").read_text(encoding="utf-8")

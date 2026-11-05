@@ -207,6 +207,22 @@ JOB_TITLE_NAME_TRANSLATIONS = {
     "أخصائي عمليات": "Operations Specialist",
     "موظف مبيعات": "Sales Associate",
     "مسؤول المشتريات واللوجستيك": "Procurement & Logistics Officer",
+    "رئيس قسم": "Department Head",
+    "سائق": "Driver",
+    "محاسب": "Accountant",
+    "مدير الافرع": "Branch Manager",
+    "مسؤول التجارة الالكترونية": "E-commerce Officer",
+    "مسؤول الحسابات": "Accounts Officer",
+    "مسؤول الصيانة": "Maintenance Officer",
+    "مسؤول الموارد البشرية": "Human Resources Officer",
+    "مسؤول قسم": "Department Officer",
+    "مشرف المخازن": "Warehouse Supervisor",
+    "موظف": "Employee",
+    "موظف التجارة الالكترونية": "E-commerce Associate",
+    "موظف صيانة": "Maintenance Associate",
+    "موظف لوجستيات": "Logistics Associate",
+    "موظف مخازن": "Warehouse Associate",
+    "موظف مشتريات": "Procurement Associate",
 }
 
 GENERIC_JOB_GOALS = (
