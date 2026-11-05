@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r30")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r31")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2847,7 +2847,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261105-production-r30", index)
+        self.assertIn("build=20261105-production-r31", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3059,7 +3059,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261105-production-r30", index)
+        self.assertIn("build=20261105-production-r31", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5308,7 +5308,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r30", index)
+        self.assertIn("build=20261105-production-r31", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5871,7 +5871,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r30", index)
+        self.assertIn("build=20261105-production-r31", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6068,6 +6068,97 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(library["job_title"]["name_en"], title["name_en"])
         self.assertEqual(library["job_title"]["department_name_en"], department["name_en"])
 
+    def test_89_assign_department_head_from_employee_profile(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        suffix = uuid.uuid4().hex[:8]
+        department = admin.request(
+            "POST", "/api/departments",
+            {"name_ar": f"قسم إشراف {suffix}", "name_en": f"Supervision Department {suffix}"},
+            expected=201,
+        )["department"]
+        existing_manager = next(
+            employee for employee in admin.request("GET", "/api/employees")["items"]
+            if employee["employee_no"] == "EMP-1002"
+        )
+        head_email = f"department-head-{suffix}@demo.ae"
+        head = admin.request(
+            "POST", "/api/employees",
+            {
+                "employee_no": f"HEAD-{suffix}", "full_name": "رئيس قسم اختباري",
+                "email": head_email, "department_id": department["id"],
+                "create_user": True, "password": "Department@123", "role": "employee",
+            },
+            expected=201,
+        )["employee"]
+        members = []
+        for index in range(2):
+            members.append(admin.request(
+                "POST", "/api/employees",
+                {
+                    "employee_no": f"TEAM-{suffix}-{index}",
+                    "full_name": f"موظف فريق {index + 1}",
+                    "department_id": department["id"],
+                    "manager_id": existing_manager["id"],
+                },
+                expected=201,
+            )["employee"])
+
+        assigned = admin.request(
+            "PATCH", f"/api/employees/{head['id']}",
+            {"department_head_department_id": department["id"]},
+        )["employee"]
+        self.assertEqual(assigned["department_head_department_id"], department["id"])
+        self.assertEqual(assigned["department_id"], department["id"])
+        self.assertIsNone(assigned["manager_id"])
+        saved_department = next(
+            item for item in admin.request("GET", "/api/departments")["items"]
+            if item["id"] == department["id"]
+        )
+        self.assertEqual(saved_department["manager_employee_id"], head["id"])
+        self.assertEqual(saved_department["manager_name"], head["full_name"])
+        for member in members:
+            profile = admin.request("GET", f"/api/employees/{member['id']}")["employee"]
+            self.assertEqual(profile["manager_id"], head["id"])
+            self.assertEqual(profile["manager_name"], head["full_name"])
+
+        head_session = self.client(head_email, "Department@123")
+        head_me = head_session.request("GET", "/api/auth/me")
+        self.assertEqual(head_me["user"]["role"], "manager")
+        self.assertIn("leave.team", head_me["permissions"])
+        self.assertIn("attendance.team", head_me["permissions"])
+
+        later_member = admin.request(
+            "POST", "/api/employees",
+            {
+                "employee_no": f"LATER-{suffix}", "full_name": "موظف أضيف لاحقاً",
+                "department_id": department["id"], "manager_id": existing_manager["id"],
+            },
+            expected=201,
+        )["employee"]
+        self.assertEqual(later_member["manager_id"], head["id"])
+        self.assertEqual(later_member["manager_name"], head["full_name"])
+
+        cleared = admin.request(
+            "PATCH", f"/api/employees/{head['id']}",
+            {"department_head_department_id": None},
+        )["employee"]
+        self.assertIsNone(cleared["department_head_department_id"])
+        saved_department = next(
+            item for item in admin.request("GET", "/api/departments")["items"]
+            if item["id"] == department["id"]
+        )
+        self.assertIsNone(saved_department["manager_employee_id"])
+        for member_id in [member["id"] for member in members] + [later_member["id"]]:
+            profile = admin.request("GET", f"/api/employees/{member_id}")["employee"]
+            self.assertIsNone(profile["manager_id"])
+        self.assertEqual(head_session.request("GET", "/api/auth/me")["user"]["role"], "manager")
+
+        app = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        translations = (Path(__file__).parents[1] / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn('name="department_head_department_id"', app)
+        self.assertIn("prepareDepartmentHeadField", app)
+        self.assertIn("'رئاسة القسم':'Department leadership'", translations)
+
 
 class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
     def test_bilingual_reference_migration_and_frontend_contract(self):
@@ -6132,7 +6223,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261105-production-r30", index)
+        self.assertIn("build=20261105-production-r31", index)
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

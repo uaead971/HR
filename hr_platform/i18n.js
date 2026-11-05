@@ -543,6 +543,13 @@
     'تم حفظ بيانات المؤسسة ومسؤول اعتماد الفواتير':'Organization details and Invoice Approver saved'
   });
 
+  Object.assign(english, {
+    'رئاسة القسم':'Department leadership',
+    'تعيين الموظف رئيساً للقسم':'Assign employee as department head',
+    'ليس رئيساً لأي قسم':'Not a department head',
+    'عند الحفظ يصبح هذا الموظف المسؤول المباشر لجميع موظفي القسم، وتُنقل إليه مسارات التقييم والإجازات المعلقة. إذا كان حسابه موظفاً عادياً يُرقّى تلقائياً إلى مسؤول مباشر.':'After saving, this employee becomes the line manager for everyone in the department, and pending performance reviews and leave requests are reassigned to them. If their account is an Employee account, it is automatically promoted to Line Manager.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

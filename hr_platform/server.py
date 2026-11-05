@@ -3673,6 +3673,7 @@ def employee_query(include_salary: bool = True, include_sensitive: bool = False)
                COALESCE(jg.code,e.job_grade) AS job_grade,
                e.job_grade_level,e.job_title_id,e.job_grade_id,jg.name AS job_grade_name,
                e.department_id,d.name AS department_name,d.name_ar AS department_name_ar,d.name_en AS department_name_en,
+               (SELECT hd.id FROM departments hd WHERE hd.manager_employee_id=e.id AND hd.active=1 ORDER BY hd.id LIMIT 1) AS department_head_department_id,
                e.branch_id,b.name AS branch_name,
                e.passport_expires_on,e.emirates_id_expires_on,
                e.manager_id,m.full_name AS manager_name,e.approval_employee_id,a.full_name AS approval_employee_name,e.hire_date,e.qualification,e.nationality,e.rest_days_override,{salary}{salary_components},e.photo_data,e.active,
@@ -5226,7 +5227,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not (self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "organization.view") or has_permission(self.db, user, "department.manage")):
                 raise APIError(403, "دليل الأقسام متاح للموارد البشرية ومدير النظام فقط.", "forbidden")
             rows = self.db.execute("SELECT d.*,e.full_name AS manager_name,b.name AS branch_name,(SELECT COUNT(*) FROM employees x WHERE x.department_id=d.id AND x.active=1) AS employee_count FROM departments d LEFT JOIN employees e ON e.id=d.manager_employee_id LEFT JOIN branches b ON b.id=d.branch_id ORDER BY d.name").fetchall()
-            privileged = self.has_privileged_people_access(user, "employee.view")
+            privileged = self.has_privileged_people_access(user, "employee.view") or has_permission(self.db, user, "department.manage")
             items = []
             for row in rows:
                 data = dict(row) | {"active": bool(row["active"])}
@@ -5315,12 +5316,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_department_assign(self, department_id: int) -> None:
             user = self.require_permission("department.manage")
-            if not self.db.execute("SELECT 1 FROM departments WHERE id=? AND active=1", (department_id,)).fetchone():
+            department = self.db.execute(
+                "SELECT manager_employee_id FROM departments WHERE id=? AND active=1",
+                (department_id,),
+            ).fetchone()
+            if not department:
                 raise APIError(404, "القسم غير موجود أو غير نشط.", "not_found")
             employee_id = as_int(self.read_json().get("employee_id"), "employee_id", 1)
             previous_manager_id = self.direct_manager_employee_id(employee_id)
+            department_manager_id = int(department["manager_employee_id"]) if department["manager_employee_id"] else None
+            if department_manager_id == employee_id:
+                department_manager_id = None
             with self.db:
-                result = self.db.execute("UPDATE employees SET department_id=?,updated_at=? WHERE id=?", (department_id, now_iso(), employee_id))
+                result = self.db.execute(
+                    "UPDATE employees SET department_id=?,manager_id=?,updated_at=? WHERE id=?",
+                    (department_id, department_manager_id, now_iso(), employee_id),
+                )
                 if not result.rowcount:
                     raise APIError(404, "الموظف غير موجود.", "not_found")
                 self.sync_manager_assignment_workflows(
@@ -6840,6 +6851,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.require_permission("employee.manage")
             data = self.read_json()
             values = self.parse_employee(data, allow_salary_override=is_system_admin(user))
+            if values.get("department_id"):
+                department_head = self.db.execute(
+                    "SELECT manager_employee_id FROM departments WHERE id=? AND active=1",
+                    (values["department_id"],),
+                ).fetchone()
+                if department_head and department_head["manager_employee_id"]:
+                    # A designated department head is the authoritative direct
+                    # manager for employees added to that department.
+                    values["manager_id"] = int(department_head["manager_employee_id"])
             approval_id = values.get("approval_employee_id")
             if approval_id and not (self.approval_manager_row(approval_id, "leave.approve") or self.approval_manager_row(approval_id, "overtime.approve")):
                 raise APIError(422, "مسؤول الاعتماد يجب أن يكون موظفاً نشطاً لديه صلاحية اعتماد الموارد البشرية.", "approval_manager_invalid", {"field": "approval_employee_id"})
@@ -6996,6 +7016,80 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 partial=True,
                 allow_salary_override=is_system_admin(user),
             )
+            department_head_requested = "department_head_department_id" in data
+            target_head_department_id: int | None = None
+            previous_head_department_ids = [
+                int(row["id"])
+                for row in self.db.execute(
+                    "SELECT id FROM departments WHERE manager_employee_id=? ORDER BY id",
+                    (employee_id,),
+                ).fetchall()
+            ]
+            if department_head_requested:
+                if not has_permission(self.db, user, "department.manage"):
+                    raise APIError(
+                        403,
+                        "لا تملك صلاحية تعيين رئيس القسم.",
+                        "forbidden",
+                        {"permission": "department.manage"},
+                    )
+                if not bool(existing_employee["active"]):
+                    raise APIError(422, "لا يمكن تعيين موظف منتهية خدمته رئيساً للقسم.", "inactive_employee")
+                raw_department_id = data.get("department_head_department_id")
+                if raw_department_id not in (None, ""):
+                    target_head_department_id = as_int(raw_department_id, "department_head_department_id", 1)
+                    target_department = self.db.execute(
+                        "SELECT id FROM departments WHERE id=? AND active=1",
+                        (target_head_department_id,),
+                    ).fetchone()
+                    if target_department is None:
+                        raise APIError(
+                            422,
+                            "القسم المحدد غير موجود أو غير نشط.",
+                            "validation_error",
+                            {"field": "department_head_department_id"},
+                        )
+                    # The head belongs to the department they lead and cannot
+                    # report to themselves.
+                    values["department_id"] = target_head_department_id
+                    values["manager_id"] = None
+            else:
+                effective_department_id = values.get("department_id", existing_employee["department_id"])
+                if effective_department_id:
+                    department_head = self.db.execute(
+                        "SELECT manager_employee_id FROM departments WHERE id=? AND active=1",
+                        (effective_department_id,),
+                    ).fetchone()
+                    if (
+                        department_head
+                        and department_head["manager_employee_id"]
+                        and int(department_head["manager_employee_id"]) != employee_id
+                    ):
+                        # Department leadership is the source of truth for the
+                        # direct reporting line, including later profile moves.
+                        values["manager_id"] = int(department_head["manager_employee_id"])
+            impacted_head_department_ids = sorted(
+                set(previous_head_department_ids)
+                | ({target_head_department_id} if target_head_department_id else set())
+            )
+            impacted_head_employee_ids: list[int] = []
+            previous_head_manager_ids: dict[int, int | None] = {}
+            if department_head_requested:
+                impacted_head_employee_ids = [employee_id]
+                if impacted_head_department_ids:
+                    placeholders = ",".join("?" for _ in impacted_head_department_ids)
+                    impacted_head_employee_ids.extend(
+                        int(row["id"])
+                        for row in self.db.execute(
+                            f"SELECT id FROM employees WHERE active=1 AND department_id IN ({placeholders})",
+                            impacted_head_department_ids,
+                        ).fetchall()
+                    )
+                impacted_head_employee_ids = sorted(set(impacted_head_employee_ids))
+                previous_head_manager_ids = {
+                    affected_employee_id: self.direct_manager_employee_id(affected_employee_id)
+                    for affected_employee_id in impacted_head_employee_ids
+                }
             salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
             if salary_touched:
                 merged_salary = {key: float(existing_employee[key] or 0) for key in SALARY_COMPONENT_FIELDS}
@@ -7057,9 +7151,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "approval_manager_invalid",
                         {"field": "approval_employee_id"},
                     )
-            if not values and languages is None and contract_dates is None and institution_role is None:
+            if not values and languages is None and contract_dates is None and institution_role is None and not department_head_requested:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
-            reporting_line_changed = "manager_id" in data or "department_id" in data
+            reporting_line_changed = not department_head_requested and ("manager_id" in data or "department_id" in data)
             previous_manager_id = self.direct_manager_employee_id(employee_id) if reporting_line_changed else None
             previous_general_manager = self.db.execute("SELECT general_manager_employee_id FROM organization WHERE id=1").fetchone()["general_manager_employee_id"]
             leadership_changed = institution_role is not None and (int(previous_general_manager) if previous_general_manager else None) != (employee_id if institution_role == "general_manager" else None)
@@ -7069,6 +7163,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             previous_grade = str(existing_employee["job_grade"] or "").strip()
             next_grade = str(values.get("job_grade") or previous_grade).strip()
             grade_changed = bool(next_grade and previous_grade and next_grade != previous_grade)
+            promoted_department_head_account = False
             try:
                 with self.db:
                     if values:
@@ -7081,7 +7176,68 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         next_general_manager = employee_id if institution_role == "general_manager" else None
                         self.db.execute("UPDATE organization SET general_manager_employee_id=?,updated_at=? WHERE id=1", (next_general_manager, stamp))
                         audit(self.db, user["id"], "organization.general_manager_assign" if institution_role == "general_manager" else "organization.general_manager_clear", "employee", employee_id, {"previous_employee_id": previous_general_manager, "next_employee_id": next_general_manager})
-                    if reporting_line_changed:
+                    if department_head_requested:
+                        if previous_head_department_ids:
+                            placeholders = ",".join("?" for _ in previous_head_department_ids)
+                            self.db.execute(
+                                f"""UPDATE employees SET manager_id=NULL,updated_at=?
+                                      WHERE active=1 AND manager_id=? AND department_id IN ({placeholders})""",
+                                (stamp, employee_id, *previous_head_department_ids),
+                            )
+                        self.db.execute(
+                            "UPDATE departments SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?",
+                            (stamp, employee_id),
+                        )
+                        managed_employee_count = 0
+                        replaced_manager_id = None
+                        if target_head_department_id:
+                            previous_target_head = self.db.execute(
+                                "SELECT manager_employee_id FROM departments WHERE id=?",
+                                (target_head_department_id,),
+                            ).fetchone()
+                            if previous_target_head and previous_target_head["manager_employee_id"]:
+                                replaced_manager_id = int(previous_target_head["manager_employee_id"])
+                            self.db.execute(
+                                "UPDATE departments SET manager_employee_id=?,updated_at=? WHERE id=?",
+                                (employee_id, stamp, target_head_department_id),
+                            )
+                            team_update = self.db.execute(
+                                """UPDATE employees SET manager_id=?,updated_at=?
+                                     WHERE department_id=? AND active=1 AND id<>?""",
+                                (employee_id, stamp, target_head_department_id, employee_id),
+                            )
+                            managed_employee_count = int(team_update.rowcount)
+                            self.db.execute(
+                                "UPDATE employees SET department_id=?,manager_id=NULL,updated_at=? WHERE id=?",
+                                (target_head_department_id, stamp, employee_id),
+                            )
+                            promotion = self.db.execute(
+                                "UPDATE users SET role='manager',updated_at=? WHERE employee_id=? AND active=1 AND role='employee'",
+                                (stamp, employee_id),
+                            )
+                            promoted_department_head_account = bool(promotion.rowcount)
+                        for affected_employee_id in impacted_head_employee_ids:
+                            self.sync_manager_assignment_workflows(
+                                affected_employee_id,
+                                previous_head_manager_ids.get(affected_employee_id),
+                                self.direct_manager_employee_id(affected_employee_id),
+                                int(user["id"]),
+                            )
+                        audit(
+                            self.db,
+                            user["id"],
+                            "department.head_assign" if target_head_department_id else "department.head_clear",
+                            "employee",
+                            employee_id,
+                            {
+                                "previous_department_ids": previous_head_department_ids,
+                                "department_id": target_head_department_id,
+                                "replaced_manager_employee_id": replaced_manager_id,
+                                "managed_employee_count": managed_employee_count,
+                                "account_promoted_to_manager": promoted_department_head_account,
+                            },
+                        )
+                    elif reporting_line_changed:
                         self.sync_manager_assignment_workflows(
                             employee_id,
                             previous_manager_id,
@@ -7104,7 +7260,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                                 f"نبارك لك ترقيتك من الدرجة {previous_grade} إلى الدرجة {next_grade}. نتمنى لك المزيد من التقدم والنجاح في مهام عملك، وأن تكون هذه الترقية حافزاً لك لمزيد من العطاء والتميز.",
                             )
                         audit(self.db, user["id"], "employee.promotion", "employee", employee_id, {"from_grade": previous_grade, "to_grade": next_grade})
-                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []), "language_codes": [row["code"] for row in languages] if languages is not None else None, "approval_employee_id": values.get("approval_employee_id") if approval_assignment_changed else None})
+                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []) + (["department_head_department_id"] if department_head_requested else []), "language_codes": [row["code"] for row in languages] if languages is not None else None, "approval_employee_id": values.get("approval_employee_id") if approval_assignment_changed else None})
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
             if leadership_changed:
