@@ -257,8 +257,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         public = APIClient(self.base_url)
         health = public.request("GET", "/api/health")
         self.assertTrue(health["ok"])
-        self.assertEqual(hr_server.APP_VERSION, "5.8.1")
-        self.assertEqual(health["version"], "5.8.1")
+        self.assertEqual(hr_server.APP_VERSION, "5.8.2")
+        self.assertEqual(health["version"], "5.8.2")
         org = public.request("GET", "/api/org")["organization"]
         self.assertTrue(org["display_name"])
         public.request("GET", "/api/auth/me", expected=401)
@@ -318,8 +318,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("alertMessage('لا يملك حسابك صلاحية فتح هذه الوحدة.'", app)
         self.assertIn('integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="', index)
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
         self.assertIn('@media(max-width:650px){.login-visual-runtime .visual-runtime-copy{position:absolute;inset:auto 14px 64px', styles)
         self.assertIn('.visual-runtime-copy:has(h2:empty){display:none}', styles)
 
@@ -332,7 +332,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.1&build=20261105-production-r32")
+        application_script = index.index("app.js?v=5.8.2&build=20261105-production-r33")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -451,7 +451,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("استوديو العلامة المؤسسية", i18n)
         self.assertIn("Organization brand studio", i18n)
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.1', index)
+            self.assertIn(f'{asset}?v=5.8.2', index)
 
     def test_53_v54_migrates_v532_visual_identity_without_changing_tenant_data(self):
         with tempfile.TemporaryDirectory(prefix="hr-v54-migration-") as folder:
@@ -777,7 +777,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.1', index)
+            self.assertIn(f'{asset}?v=5.8.2', index)
         for token in ("--mineral-950:#071b22", "--mineral-900:#0b2530", "--emerald-700:#0e6655", "--bronze-500:#c99545", "--parchment-100:#f4f2ec"):
             self.assertIn(token, styles)
         for symbol in ("dashboard", "home", "users", "org", "map", "clock", "calendar", "shift", "overtime", "wallet", "certificate", "loan", "target", "recruitment", "onboarding", "learning", "benefits", "offboarding", "bell", "mail", "report", "shield", "settings", "search", "menu", "print", "edit", "archive", "download"):
@@ -810,7 +810,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.1', index)
+            self.assertIn(f'{asset}?v=5.8.2', index)
         self.assertIn('.sidebar-collapsed .sidebar,.sidebar-collapsed .sidebar.open{width:min(310px,88vw)}', styles)
         self.assertIn('.sidebar-collapsed .sidebar a>span,', styles)
         self.assertIn('.sidebar-collapsed .sidebar .nav-label,', styles)
@@ -842,7 +842,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.1', index)
+            self.assertIn(f'{asset}?v=5.8.2', index)
         self.assertIn("function metricValue(value)", app)
         self.assertIn("<small>${esc(tr(m[0]))}</small>", app)
         self.assertIn("<span>${esc(tr(m[2]))}</span>", app)
@@ -875,9 +875,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         app = (root / "app.js").read_text(encoding="utf-8")
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('i18n.js?v=5.8.1', index)
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('i18n.js?v=5.8.2', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
         self.assertGreaterEqual(index.count('data-locale="ar"'), 2)
         self.assertGreaterEqual(index.count('data-locale="en"'), 2)
         self.assertIn("khaisha.ui.locale", index + i18n)
@@ -977,7 +977,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("if(requested&&!requestedAllowed)history.replaceState", app)
         index = (root / "index.html").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.1', index)
+            self.assertIn(f'{asset}?v=5.8.2', index)
 
         required_performance_resources = (
             "الفترة من", "متبقٍ {days} يوم", "مسودة الموظف", "أهداف الموظف",
@@ -1054,8 +1054,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             r"api\(`/api/evaluations/\$\{state\.evaluation\.id\}/submit`,"
             r"\{method:'POST'\}\)",
         )
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
 
     def test_42_v512_dossier_observer_and_mobile_weight_badge_contract(self):
         root = Path(__file__).parents[1]
@@ -1080,8 +1080,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("flex:0 0 auto", weight_rule.group(1))
         self.assertIn("min-width:max-content", weight_rule.group(1))
         self.assertIn("@media(max-width:440px)", styles)
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
 
     def test_keep_alive_connection_refreshes_authentication_each_request(self):
         """Anonymous -> login -> authenticated -> logout must work on one TCP connection."""
@@ -1966,8 +1966,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         sources = {name: (root / name).read_text(encoding="utf-8") for name in ("index.html", "app.js", "styles.css", "server.py", "schema.sql")}
         index, app, styles = sources["index.html"], sources["app.js"], sources["styles.css"]
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
         for template in ("portrait_orbit", "executive_horizontal", "minimal_vertical"):
             self.assertIn(f'data-card-template-choice="{template}"', index)
             self.assertIn(f"template-{template}", styles)
@@ -2208,8 +2208,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('class="org-fit-stage"', app)
         self.assertIn(".org-fit-stage.fitted{overflow:hidden}", styles)
         self.assertIn("MutationObserver", app)
-        self.assertIn("styles.css?v=5.8.1", index)
-        self.assertIn("app.js?v=5.8.1", index)
+        self.assertIn("styles.css?v=5.8.2", index)
+        self.assertIn("app.js?v=5.8.2", index)
         self.assertIn('rel="icon" href="favicon.svg"', index)
 
     def test_30_v47_salary_certificate_serial_barcode_integrity_and_verification(self):
@@ -2867,7 +2867,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261105-production-r32", index)
+        self.assertIn("build=20261105-production-r33", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3079,7 +3079,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261105-production-r32", index)
+        self.assertIn("build=20261105-production-r33", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3184,8 +3184,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server = (root / "server.py").read_text(encoding="utf-8")
         schema = (root / "schema.sql").read_text(encoding="utf-8")
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
         for marker in ("evaluationWorkflowRibbon", "evaluationPrivacyGate", "myEvaluationHistory", "managerEvaluationForm", "hrApproveForm", "evaluationGrievanceForm"):
             self.assertIn(marker, index + app)
         for endpoint in ("manager-review", "hr-review", "/grievance", "evaluation-grievances"):
@@ -3635,8 +3635,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("@media(max-width:440px)", styles)
         self.assertIn("overflow-x:hidden", styles)
         self.assertIn("evaluation.cycle.manage", app + schema + (root / "server.py").read_text(encoding="utf-8"))
-        self.assertIn('styles.css?v=5.8.1', index)
-        self.assertIn('app.js?v=5.8.1', index)
+        self.assertIn('styles.css?v=5.8.2', index)
+        self.assertIn('app.js?v=5.8.2', index)
 
 
     def test_57_v56_profile_fields_age_privacy_permissions_and_emergency_contacts(self):
@@ -3859,7 +3859,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server_source = (root / "server.py").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.1', index)
+            self.assertIn(f'{asset}?v=5.8.2', index)
         for marker in ("employee.profile.edit", "employee.emergency.manage", "employee_emergency_contacts", "api_attendance_range", "invalid_date_range"):
             self.assertIn(marker, server_source + app)
         for marker in ("employeeProfileForm", "emergencyContactForm", "profile-completeness", "attendanceRangeForm", "attendanceSummary", "attendance-table-wrap"):
@@ -5328,7 +5328,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261105-production-r32", index)
+        self.assertIn("build=20261105-production-r33", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5949,7 +5949,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261105-production-r32", index)
+        self.assertIn("build=20261105-production-r33", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6275,6 +6275,171 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("data-current-department-option", app)
         self.assertIn("'رئاسة القسم':'Department leadership'", translations)
 
+    def test_90_sensitive_requests_and_notifications_are_closed_to_unrelated_staff(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        suffix = uuid.uuid4().hex[:8]
+        manager_employee_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
+        requester_email = f"privacy-requester-{suffix}@demo.ae"
+        hr.request("POST", "/api/employees", {
+            "employee_no": f"REQ-{suffix}", "full_name": "موظف صاحب طلبات خاصة",
+            "email": requester_email, "hire_date": "2020-01-01", "salary": 5000,
+            "manager_id": manager_employee_id,
+            "create_user": True, "password": "Requester@12345", "role": "employee",
+        }, expected=201)
+        requester = self.client(requester_email, "Requester@12345")
+        outsider_email = f"privacy-outsider-{suffix}@demo.ae"
+        outsider_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"PRIV-{suffix}", "full_name": "مسؤول غير معني بالطلبات",
+            "email": outsider_email, "hire_date": "2020-01-01",
+            "create_user": True, "password": "Privacy@12345", "role": "manager",
+        }, expected=201)["employee"]
+        outsider_account = next(
+            item for item in admin.request("GET", "/api/admin/users")["items"]
+            if item["email"] == outsider_email
+        )
+        admin.request("PATCH", f"/api/admin/users/{outsider_account['id']}/permissions", {
+            "overrides": [
+                {"permission": permission, "granted": True}
+                for permission in (
+                    "purchase.view", "advance.view", "leave.view", "overtime.view",
+                    "notification.manage", "notification.send",
+                )
+            ],
+        })
+        outsider = self.client(outsider_email, "Privacy@12345")
+        outsider_permissions = outsider.request("GET", "/api/auth/me")["permissions"]
+        self.assertIn("purchase.view", outsider_permissions)
+        self.assertIn("notification.manage", outsider_permissions)
+
+        purchase_body = {
+            "purchase_name": f"طلب خاص {suffix}", "amount": 88.75,
+            "responsible_name": "المسؤول المباشر", "invoice_file_name": "private.png",
+            "invoice_data_url": "data:image/png;base64,iVBORw0KGgo=",
+        }
+        purchase = requester.request("POST", "/api/purchases", purchase_body, expected=201)["request"]
+        outsider_purchase_ids = {item["id"] for item in outsider.request("GET", "/api/purchases")["items"]}
+        self.assertNotIn(purchase["id"], outsider_purchase_ids)
+        outsider.request("GET", f"/api/purchases/{purchase['id']}", expected=403)
+        self.assertIn(purchase["id"], {item["id"] for item in manager.request("GET", "/api/purchases")["items"]})
+        self.assertIn(purchase["id"], {item["id"] for item in hr.request("GET", "/api/purchases")["items"]})
+        self.assertIn(purchase["id"], {item["id"] for item in admin.request("GET", "/api/purchases")["items"]})
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            purchase_notice = db.execute(
+                "SELECT id,notification_scope FROM notifications WHERE title='طلب مشتريات يحتاج مراجعتك' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertIsNotNone(purchase_notice)
+            self.assertEqual(purchase_notice["notification_scope"], "personal")
+            purchase_recipient_ids = {
+                int(row["user_id"]) for row in db.execute(
+                    "SELECT user_id FROM notification_recipients WHERE notification_id=?", (purchase_notice["id"],)
+                )
+            }
+            self.assertNotIn(int(outsider_account["id"]), purchase_recipient_ids)
+            purchase_notice_id = int(purchase_notice["id"])
+
+        self.assertNotIn(purchase_notice_id, {item["id"] for item in outsider.request("GET", "/api/notifications/inbox")["items"]})
+        self.assertNotIn(purchase_notice_id, {item["id"] for item in outsider.request("GET", "/api/notifications/manage")["items"]})
+        outsider.request("GET", f"/api/notifications/{purchase_notice_id}", expected=403)
+        self.assertIn(purchase_notice_id, {item["id"] for item in hr.request("GET", "/api/notifications/manage")["items"]})
+
+        advance = requester.request("POST", "/api/advances", {
+            "amount": 100, "months": 2, "reason": f"سبب خاص {suffix}",
+        }, expected=201)["advance"]
+        self.assertNotIn(advance["id"], {item["id"] for item in outsider.request("GET", "/api/advances")["items"]})
+        self.assertIn(advance["id"], {item["id"] for item in manager.request("GET", "/api/advances")["items"]})
+        self.assertIn(advance["id"], {item["id"] for item in hr.request("GET", "/api/advances")["items"]})
+
+        leave_type = next(
+            item for item in requester.request("GET", "/api/leaves/types")["items"]
+            if item["code"] == "unpaid"
+        )
+        leave_day = date.today() + timedelta(days=900)
+        leave = requester.request("POST", "/api/leaves/requests", {
+            "leave_type_id": leave_type["id"], "start_date": leave_day.isoformat(),
+            "end_date": leave_day.isoformat(), "reason": f"سبب إجازة خاص {suffix}",
+        }, expected=201)["request"]
+        self.assertNotIn(leave["id"], {item["id"] for item in outsider.request("GET", "/api/leaves/requests")["items"]})
+        self.assertIn(leave["id"], {item["id"] for item in manager.request("GET", "/api/leaves/requests")["items"]})
+        self.assertIn(leave["id"], {item["id"] for item in hr.request("GET", "/api/leaves/requests")["items"]})
+
+        overtime_day = date.today() + timedelta(days=901)
+        overtime = requester.request("POST", "/api/overtime", {
+            "work_date": overtime_day.isoformat(), "start_time": "18:00", "end_time": "19:00",
+            "reason": f"سبب إضافي خاص {suffix}",
+        }, expected=201)["request"]
+        self.assertNotIn(overtime["id"], {item["id"] for item in outsider.request("GET", "/api/overtime")["items"]})
+        self.assertIn(overtime["id"], {item["id"] for item in manager.request("GET", "/api/overtime")["items"]})
+        self.assertIn(overtime["id"], {item["id"] for item in hr.request("GET", "/api/overtime")["items"]})
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            leaked = db.execute(
+                """SELECT n.id,n.title FROM notifications n
+                     JOIN notification_recipients r ON r.notification_id=n.id
+                    WHERE r.user_id=? AND n.notification_scope='personal'
+                      AND n.title IN ('طلب مشتريات يحتاج مراجعتك','طلب سلفة بانتظار الاعتماد',
+                                      'طلب إجازة بانتظار قرارك','طلب عمل إضافي بانتظار الاعتماد')""",
+                (outsider_account["id"],),
+            ).fetchall()
+            self.assertEqual(leaked, [])
+
+        app = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        translations = (Path(__file__).parents[1] / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn("n.notification_scope==='personal'", app)
+        self.assertIn("خاص · مستلمون محددون", app)
+        self.assertIn("'خاص · مستلمون محددون':'Private · Selected recipients'", translations)
+
+
+class NotificationPrivacyMigrationTests(unittest.TestCase):
+    def test_legacy_sensitive_broadcasts_are_retired_and_narrow_history_is_guarded(self):
+        with tempfile.TemporaryDirectory(prefix="hr-notification-privacy-") as folder:
+            db_path = Path(folder) / "privacy.sqlite3"
+            hr_server.initialize_database(db_path)
+            with contextlib.closing(hr_server.open_db(db_path)) as db:
+                for index in range(3):
+                    hr_server.seed_user(
+                        db, f"legacy-private-{index}@demo.ae", "Legacy@12345",
+                        f"Legacy {index}", "employee", None,
+                    )
+                user_ids = [int(row["id"]) for row in db.execute("SELECT id FROM users ORDER BY id")]
+                stamp = hr_server.now_iso()
+                broad_id = int(db.execute(
+                    """INSERT INTO notifications(
+                           sender_user_id,title,body,message_type,notification_scope,audience_type,audience_ref,created_at
+                       ) VALUES(?, 'تحديث طلب المشتريات', 'مبلغ وسبب خاصان', 'notice', 'recipient', 'employees', ?, ?)""",
+                    (user_ids[0], json.dumps(user_ids), stamp),
+                ).lastrowid)
+                db.executemany(
+                    "INSERT INTO notification_recipients(notification_id,user_id) VALUES(?,?)",
+                    [(broad_id, user_id) for user_id in user_ids],
+                )
+                narrow_id = int(db.execute(
+                    """INSERT INTO notifications(
+                           sender_user_id,title,body,message_type,notification_scope,audience_type,audience_ref,created_at
+                       ) VALUES(?, 'طلب سلفة بانتظار الاعتماد', 'طلب خاص', 'notice', 'recipient', 'employees', ?, ?)""",
+                    (user_ids[0], json.dumps(user_ids[:2]), stamp),
+                ).lastrowid)
+                db.executemany(
+                    "INSERT INTO notification_recipients(notification_id,user_id) VALUES(?,?)",
+                    [(narrow_id, user_id) for user_id in user_ids[:2]],
+                )
+                db.commit()
+
+            hr_server.initialize_database(db_path)
+            with contextlib.closing(hr_server.open_db(db_path)) as db:
+                broad = db.execute(
+                    "SELECT notification_scope,hidden_at FROM notifications WHERE id=?", (broad_id,)
+                ).fetchone()
+                narrow = db.execute(
+                    "SELECT notification_scope,hidden_at FROM notifications WHERE id=?", (narrow_id,)
+                ).fetchone()
+                self.assertEqual(broad["notification_scope"], "personal")
+                self.assertIsNotNone(broad["hidden_at"])
+                self.assertEqual(narrow["notification_scope"], "personal")
+                self.assertIsNone(narrow["hidden_at"])
+
 
 class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
     def test_bilingual_reference_migration_and_frontend_contract(self):
@@ -6339,7 +6504,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261105-production-r32", index)
+        self.assertIn("build=20261105-production-r33", index)
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

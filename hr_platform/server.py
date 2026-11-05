@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.1"
+APP_VERSION = "5.8.2"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -86,18 +86,18 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "attendance.view": "عرض الحضور", "attendance.team": "عرض أوقات دخول وخروج الفريق",
         "attendance.export": "تصدير كشف الحضور والانصراف CSV",
         "shift.view": "عرض المناوبات", "shift.manage": "إدارة المناوبات",
-        "leave.view": "عرض طلبات الإجازة", "leave.team": "قرار المسؤول المباشر على طلبات الفريق", "leave.approve": "الاعتماد النهائي للإجازات لدى الموارد البشرية",
+        "leave.view": "دخول وحدة الإجازات مع تطبيق نطاق الموظف والمسؤول المباشر", "leave.team": "قرار المسؤول المباشر على طلبات الفريق", "leave.approve": "الاعتماد النهائي للإجازات لدى الموارد البشرية",
         "leave.types.manage": "إدارة أنواع الإجازات وسياسة التقويم",
         "leave.balance.manage": "إضافة وتعديل أرصدة الموظفين",
-        "overtime.view": "عرض العمل الإضافي", "overtime.approve": "اعتماد العمل الإضافي",
+        "overtime.view": "دخول وحدة العمل الإضافي مع تطبيق نطاق الطلب", "overtime.approve": "اعتماد العمل الإضافي",
     },
     "payroll": {
         "salary.view": "عرض الرواتب", "salary_certificate.issue": "إصدار شهادة راتب",
         "salary_certificate.print": "طباعة شهادة راتب", "salary_certificate.verify": "التحقق من صحة شهادة راتب",
         "payroll.manage": "إدارة المسيرات",
         "payroll.approve": "اعتماد المسيرات", "payroll.pay": "إثبات دفع المسيرات",
-        "advance.view": "عرض السلف", "advance.approve": "اعتماد السلف",
-        "purchase.view": "عرض جميع طلبات المشتريات", "purchase.hr_approve": "مراجعة الموارد البشرية لطلبات المشتريات",
+        "advance.view": "دخول وحدة السلف مع تطبيق نطاق الطلب", "advance.approve": "اعتماد السلف",
+        "purchase.view": "دخول وحدة المشتريات مع تطبيق نطاق مقدم الطلب والاعتماد", "purchase.hr_approve": "مراجعة الموارد البشرية لطلبات المشتريات",
         "purchase.finance_approve": "متابعة الاعتماد النهائي للمشتريات لدى مسؤول اعتماد الفواتير",
     },
     "performance": {
@@ -2599,6 +2599,39 @@ def initialize_database(db_path: Path) -> None:
                      UNION SELECT notification_id FROM branch_expiry_alerts WHERE notification_id IS NOT NULL
                    )"""
             )
+            # Targeted workflow notices can contain purchase amounts, leave
+            # reasons, advance values, salary information or appraisal text.
+            # Older releases stored them with the generic ``recipient`` scope,
+            # and some legacy deployments broadcast purchase updates too
+            # widely.  Retire any suspicious broad legacy row, then place the
+            # remaining history behind the same recipient/HR/admin guard used
+            # by newly generated personal notifications.
+            sensitive_workflow_titles = (
+                "طلب مشتريات يحتاج مراجعتك", "تحديث طلب المشتريات",
+                "طلب إجازة بانتظار الموارد البشرية", "طلب إجازة بانتظار قرارك",
+                "قرار المسؤول المباشر على طلب إجازة", "تحديث طلب الإجازة",
+                "القرار النهائي لطلب الإجازة", "طلب بيع رصيد إجازة",
+                "قرار طلب بيع رصيد الإجازة", "طلب عمل إضافي بانتظار الاعتماد",
+                "قرار طلب العمل الإضافي", "طلب سلفة بانتظار الاعتماد",
+                "قرار طلب السلفة", "طلب شهادة راتب جديد",
+                "تم رفض طلب شهادة الراتب", "تم اعتماد شهادة الراتب",
+                "تقييم سنوي بانتظار تقييمك", "تقييم سنوي بانتظار مراجعة HR",
+                "أعيد التقييم من HR", "نتيجة التقييم السنوي",
+                "تظلم على نتيجة تقييم", "تم حل تظلم التقييم",
+            )
+            sensitive_placeholders = ",".join("?" for _ in sensitive_workflow_titles)
+            db.execute(
+                f"""UPDATE notifications
+                       SET hidden_at=COALESCE(hidden_at,?)
+                     WHERE notification_scope<>'personal'
+                       AND title IN ({sensitive_placeholders})
+                       AND (SELECT COUNT(*) FROM notification_recipients r WHERE r.notification_id=notifications.id)>5""",
+                (now_iso(), *sensitive_workflow_titles),
+            )
+            db.execute(
+                f"UPDATE notifications SET notification_scope='personal' WHERE title IN ({sensitive_placeholders})",
+                sensitive_workflow_titles,
+            )
             db.execute(
                 """CREATE TABLE IF NOT EXISTS employee_service_history (
                        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3152,7 +3185,7 @@ def create_internal_notification(
     available_at: str | None = None,
     *,
     message_type: str = "notice",
-    notification_scope: str = "recipient",
+    notification_scope: str = "personal",
 ) -> int | None:
     recipients = sorted({int(value) for value in recipient_user_ids if int(value) > 0})
     if not recipients:
@@ -3211,6 +3244,16 @@ def may_view_notification(db: sqlite3.Connection, user: dict[str, Any], notifica
     """Apply live security rules in addition to the stored recipient list."""
     keys = notification.keys() if hasattr(notification, "keys") else notification
     scope = str(notification["notification_scope"] if "notification_scope" in keys else "recipient")
+    if scope == "personal":
+        if is_system_admin(user) or str(user.get("role") or "").lower() == "hr":
+            return True
+        notification_id = notification["id"] if "id" in keys else notification["notification_id"] if "notification_id" in keys else None
+        if not notification_id:
+            return False
+        return db.execute(
+            "SELECT 1 FROM notification_recipients WHERE notification_id=? AND user_id=?",
+            (notification_id, user["id"]),
+        ).fetchone() is not None
     if scope != "administrative":
         return True
     return is_system_admin(user) or str(user.get("role") or "").lower() == "hr" or is_configured_general_manager(db, user)
@@ -8864,11 +8907,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if status:
                 conditions.append("o.status=?")
                 params.append(status)
-            if not self.has_privileged_people_access(user, "overtime.view"):
-                conditions.append("o.employee_id=?")
-                params.append(self.own_employee_id())
             where = " WHERE " + " AND ".join(conditions) if conditions else ""
             rows = self.db.execute("SELECT o.*,e.employee_no,e.full_name,d.name AS department_name,a.full_name AS approval_employee_name,u.display_name AS decided_by_name FROM overtime_requests o JOIN employees e ON e.id=o.employee_id LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees a ON a.id=o.approval_employee_id LEFT JOIN users u ON u.id=o.decided_by" + where + " ORDER BY o.created_at DESC", params).fetchall()
+            if not (is_system_admin(user) or str(user.get("role") or "").lower() == "hr"):
+                employee_id = int(user.get("employee_id") or 0)
+                rows = [
+                    row for row in rows
+                    if employee_id > 0 and (
+                        int(row["employee_id"]) == employee_id
+                        or int(row["approval_employee_id"] or 0) == employee_id
+                        or self.direct_manager_employee_id(int(row["employee_id"])) == employee_id
+                        or (not row["approval_employee_id"] and has_permission(self.db, user, "overtime.approve"))
+                    )
+                ]
             self.send_json(200, {"items": [dict(r) for r in rows]})
 
         def api_overtime_post(self) -> None:
@@ -8898,7 +8949,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 request_id = int(cur.lastrowid)
                 self.db.execute("INSERT INTO overtime_audit(request_id,actor_user_id,from_status,to_status,comment,created_at) VALUES(?,?,NULL,'submitted','',?)", (request_id, user["id"], stamp))
                 employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
-                approvers = [int(approval_manager["user_id"])] if approval_manager and int(approval_manager["user_id"]) != int(user["id"]) else self.approval_recipient_ids("overtime.approve", int(user["id"]))
+                approvers = self.employee_request_participant_user_ids(
+                    employee_id, "overtime.approve", int(user["id"]), approval_employee_id
+                )
                 create_internal_notification(
                     self.db, int(user["id"]), approvers,
                     "طلب عمل إضافي بانتظار الاعتماد",
@@ -8932,17 +8985,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "سبب الرفض مطلوب.", "validation_error")
             status = "approved" if action == "approve" else "rejected"
             stamp = now_iso()
-            employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (request_row["employee_id"],)).fetchone()
+            request_employee = self.db.execute(
+                "SELECT full_name FROM employees WHERE id=?", (request_row["employee_id"],)
+            ).fetchone()
             with self.db:
                 self.db.execute("UPDATE overtime_requests SET status=?,rejection_reason=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, reason if status == "rejected" else None, user["id"], stamp, stamp, request_id))
                 self.db.execute("INSERT INTO overtime_audit(request_id,actor_user_id,from_status,to_status,comment,created_at) VALUES(?,?,'submitted',?,?,?)", (request_id, user["id"], status, reason, stamp))
-                if employee_user:
+                recipients = self.employee_request_participant_user_ids(
+                    int(request_row["employee_id"]), "overtime.approve", int(user["id"]),
+                    int(request_row["approval_employee_id"]) if request_row["approval_employee_id"] else None,
+                )
+                if recipients:
                     create_internal_notification(
                         self.db,
                         int(user["id"]),
-                        [int(employee_user["id"])],
+                        recipients,
                         "قرار طلب العمل الإضافي",
-                        f"{('اعتمد' if action == 'approve' else 'رفض')} {'مدير النظام' if is_system_admin else 'مسؤول الاعتماد'} طلبك للعمل الإضافي."
+                        f"{('اعتمد' if action == 'approve' else 'رفض')} {'مدير النظام' if is_system_admin else 'مسؤول الاعتماد'} طلب العمل الإضافي للموظف {request_employee['full_name'] if request_employee else 'صاحب الطلب'}."
                         + (f" السبب: {reason}" if action == "reject" else ""),
                     )
                 audit(self.db, user["id"], f"overtime.{'admin_override_' if is_system_admin else ''}{status}", "overtime_request", request_id, {"reason": reason, "override": is_system_admin})
@@ -8959,6 +9018,33 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if has_permission(self.db, candidate, permission):
                     recipients.append(int(row["id"]))
             return recipients
+
+        def employee_request_participant_user_ids(
+            self,
+            employee_id: int,
+            approval_permission: str,
+            exclude_user_id: int | None = None,
+            assigned_approver_employee_id: int | None = None,
+        ) -> list[int]:
+            """Return the closed audience for a sensitive employee request."""
+            employee_ids = {int(employee_id)}
+            manager_employee_id = self.direct_manager_employee_id(int(employee_id))
+            if manager_employee_id:
+                employee_ids.add(int(manager_employee_id))
+            if assigned_approver_employee_id:
+                employee_ids.add(int(assigned_approver_employee_id))
+            placeholders = ",".join("?" for _ in employee_ids)
+            recipients = {
+                int(row["id"])
+                for row in self.db.execute(
+                    f"SELECT id FROM users WHERE active=1 AND employee_id IN ({placeholders})",
+                    tuple(sorted(employee_ids)),
+                ).fetchall()
+            }
+            recipients.update(self.approval_recipient_ids(approval_permission))
+            if exclude_user_id:
+                recipients.discard(int(exclude_user_id))
+            return sorted(recipients)
 
         def leave_hr_recipient_ids(self) -> list[int]:
             return self.approval_recipient_ids("leave.approve")
@@ -9410,14 +9496,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             assert user is not None
             params: list[Any] = []
             where = ""
-            if self.has_privileged_people_access(user, "leave.view"):
+            if is_system_admin(user) or str(user.get("role") or "").lower() == "hr" or has_permission(self.db, user, "leave.approve"):
                 pass
-            elif has_permission(self.db, user, "leave.team") and user.get("employee_id"):
-                where = " WHERE (lr.employee_id=? OR (lr.manager_employee_id=? AND lr.status='submitted' AND lr.manager_decision='pending'))"
+            elif user.get("employee_id"):
+                # A broad view permission may open the module, but it never
+                # discloses another reporting line's leave requests.
+                where = " WHERE (lr.employee_id=? OR lr.manager_employee_id=?)"
                 params = [user["employee_id"], user["employee_id"]]
             else:
-                where = " WHERE lr.employee_id=?"
-                params = [self.own_employee_id()]
+                where = " WHERE 1=0"
             if self.query.get("status"):
                 where += (" AND " if where else " WHERE ") + "lr.status=?"
                 params.append(self.query["status"])
@@ -9535,7 +9622,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 cur = self.db.execute("INSERT INTO leave_requests(employee_id,leave_type_id,start_date,end_date,days,start_time,end_time,hours,reason,attachment_data,status,manager_employee_id,approval_employee_id,manager_decision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'submitted',?,?,?, ?,?)", (employee_id, leave_type_id, start.isoformat(), end.isoformat(), days, start_time_value, end_time_value, hours, optional_text(data, "reason", 1000), attachment, manager_employee_id, approval_employee_id, manager_decision, stamp, stamp))
                 request_id = int(cur.lastrowid)
                 create_internal_notification(
-                    self.db, int(user["id"]), hr_recipients if direct_to_hr else [int(manager_user["id"])],
+                    self.db, int(user["id"]),
+                    self.employee_request_participant_user_ids(
+                        employee_id, "leave.approve", int(user["id"]), approval_employee_id
+                    ),
                     "طلب إجازة بانتظار الموارد البشرية" if direct_to_hr else "طلب إجازة بانتظار قرارك",
                     f"قدم {employee['full_name']} ({employee['employee_no']}) طلب {leave_type['name']} من {start.isoformat()} إلى {end.isoformat()}.",
                 )
@@ -9636,7 +9726,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             raise APIError(409, "لم يعد الرصيد كافياً لاعتماد الطلب.", "insufficient_balance", {"available": available})
                         self.db.execute("UPDATE leave_balances SET used=used+? WHERE employee_id=? AND leave_type_id=? AND year=?", (request_row["days"], request_row["employee_id"], request_row["leave_type_id"], year))
                     self.db.execute("UPDATE leave_requests SET status=?,rejection_reason=?,decided_by=?,decided_at=?,updated_at=? WHERE id=?", (status, reason if status == "rejected" else None, user["id"], stamp, stamp, request_id))
-                    recipients = [int(row["id"]) for row in (employee_user, manager_user, approval_user) if row]
+                    recipients = self.employee_request_participant_user_ids(
+                        int(request_row["employee_id"]), "leave.approve", int(user["id"]),
+                        int(request_row["approval_employee_id"]) if request_row["approval_employee_id"] else None,
+                    )
                     create_internal_notification(
                         self.db, int(user["id"]), recipients,
                         "القرار النهائي لطلب الإجازة",
@@ -9664,7 +9757,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_leave_sales_get(self) -> None:
             user = self.current_user(True)
             assert user is not None
-            is_hr = bool(has_permission(self.db, user, "leave.approve"))
+            is_hr = bool(is_system_admin(user) or str(user.get("role") or "").lower() == "hr" or has_permission(self.db, user, "leave.approve"))
             if is_hr:
                 rows = self.db.execute(
                     """SELECT s.*,e.employee_no,e.full_name AS employee_name,u.display_name AS decided_by_name
@@ -9672,13 +9765,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                        LEFT JOIN users u ON u.id=s.decided_by ORDER BY s.created_at DESC,s.id DESC"""
                 ).fetchall()
             else:
-                employee_id = self.own_employee_id()
                 rows = self.db.execute(
                     """SELECT s.*,e.employee_no,e.full_name AS employee_name,u.display_name AS decided_by_name
                        FROM leave_sale_requests s JOIN employees e ON e.id=s.employee_id
-                       LEFT JOIN users u ON u.id=s.decided_by WHERE s.employee_id=? ORDER BY s.created_at DESC,s.id DESC""",
-                    (employee_id,),
+                       LEFT JOIN users u ON u.id=s.decided_by ORDER BY s.created_at DESC,s.id DESC""",
                 ).fetchall()
+                rows = [
+                    row for row in rows
+                    if int(user["id"]) in self.employee_request_participant_user_ids(int(row["employee_id"]), "leave.approve")
+                ]
             self.send_json(200, {"items": [self.leave_sale_payload(row, user) for row in rows]})
 
         def api_leave_sales_post(self) -> None:
@@ -9708,7 +9803,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     (employee_id, days, daily_rate_cents, amount_cents, optional_text(data, "reason", 1000), stamp, stamp),
                 )
                 request_id = int(cursor.lastrowid)
-                recipients = self.leave_hr_recipient_ids()
+                recipients = self.employee_request_participant_user_ids(employee_id, "leave.approve", int(user["id"]))
                 create_internal_notification(
                     self.db, int(user["id"]), recipients,
                     "طلب بيع رصيد إجازة",
@@ -9788,12 +9883,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         (int(row["amount_cents"] or 0), draft_payroll_item_id),
                     )
                     self.recalculate_payroll_item(draft_payroll_item_id)
-                employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
-                if employee_user:
+                recipients = self.employee_request_participant_user_ids(int(row["employee_id"]), "leave.approve", int(user["id"]))
+                if recipients:
                     create_internal_notification(
-                        self.db, int(user["id"]), [int(employee_user["id"])],
+                        self.db, int(user["id"]), recipients,
                         "قرار طلب بيع رصيد الإجازة",
-                        f"{'اعتمدت' if action == 'approve' else 'رفضت'} الموارد البشرية طلب بيع {row['days']:g} يوم من رصيدك."
+                        f"{'اعتمدت' if action == 'approve' else 'رفضت'} الموارد البشرية طلب بيع {row['days']:g} يوم من رصيد الموظف {row['employee_name']}."
                         + (f" السبب: {note}" if action == "reject" else f" المبلغ المحتسب: {cents_value(row['amount_cents']):,.2f}.")
                     )
                 audit(self.db, user["id"], f"leave_sale.{status}", "leave_sale_request", request_id, {"days": row["days"], "reason": note})
@@ -11284,14 +11379,19 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return self.require_permission("notification.manage")
 
         def api_notification_manage_get(self) -> None:
-            self.require_notification_admin()
+            user = self.require_notification_admin()
+            privacy_officer = is_system_admin(user) or str(user.get("role") or "").lower() == "hr"
+            privacy_filter = "" if privacy_officer else """WHERE n.notification_scope<>'personal'
+                OR EXISTS (SELECT 1 FROM notification_recipients own WHERE own.notification_id=n.id AND own.user_id=?)"""
+            params: tuple[Any, ...] = () if privacy_officer else (user["id"],)
             rows = self.db.execute(
-                """SELECT n.id,n.title,n.body,n.message_type,n.audience_type,n.audience_ref,n.available_at,
+                """SELECT n.id,n.title,n.body,n.message_type,n.notification_scope,n.audience_type,n.audience_ref,n.available_at,
                           n.created_at,n.edited_at,n.hidden_at,u.display_name AS sender_name,
                           (SELECT COUNT(*) FROM notification_recipients r WHERE r.notification_id=n.id) AS recipient_count,
                           (SELECT COUNT(*) FROM notification_recipients r WHERE r.notification_id=n.id AND r.read_at IS NOT NULL) AS read_count
                    FROM notifications n JOIN users u ON u.id=n.sender_user_id
-                   ORDER BY n.created_at DESC LIMIT 200"""
+                   """ + privacy_filter + " ORDER BY n.created_at DESC LIMIT 200",
+                params,
             ).fetchall()
             self.send_json(200, {"items": [dict(row) | {"hidden": bool(row["hidden_at"])} for row in rows]})
 
@@ -11300,6 +11400,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             row = self.db.execute("SELECT * FROM notifications WHERE id=?", (notification_id,)).fetchone()
             if row is None:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
+            if str(row["notification_scope"] or "recipient") == "personal" and not (
+                is_system_admin(user) or str(user.get("role") or "").lower() == "hr"
+            ):
+                raise APIError(403, "الإشعارات الخاصة لا يعدلها إلا مسؤول النظام أو الموارد البشرية.", "forbidden")
             data = self.read_json(); updates: dict[str, Any] = {}; stamp = now_iso()
             if "title" in data: updates["title"] = require_text(data, "title", 240)
             if "body" in data: updates["body"] = require_text(data, "body", 5000)
@@ -11389,7 +11493,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             assert user is not None
             ensure_scheduled_notifications(self.db)
             rows = self.db.execute(
-                """SELECT n.notification_scope,r.read_at FROM notification_recipients r
+                """SELECT n.id,n.notification_scope,r.read_at FROM notification_recipients r
                    JOIN notifications n ON n.id=r.notification_id
                    WHERE r.user_id=? AND r.read_at IS NULL AND n.hidden_at IS NULL
                      AND (n.available_at IS NULL OR n.available_at<=?)""",
@@ -11411,7 +11515,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if row is None:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
             if not may_view_notification(self.db, user, row):
-                raise APIError(403, "هذا إشعار إداري لا تملك صلاحية الاطلاع عليه.", "forbidden")
+                raise APIError(403, "هذا الإشعار خاص وليس موجهاً إليك.", "forbidden")
             can_manage = has_permission(self.db, user, "notification.manage")
             privileged = can_manage or row["sender_user_id"] == user["id"] or has_permission(self.db, user, "notification.send")
             if row["hidden_at"] and not can_manage:
@@ -11428,7 +11532,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             user = self.current_user(True)
             assert user is not None
             notification = self.db.execute(
-                """SELECT n.notification_scope,n.hidden_at,n.available_at
+                """SELECT n.id,n.notification_scope,n.hidden_at,n.available_at
                      FROM notification_recipients r JOIN notifications n ON n.id=r.notification_id
                     WHERE r.notification_id=? AND r.user_id=?""",
                 (notification_id, user["id"]),
@@ -11815,14 +11919,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return row
 
         def can_access_purchase(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any]) -> bool:
-            data = dict(row)
-            return bool(
-                int(data["employee_id"]) == int(user.get("employee_id") or 0)
-                or int(data["manager_employee_id"]) == int(user.get("employee_id") or 0)
-                or has_permission(self.db, user, "purchase.view")
-                or has_permission(self.db, user, "purchase.hr_approve")
-                or self.finance_purchase_approver(user)
-            )
+            return int(user["id"]) in self.purchase_participant_user_ids(row)
 
         def purchase_payload(self, row: sqlite3.Row | dict[str, Any], user: dict[str, Any], include_invoice: bool = False) -> dict[str, Any]:
             item = dict(row)
@@ -11850,6 +11947,34 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if self.finance_purchase_approver(candidate):
                     recipients.append(int(candidate["id"]))
             return recipients
+
+        def purchase_participant_user_ids(
+            self,
+            row: sqlite3.Row | dict[str, Any],
+            exclude_user_id: int | None = None,
+        ) -> list[int]:
+            """Resolve the closed audience for a purchase request.
+
+            ``purchase.view`` only opens the module; it never widens the data
+            scope.  A request remains visible to its requester, recorded direct
+            manager, HR approvers, the configured invoice approver and system
+            administrators (included by the HR approval permission).
+            """
+            data = dict(row)
+            employee_ids = {int(data["employee_id"]), int(data["manager_employee_id"])}
+            placeholders = ",".join("?" for _ in employee_ids)
+            recipients = {
+                int(item["id"])
+                for item in self.db.execute(
+                    f"SELECT id FROM users WHERE active=1 AND employee_id IN ({placeholders})",
+                    tuple(sorted(employee_ids)),
+                ).fetchall()
+            }
+            recipients.update(self.approval_recipient_ids("purchase.hr_approve"))
+            recipients.update(self.purchase_finance_recipient_ids())
+            if exclude_user_id:
+                recipients.discard(int(exclude_user_id))
+            return sorted(recipients)
 
         def api_purchase_requesters_get(self) -> None:
             """Return the minimal, eligible requester directory for system admins.
@@ -11893,15 +12018,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             assert user is not None
             conditions: list[str] = []
             params: list[Any] = []
-            if not has_permission(self.db, user, "purchase.view"):
-                employee_id = int(user.get("employee_id") or 0)
-                access: list[str] = ["p.employee_id=?", "p.manager_employee_id=?"]
-                params.extend([employee_id, employee_id])
-                if has_permission(self.db, user, "purchase.hr_approve"):
-                    access.append("p.status='hr_pending'")
-                if self.finance_purchase_approver(user):
-                    access.append("p.status='finance_pending'")
-                conditions.append("(" + " OR ".join(access) + ")")
             status = str(self.query.get("status", "")).strip()
             if status:
                 allowed = {"manager_pending", "hr_pending", "finance_pending", "approved", "rejected"}
@@ -11921,6 +12037,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                      LEFT JOIN users fu ON fu.id=p.finance_decided_by""" + where + " ORDER BY p.created_at DESC,p.id DESC",
                 params,
             ).fetchall()
+            rows = [row for row in rows if self.can_access_purchase(row, user)]
             self.send_json(200, {"items": [self.purchase_payload(row, user) for row in rows]})
 
         def api_purchases_post(self) -> None:
@@ -11972,8 +12089,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                      manager_employee_id, stamp, stamp),
                 )
                 request_id = int(cursor.lastrowid)
+                request_row = self.purchase_request_row(request_id)
                 create_internal_notification(
-                    self.db, int(user["id"]), [int(manager_user["id"])], "طلب مشتريات يحتاج مراجعتك",
+                    self.db, int(user["id"]), self.purchase_participant_user_ids(request_row, int(user["id"])), "طلب مشتريات يحتاج مراجعتك",
                     f"أرسل الموظف طلب «{str(data.get('purchase_name') or '').strip()}» بقيمة {cents_value(amount_cents):,.2f} درهم مع فاتورة مرفقة.",
                 )
                 audit(self.db, user["id"], "purchase.submit", "purchase_request", request_id, {
@@ -12037,18 +12155,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 )
                 if updated.rowcount != 1:
                     raise APIError(409, "انتقل الطلب إلى مرحلة أخرى؛ حدّث القائمة قبل اتخاذ القرار.", "purchase_stage_changed")
-                recipients: list[int] = []
                 if fields["status"] == "hr_pending":
-                    recipients = self.approval_recipient_ids("purchase.hr_approve", int(user["id"]))
-                    if not recipients:
+                    if not self.approval_recipient_ids("purchase.hr_approve", int(user["id"])):
                         raise APIError(409, "لا يوجد مسؤول موارد بشرية مخول لمراجعة طلبات المشتريات.", "purchase_hr_approver_missing")
                 elif fields["status"] == "finance_pending":
-                    recipients = self.purchase_finance_recipient_ids(int(user["id"]))
-                    if not recipients:
+                    if not self.purchase_finance_recipient_ids(int(user["id"])):
                         raise APIError(409, "لا يوجد مسؤول اعتماد فواتير نشط بحساب دخول فعال. حدده من إعدادات المؤسسة.", "purchase_finance_approver_missing")
-                else:
-                    employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
-                    recipients = [int(employee_user["id"])] if employee_user else []
+                saved_row = self.purchase_request_row(request_id)
+                recipients = self.purchase_participant_user_ids(saved_row, int(user["id"]))
                 if recipients:
                     create_internal_notification(
                         self.db, int(user["id"]), recipients,
@@ -13475,8 +13589,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_advances_get(self) -> None:
             user=self.current_user(True); assert user is not None
-            if self.has_privileged_people_access(user,"advance.view"): rows=self.db.execute("SELECT id FROM advances ORDER BY created_at DESC").fetchall()
-            else: rows=self.db.execute("SELECT id FROM advances WHERE employee_id=? ORDER BY created_at DESC",(self.own_employee_id(),)).fetchall()
+            rows=self.db.execute("SELECT id,employee_id FROM advances ORDER BY created_at DESC").fetchall()
+            rows=[
+                row for row in rows
+                if int(user["id"]) in self.employee_request_participant_user_ids(int(row["employee_id"]), "advance.approve")
+            ]
             self.send_json(200,{"items":[self.advance_payload(r["id"]) for r in rows]})
 
         def api_advances_post(self) -> None:
@@ -13507,7 +13624,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     serial=today.year*12+(today.month-1)+index; due=f"{serial//12:04d}-{serial%12+1:02d}"
                     self.db.execute("INSERT INTO advance_installments(advance_id,installment_no,due_month,amount_cents) VALUES(?,?,?,?)",(advance_id,index,due,cents))
                 employee = self.db.execute("SELECT employee_no,full_name FROM employees WHERE id=?", (employee_id,)).fetchone()
-                approvers = self.approval_recipient_ids("advance.approve", int(user["id"]))
+                approvers = self.employee_request_participant_user_ids(employee_id, "advance.approve", int(user["id"]))
                 create_internal_notification(
                     self.db, int(user["id"]), approvers,
                     "طلب سلفة بانتظار الاعتماد",
@@ -13553,6 +13670,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         linked=self.sync_payroll_advance_links(int(payroll_run["id"]))
                         self.db.execute("UPDATE payroll_runs SET revision=revision+1,updated_at=? WHERE id=?",(stamp,payroll_run["id"]))
                         audit(self.db,user["id"],"payroll.advance_sync","payroll_run",payroll_run["id"],{"advance_id":advance_id,"linked_installments":linked})
+                recipients = self.employee_request_participant_user_ids(int(row["employee_id"]), "advance.approve", int(user["id"]))
+                if recipients:
+                    create_internal_notification(
+                        self.db, int(user["id"]), recipients,
+                        "قرار طلب السلفة",
+                        f"{'تم اعتماد' if action == 'approve' else 'تم رفض'} طلب السلفة."
+                        + (f" السبب: {reason}" if action == "reject" else ""),
+                    )
                 audit(self.db,user["id"],f"advance.{status}","advance",advance_id,{"reason":reason})
             self.send_json(200,{"advance":self.advance_payload(advance_id)})
 
