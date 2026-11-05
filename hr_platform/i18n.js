@@ -525,6 +525,24 @@
     'الاسم الإنجليزي مستخدم مسبقاً.':'This English name is already in use.'
   });
 
+  Object.assign(english, {
+    'طلب موثق بفاتورة يمر على المسؤول المباشر ثم الموارد البشرية ثم مسؤول اعتماد الفواتير المحدد في إعدادات المؤسسة.':'An invoice-backed request routed through the line manager, HR, and the Invoice Approver selected in organization settings.',
+    'عند مسؤول اعتماد الفواتير':'With Invoice Approver',
+    'مسؤول اعتماد الفواتير':'Invoice Approver',
+    'الموظف المختار هو المخول وحده بالاعتماد النهائي لفواتير المشتريات، ويجب أن يكون لديه حساب دخول فعال.':'The selected employee is the sole final approver for purchase invoices and must have an active sign-in account.',
+    'بعد الإرسال: المسؤول المباشر ← الموارد البشرية ← مسؤول اعتماد الفواتير للاعتماد النهائي.':'After submission: line manager ← HR ← Invoice Approver for final approval.',
+    'الدرجات الوظيفية':'Job grades',
+    'الدرجة تصنيف وظيفي فقط، بينما يُدخل الراتب الأساسي يدوياً في ملف كل موظف ولا يتغير عند تعديل الدرجة أو حرفها.':'The grade is a job classification only. Basic salary is entered manually in each employee profile and does not change when the grade or level changes.',
+    'الدرجة تصنيف وظيفي ولا تغيّر الراتب الأساسي اليدوي.':'The grade is a job classification and does not change the manually entered basic salary.',
+    'الدرجة تصنيف وظيفي فقط، ويُدخل الراتب الأساسي يدوياً في ملف الموظف.':'The grade is a job classification only; basic salary is entered manually in the employee profile.',
+    'تصنيف وظيفي مستقل عن الراتب الأساسي':'Job classification independent of basic salary',
+    'أدخل الراتب الأساسي يدوياً؛ لا يرتبط بالدرجة الوظيفية. الراتب الإجمالي يشمل البدلات ويمكن لمسؤول النظام تعديله مباشرة.':'Enter basic salary manually; it is not linked to the job grade. Gross salary includes allowances and can be edited directly by the system administrator.',
+    'أدخل الراتب الأساسي يدوياً والبدلات؛ لا يرتبط الأساسي بالدرجة الوظيفية ويحسب النظام الإجمالي تلقائياً.':'Enter basic salary and allowances manually. Basic salary is not linked to the job grade, and the system calculates gross salary automatically.',
+    'تم تحديث الدرجة الوظيفية':'Job grade updated',
+    'تمت إضافة الدرجة الوظيفية':'Job grade added',
+    'تم حفظ بيانات المؤسسة ومسؤول اعتماد الفواتير':'Organization details and Invoice Approver saved'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS organization (
   email TEXT NOT NULL DEFAULT '',
   website TEXT NOT NULL DEFAULT '',
   general_manager_employee_id INTEGER,
+  invoice_approval_employee_id INTEGER,
   timezone TEXT NOT NULL DEFAULT 'Asia/Dubai',
   currency TEXT NOT NULL DEFAULT 'AED',
   primary_color TEXT NOT NULL DEFAULT '#123f35',
@@ -45,7 +46,8 @@ CREATE TABLE IF NOT EXISTS organization (
   smtp_from_email TEXT NOT NULL DEFAULT '',
   logo_data TEXT,
   stamp_data TEXT,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (invoice_approval_employee_id) REFERENCES employees(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS visual_identity_slides (

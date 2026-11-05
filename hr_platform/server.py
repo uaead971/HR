@@ -98,7 +98,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
         "payroll.approve": "اعتماد المسيرات", "payroll.pay": "إثبات دفع المسيرات",
         "advance.view": "عرض السلف", "advance.approve": "اعتماد السلف",
         "purchase.view": "عرض جميع طلبات المشتريات", "purchase.hr_approve": "مراجعة الموارد البشرية لطلبات المشتريات",
-        "purchase.finance_approve": "متابعة الاعتماد النهائي للمشتريات لدى المحاسب أو مسؤول الحسابات",
+        "purchase.finance_approve": "متابعة الاعتماد النهائي للمشتريات لدى مسؤول اعتماد الفواتير",
     },
     "performance": {
         "evaluation.view": "عرض التقييمات", "evaluation.review": "مراجعة الموارد البشرية وحل التظلمات",
@@ -2298,6 +2298,7 @@ def initialize_database(db_path: Path) -> None:
             migrations = {
                 "organization": {
                     "general_manager_employee_id": "INTEGER",
+                    "invoice_approval_employee_id": "INTEGER",
                     "visual_identity_enabled": "INTEGER NOT NULL DEFAULT 0",
                     "visual_identity_mode": "TEXT NOT NULL DEFAULT 'static'",
                     "visual_identity_surface": "TEXT NOT NULL DEFAULT 'both'",
@@ -5652,7 +5653,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             allowed = {
                 "display_name", "legal_name", "license_no", "tax_no", "sector", "emirate",
                 "address", "phone", "email", "website", "timezone", "currency",
-                "general_manager_employee_id",
+                "general_manager_employee_id", "invoice_approval_employee_id",
                 "primary_color", "accent_color", "document_template", "logo_data", "stamp_data",
                 "card_template", "card_primary_color", "card_accent_color", "card_back_instructions",
                 "card_contact_phone", "card_contact_email",
@@ -5686,6 +5687,26 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if self.db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (gm_id,)).fetchone() is None:
                         raise APIError(422, "يجب اختيار موظف نشط ليكون المدير العام.", "invalid_general_manager")
                     updates["general_manager_employee_id"] = gm_id
+            if "invoice_approval_employee_id" in data:
+                raw_approver = data.get("invoice_approval_employee_id")
+                if raw_approver in (None, ""):
+                    updates["invoice_approval_employee_id"] = None
+                else:
+                    approver_id = as_int(raw_approver, "invoice_approval_employee_id", 1)
+                    approver = self.db.execute(
+                        """SELECT e.id FROM employees e
+                             JOIN users u ON u.employee_id=e.id AND u.active=1
+                            WHERE e.id=? AND e.active=1 AND e.deleted_at IS NULL""",
+                        (approver_id,),
+                    ).fetchone()
+                    if approver is None:
+                        raise APIError(
+                            422,
+                            "يجب اختيار موظف نشط لديه حساب دخول فعال ليكون مسؤول اعتماد الفواتير.",
+                            "invalid_invoice_approver",
+                            {"field": "invoice_approval_employee_id"},
+                        )
+                    updates["invoice_approval_employee_id"] = approver_id
             if "display_name" in updates and not updates["display_name"] or "legal_name" in updates and not updates["legal_name"]:
                 raise APIError(422, "اسم العرض والاسم القانوني لا يمكن أن يكونا فارغين.", "validation_error")
             for color_key in ("primary_color", "accent_color", "card_primary_color", "card_accent_color"):
@@ -6264,6 +6285,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             self.approval_manager_row(int(employee["id"]), "leave.approve")
                             or self.approval_manager_row(int(employee["id"]), "overtime.approve")
                         )
+                        employee["has_active_account"] = bool(self.db.execute(
+                            "SELECT 1 FROM users WHERE employee_id=? AND active=1",
+                            (employee["id"],),
+                        ).fetchone())
                 scope = "archive" if archive_mode else "all"
             elif has_permission(self.db, user, "employee.team") and user.get("employee_id"):
                 rows = self.db.execute(
@@ -6398,7 +6423,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     self.db.execute("UPDATE employees SET approval_employee_id=NULL WHERE approval_employee_id=?", (employee_id,))
                     self.db.execute("UPDATE departments SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
                     self.db.execute("UPDATE branches SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
-                    self.db.execute("UPDATE organization SET general_manager_employee_id=NULL,updated_at=? WHERE general_manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute(
+                        """UPDATE organization
+                              SET general_manager_employee_id=CASE WHEN general_manager_employee_id=? THEN NULL ELSE general_manager_employee_id END,
+                                  invoice_approval_employee_id=CASE WHEN invoice_approval_employee_id=? THEN NULL ELSE invoice_approval_employee_id END,
+                                  updated_at=?
+                            WHERE general_manager_employee_id=? OR invoice_approval_employee_id=?""",
+                        (employee_id, employee_id, stamp, employee_id, employee_id),
+                    )
                     self.db.execute(
                         """UPDATE employees SET
                                employee_no=?,full_name='موظف محذوف',email=NULL,phone='',gender='unspecified',
@@ -6541,7 +6573,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     self.db.execute("UPDATE employees SET approval_employee_id=NULL WHERE approval_employee_id=?", (employee_id,))
                     self.db.execute("UPDATE departments SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
                     self.db.execute("UPDATE branches SET manager_employee_id=NULL,updated_at=? WHERE manager_employee_id=?", (stamp, employee_id))
-                    self.db.execute("UPDATE organization SET general_manager_employee_id=NULL,updated_at=? WHERE general_manager_employee_id=?", (stamp, employee_id))
+                    self.db.execute(
+                        """UPDATE organization
+                              SET general_manager_employee_id=CASE WHEN general_manager_employee_id=? THEN NULL ELSE general_manager_employee_id END,
+                                  invoice_approval_employee_id=CASE WHEN invoice_approval_employee_id=? THEN NULL ELSE invoice_approval_employee_id END,
+                                  updated_at=?
+                            WHERE general_manager_employee_id=? OR invoice_approval_employee_id=?""",
+                        (employee_id, employee_id, stamp, employee_id, employee_id),
+                    )
                     audit(self.db, user["id"], "employee.terminate", "employee", employee_id, {
                         "period_no": period_no, "termination_date": termination_date, "termination_type": termination_type,
                         "final_settlement_status": settlement_status, "final_settlement_amount": settlement_amount,
@@ -6593,7 +6632,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             allow_salary_override: bool = False,
         ) -> dict[str, Any]:
             result: dict[str, Any] = {}
-            scale_salary: float | None = None
             for key, max_len in (("employee_no", 40), ("full_name", 180)):
                 if not partial or key in data:
                     result[key] = require_text(data, key, max_len)
@@ -6640,8 +6678,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 result["job_grade_id"] = as_int(data["job_grade_id"], "job_grade_id", 1) if data["job_grade_id"] not in (None, "") else None
                 if result["job_grade_id"]:
                     grade = self.db.execute(
-                        """SELECT code,level_a_salary_cents,level_b_salary_cents,level_c_salary_cents,level_d_salary_cents
-                           FROM job_grades WHERE id=? AND active=1""",
+                        "SELECT code FROM job_grades WHERE id=? AND active=1",
                         (result["job_grade_id"],),
                     ).fetchone()
                     if not grade: raise APIError(422, "الدرجة الوظيفية غير موجودة أو غير نشطة.", "validation_error")
@@ -6650,7 +6687,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if selected_level not in JOB_GRADE_LEVELS:
                         raise APIError(422, "حرف الدرجة يجب أن يكون A أو B أو C أو D.", "validation_error", {"field": "job_grade_level"})
                     result["job_grade_level"] = selected_level
-                    scale_salary = round(int(grade[f"level_{selected_level.lower()}_salary_cents"] or 0) / 100, 2)
             elif "job_grade_level" in data or not partial:
                 selected_level = str(data.get("job_grade_level") or "A").strip().upper()
                 if selected_level not in JOB_GRADE_LEVELS:
@@ -6700,18 +6736,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 total = sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS) + sum(item["amount"] for item in manual)
                 if not (allow_salary_override and "salary" in data):
                     result["salary"] = round(total, 2)
-            if scale_salary is not None and scale_salary > 0 and not allow_salary_override:
-                # The salary scale is authoritative for the base salary.  The
-                # employee may still receive separate allowance components.
-                result["basic_salary"] = scale_salary
-                manual = normalize_manual_allowances(result.get("manual_allowances_json", []))
-                result["salary"] = round(
-                    scale_salary
-                    + sum(float(result.get(key) or 0) for key in SALARY_COMPONENT_FIELDS if key != "basic_salary")
-                    + sum(item["amount"] for item in manual),
-                    2,
-                )
-            elif "salary" in data and not any(key in data for key in SALARY_COMPONENT_FIELDS) and not (allow_salary_override and partial):
+            if "salary" in data and not any(key in data for key in SALARY_COMPONENT_FIELDS) and not (allow_salary_override and partial):
                 # Legacy callers can still set one gross value; it is treated
                 # as the basic salary so the new breakdown remains coherent.
                 result["basic_salary"] = result["salary"]
@@ -6965,18 +6990,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     raise APIError(422, "منصب المؤسسة غير صالح.", "validation_error", {"field": "institution_role"})
                 if not has_permission(self.db, user, "org.manage"):
                     raise APIError(403, "لا تملك صلاحية تعيين المدير العام.", "forbidden", {"permission": "org.manage"})
-            parse_data = data
-            if "job_grade_level" in data and "job_grade_id" not in data and existing_employee["job_grade_id"]:
-                # A level-only update still needs the employee's current grade
-                # so the authoritative salary scale can recalculate the base.
-                parse_data = dict(data) | {"job_grade_id": existing_employee["job_grade_id"]}
             explicit_gross_override = is_system_admin(user) and "salary" in data
             values = self.parse_employee(
-                parse_data,
+                data,
                 partial=True,
                 allow_salary_override=is_system_admin(user),
             )
-            salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json", "job_grade_id", "job_grade_level"))
+            salary_touched = "salary" in data or any(key in data for key in (*SALARY_COMPONENT_FIELDS, "manual_allowances", "manual_allowances_json"))
             if salary_touched:
                 merged_salary = {key: float(existing_employee[key] or 0) for key in SALARY_COMPONENT_FIELDS}
                 for key in SALARY_COMPONENT_FIELDS:
@@ -11518,15 +11538,35 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         # Employee purchase requests and their three-step approval workflow
         def finance_purchase_approver(self, user: dict[str, Any]) -> bool:
-            """Restrict final purchase approval to accounting job identities.
+            """Authorize the configured employee for final invoice approval.
 
-            The job title itself is the authorization source for this terminal
-            workflow step. Broad administrative or delegated permissions must
-            not let a non-accounting user issue the final financial decision.
+            The organization-level assignment is authoritative and grants this
+            one workflow responsibility without broadening the employee's role
+            or general permissions. Exact accounting titles remain a migration
+            fallback until an organization explicitly selects its approver.
             """
             employee_id = user.get("employee_id")
             if not employee_id:
                 return False
+            organization = self.db.execute(
+                "SELECT invoice_approval_employee_id FROM organization WHERE id=1"
+            ).fetchone()
+            configured_id = (
+                int(organization["invoice_approval_employee_id"])
+                if organization and organization["invoice_approval_employee_id"]
+                else None
+            )
+            if configured_id is not None:
+                if int(employee_id) != configured_id:
+                    return False
+                assigned = self.db.execute(
+                    """SELECT 1 FROM employees e
+                         JOIN users u ON u.employee_id=e.id
+                        WHERE e.id=? AND e.active=1 AND e.deleted_at IS NULL
+                          AND u.id=? AND u.active=1""",
+                    (configured_id, user["id"]),
+                ).fetchone()
+                return assigned is not None
             row = self.db.execute(
                 """SELECT e.job_title,jt.name AS job_title_name,
                           jt.name_ar AS job_title_ar,jt.name_en AS job_title_en
@@ -11791,7 +11831,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 elif fields["status"] == "finance_pending":
                     recipients = self.purchase_finance_recipient_ids(int(user["id"]))
                     if not recipients:
-                        raise APIError(409, "لا يوجد محاسب أو مسؤول حسابات نشط بحساب مستخدم لاعتماد طلب المشتريات نهائياً.", "purchase_finance_approver_missing")
+                        raise APIError(409, "لا يوجد مسؤول اعتماد فواتير نشط بحساب دخول فعال. حدده من إعدادات المؤسسة.", "purchase_finance_approver_missing")
                 else:
                     employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (row["employee_id"],)).fetchone()
                     recipients = [int(employee_user["id"])] if employee_user else []

@@ -4412,8 +4412,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "transport_allowance": 300, "profession_allowance": 0, "other_allowance": 0,
             "manual_allowances": [{"name": "بدل اتصال", "amount": 250.55}],
         }, expected=201)["employee"]
-        self.assertEqual(employee["salary_breakdown"]["basic_salary"], 5000)
-        self.assertEqual(employee["salary"], 6750.55)
+        self.assertEqual(employee["salary_breakdown"]["basic_salary"], 99999)
+        self.assertEqual(employee["salary"], 101749.55)
 
         gross_override_employee = hr.request("POST", "/api/employees", {
             "employee_no": f"GROSS-{suffix}", "full_name": "موظف إجمالي معتمد",
@@ -4487,8 +4487,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(filtered["metrics"]["salary_contract_total"], expected_total)
 
         level_only = hr.request("PATCH", f"/api/employees/{employee['id']}", {"job_grade_level": "C"})["employee"]
-        self.assertEqual(level_only["salary_breakdown"]["basic_salary"], 4500)
-        self.assertEqual(level_only["salary"], 6250.55)
+        self.assertEqual(level_only["salary_breakdown"]["basic_salary"], 99999)
+        self.assertEqual(level_only["salary"], 101749.55)
 
         run = hr.request("POST", "/api/payroll/runs", {"payroll_month": "2044-02"}, expected=201)["run"]
         self.assertNotIn(future_employee["id"], {row["employee_id"] for row in run["items"]})
@@ -5428,17 +5428,19 @@ class HRAPIEndToEndTests(unittest.TestCase):
         hr = self.client("hr@demo.ae", "HR@12345")
         admin = self.client("admin@demo.ae", "Admin@123")
         manager_employee_id = manager.request("GET", "/api/auth/me")["user"]["employee_id"]
-        stamp = hr_server.now_iso()
-        with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
-            title_id = db.execute(
-                """INSERT INTO job_titles(name,name_ar,name_en,active,created_at,updated_at)
-                   VALUES('مسؤول الحسابات','مسؤول الحسابات','Accounts Officer',1,?,?)""",
-                (stamp, stamp),
-            ).lastrowid
-            db.execute(
-                "UPDATE employees SET job_title='مسؤول الحسابات',job_title_id=?,updated_at=? WHERE id=?",
-                (title_id, stamp, manager_employee_id),
-            )
+        suffix = uuid.uuid4().hex[:8]
+        no_account = hr.request("POST", "/api/employees", {
+            "employee_no": f"NO-INV-{suffix}", "full_name": "موظف بلا حساب لاعتماد الفواتير",
+            "email": f"no-invoice-account-{suffix}@demo.ae", "hire_date": "2020-01-01",
+        }, expected=201)["employee"]
+        invalid_assignment = hr.request(
+            "PATCH", "/api/org", {"invoice_approval_employee_id": no_account["id"]}, expected=422,
+        )
+        self.assertEqual(invalid_assignment["code"], "invalid_invoice_approver")
+        organization = hr.request(
+            "PATCH", "/api/org", {"invoice_approval_employee_id": manager_employee_id},
+        )["organization"]
+        self.assertEqual(organization["invoice_approval_employee_id"], manager_employee_id)
         body = {
             "purchase_name": "مستلزمات تشغيل الفرع",
             "amount": 175.50,
@@ -5527,9 +5529,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("state.user.employee_id||adminOnly", app)
         self.assertIn("/api/purchases/requesters", app)
         self.assertIn("body.employee_id=Number(form.employee_id.value)", app)
-        self.assertIn("finance_pending:'عند المحاسب / مسؤول الحسابات'", app)
-        self.assertIn("المحاسب أو مسؤول الحسابات للاعتماد النهائي", index + app)
-        self.assertIn("'عند المحاسب / مسؤول الحسابات':'With Accountant / Accounts Officer'", i18n)
+        self.assertIn("finance_pending:'عند مسؤول اعتماد الفواتير'", app)
+        self.assertIn("مسؤول اعتماد الفواتير المحدد في إعدادات المؤسسة", index + app)
+        self.assertIn("'عند مسؤول اعتماد الفواتير':'With Invoice Approver'", i18n)
+        self.assertIn('name="invoice_approval_employee_id"', index)
         self.assertIn("'طلب مشتريات':'Purchase request'", i18n)
         self.assertIn("'الموظف صاحب الطلب':'Requesting employee'", i18n)
 
