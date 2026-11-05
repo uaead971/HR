@@ -312,7 +312,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.0&build=20261031-production-r23")
+        application_script = index.index("app.js?v=5.8.0&build=20261105-production-r24")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2378,6 +2378,18 @@ class HRAPIEndToEndTests(unittest.TestCase):
     def test_32_v49_job_goal_library_selection_custom_goals_and_management(self):
         hr = self.client("hr@demo.ae", "HR@12345")
         titles = hr.request("GET", "/api/job-titles")["items"]
+        seeded_sales_title = next(item for item in titles if item["name"] == "موظف مبيعات")
+        seeded_procurement_title = next(item for item in titles if item["name"] == "مسؤول المشتريات واللوجستيك")
+        self.assertEqual(seeded_sales_title["department_name"], "المبيعات")
+        self.assertEqual(seeded_procurement_title["department_name"], "المشتريات واللوجستك")
+        seeded_sales_goals = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={seeded_sales_title['id']}"
+        )
+        seeded_procurement_goals = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={seeded_procurement_title['id']}"
+        )
+        self.assertEqual((len(seeded_sales_goals["items"]), seeded_sales_goals["weight_total"]), (5, 100))
+        self.assertEqual((len(seeded_procurement_goals["items"]), seeded_procurement_goals["weight_total"]), (6, 100))
         operations_title = next(item for item in titles if item["name"] == "أخصائي عمليات")
         manager_id = next(item for item in hr.request("GET", "/api/employees")["items"] if item["employee_no"] == "EMP-1002")["id"]
         grade_id = hr.request("GET", "/api/job-grades")["items"][0]["id"]
@@ -2471,6 +2483,92 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(edited["default_weight"], 30)
         self.assertFalse(edited["active"])
 
+        # Goal libraries are assigned by both job title and department.  The
+        # sales profile mirrors the supplied annual sales evaluation form.
+        admin = self.client("admin@demo.ae", "Admin@123")
+        sales_department = admin.request(
+            "POST", "/api/departments", {"name": f"المبيعات {suffix}"}, expected=201
+        )["department"]
+        sales_title = hr.request(
+            "POST", "/api/job-titles",
+            {"name": f"موظف متجر {suffix}", "department_id": sales_department["id"]},
+            expected=201,
+        )["job_title"]
+        sales_library = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={sales_title['id']}&include_inactive=1"
+        )
+        self.assertEqual(sales_library["job_title"]["department_id"], sales_department["id"])
+        self.assertEqual(sales_library["job_title"]["department_name"], sales_department["name"])
+        self.assertEqual(
+            [item["title"] for item in sales_library["items"]],
+            [
+                "أداء المبيعات", "خدمة العملاء ورضا العملاء", "المعرفة بالمنتجات وطريقة عرضها",
+                "الالتزام بالحضور والمواعيد", "التعاون مع الفريق والالتزام بسياسات الشركة",
+            ],
+        )
+        self.assertEqual([item["default_weight"] for item in sales_library["items"]], [35, 25, 20, 10, 10])
+        self.assertEqual(sales_library["weight_total"], 100)
+        self.assertIn("تحقيق 100% فأكثر", sales_library["items"][0]["measure"])
+
+        # Moving an untouched system library to Sales refreshes it in place,
+        # while a library edited by HR remains untouched.
+        movable_title = hr.request(
+            "POST", "/api/job-titles", {"name": f"منسق متجر {suffix}"}, expected=201
+        )["job_title"]
+        before_move = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={movable_title['id']}&include_inactive=1"
+        )
+        original_ids = [item["id"] for item in before_move["items"]]
+        hr.request(
+            "PATCH", f"/api/job-titles/{movable_title['id']}",
+            {"department_id": sales_department["id"]},
+        )
+        after_move = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={movable_title['id']}&include_inactive=1"
+        )
+        self.assertEqual([item["id"] for item in after_move["items"]], original_ids)
+        self.assertEqual(after_move["items"][0]["title"], "أداء المبيعات")
+
+        hr.request(
+            "PATCH", f"/api/job-titles/{new_title['id']}",
+            {"department_id": sales_department["id"]},
+        )
+        customized_after_move = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={new_title['id']}&include_inactive=1"
+        )
+        self.assertEqual(customized_after_move["items"][0]["title"], "جودة الإنجاز المحدثة")
+        self.assertFalse(customized_after_move["items"][0]["active"])
+
+        procurement_department = admin.request(
+            "POST", "/api/departments", {"name": f"المشتريات واللوجستك {suffix}"}, expected=201
+        )["department"]
+        procurement_title = hr.request(
+            "POST", "/api/job-titles",
+            {"name": f"مسؤول التوريد {suffix}", "department_id": procurement_department["id"]},
+            expected=201,
+        )["job_title"]
+        procurement_library = hr.request(
+            "GET", f"/api/evaluation-goal-templates?job_title_id={procurement_title['id']}&include_inactive=1"
+        )
+        self.assertEqual(procurement_library["job_title"]["department_name"], procurement_department["name"])
+        self.assertEqual(
+            [item["title"] for item in procurement_library["items"]],
+            [
+                "الحصول على أفضل الأسعار وشروط التوريد",
+                "دقة ومتابعة أوامر الشراء ومواعيد التسليم",
+                "دقة والتزام مواعيد الشحن والتخليص الجمركي",
+                "إدارة علاقات الموردين وشركات الشحن والتفاوض",
+                "الالتزام بالحضور والمواعيد",
+                "التعاون مع الفريق والالتزام بسياسات الشركة",
+            ],
+        )
+        self.assertEqual(
+            [item["default_weight"] for item in procurement_library["items"]],
+            [20, 20, 25, 15, 10, 10],
+        )
+        self.assertEqual(procurement_library["weight_total"], 100)
+        self.assertIn("مخالفات جمركية", procurement_library["items"][2]["measure"])
+
         # A real V4.8-shaped evaluation_goals table must migrate before the
         # unique source-template index is created, while preserving old goals.
         with tempfile.TemporaryDirectory(prefix="hr-v49-migration-") as folder:
@@ -2517,6 +2615,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("كتابة هدف مخصص", index + app)
         self.assertIn("/api/evaluation-goal-templates", app)
         self.assertIn("data-add-all-goal-templates", app)
+        self.assertIn("title.department_name", app)
         self.assertIn("recommended-goal-grid", styles)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
@@ -2748,6 +2847,23 @@ class HRAPIEndToEndTests(unittest.TestCase):
         employee.request("POST", "/api/evaluation-cycles", {}, expected=403)
 
         today = date.today()
+        recent_hire_date = hr_server.add_calendar_months(today, -3)
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            recent_employee = db.execute(
+                """SELECT e.id,e.hire_date FROM employees e JOIN users u ON u.employee_id=e.id
+                     WHERE u.email='employee@demo.ae'"""
+            ).fetchone()
+            recent_employee_id = int(recent_employee["id"])
+            original_hire_date = recent_employee["hire_date"]
+            db.execute("UPDATE employees SET hire_date=? WHERE id=?", (recent_hire_date.isoformat(), recent_employee_id))
+            db.commit()
+
+        def restore_hire_date() -> None:
+            with contextlib.closing(hr_server.open_db(self.db_path)) as cleanup_db:
+                cleanup_db.execute("UPDATE employees SET hire_date=? WHERE id=?", (original_hire_date, recent_employee_id))
+                cleanup_db.commit()
+
+        self.addCleanup(restore_hire_date)
         cycle_body = {
             "year": 2188, "name": "دورة الحوكمة المهنية 2188",
             "period_start": (today - timedelta(days=180)).isoformat(),
@@ -2772,6 +2888,13 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(cycle["status"], "announced")
         self.assertEqual(cycle["counts"]["total"], created["preview"]["eligible"])
         self.assertEqual(len(cycle["recipients"]), created["preview"]["eligible"])
+        recent_recipient = next(item for item in cycle["recipients"] if item["employee_id"] == recent_employee_id)
+        self.assertEqual(recent_recipient["hire_date"], recent_hire_date.isoformat())
+        self.assertTrue(recent_recipient["under_six_months"])
+        self.assertEqual(
+            recent_recipient["six_month_completion_date"],
+            hr_server.add_calendar_months(recent_hire_date, 6).isoformat(),
+        )
         with contextlib.closing(sqlite3.connect(self.db_path)) as db:
             assigned = db.execute("SELECT COUNT(*) FROM evaluations WHERE cycle_id=?", (cycle_id,)).fetchone()[0]
             account_scope = db.execute(
@@ -3019,6 +3142,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         index = (root / "index.html").read_text(encoding="utf-8")
         app = (root / "app.js").read_text(encoding="utf-8")
+        i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
         schema = (root / "schema.sql").read_text(encoding="utf-8")
         for marker in ("evaluationCycleConsole", "evaluationCycleSelect", "evaluationAnnouncement", "goal_type", "progress_status", "evidence_note"):
@@ -3026,6 +3150,10 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("cycle-control-tower", styles)
         self.assertIn(".cycle-recipient-table{display:none}", styles)
         self.assertIn(".cycle-recipient-cards{display:grid", styles)
+        self.assertIn("data-cycle-select-all", app)
+        self.assertIn("cycle-employee-name ${item.under_six_months?'under-six-months':''}", app)
+        self.assertIn(".cycle-employee-name.under-six-months", styles)
+        self.assertIn("'تحديد الكل':'Select all'", i18n)
         self.assertIn("@media(max-width:720px)", styles)
         self.assertIn("@media(max-width:440px)", styles)
         self.assertIn("overflow-x:hidden", styles)
@@ -4544,7 +4672,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('"hr": set(ALL_PERMISSIONS)', server)
         self.assertIn("system_admin_account_protected", server)
 
-    def test_77_unassigned_employee_may_punch_at_any_active_branch(self):
+    def test_77_unassigned_employee_checks_in_at_active_branch_and_checks_out_anywhere(self):
         admin = self.client("admin@demo.ae", "Admin@123")
         suffix = uuid.uuid4().hex[:8]
         near_but_outside = admin.request("POST", "/api/branches", {
@@ -4555,11 +4683,6 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "name": f"فرع صالح {suffix}", "address": "موقع الاختبار الثاني",
             "latitude": 24.0015, "longitude": 54.0000, "radius_m": 200, "active": True,
         }, expected=201)["branch"]
-        checkout_branch = admin.request("POST", "/api/branches", {
-            "name": f"فرع خروج {suffix}", "address": "موقع الاختبار الثالث",
-            "latitude": 24.0100, "longitude": 54.0100, "radius_m": 120, "active": True,
-        }, expected=201)["branch"]
-
         unassigned = admin.request("POST", "/api/employees", {
             "employee_no": f"NOBR-{suffix}", "full_name": f"موظف بلا فرع {suffix}",
             "email": f"no-branch-{suffix}@demo.ae", "hire_date": "2025-01-01",
@@ -4576,15 +4699,43 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertEqual(check_in["branch"]["id"], valid_branch["id"])
         self.assertTrue(check_in["branch"]["unassigned_fallback"])
 
-        # With no fixed assignment, checkout may occur inside another active
-        # branch while the attendance row retains its original check-in branch.
+        # A field employee with no fixed branch may check out anywhere, even
+        # far outside every geofence.  The row keeps the check-in branch while
+        # the exact checkout coordinates, accuracy and server time are saved.
+        remote_latitude, remote_longitude = 22.500123, 52.400456
         check_out = worker.request("POST", "/api/attendance/punch", {
-            "action": "check_out", "latitude": checkout_branch["latitude"],
-            "longitude": checkout_branch["longitude"], "accuracy": 4,
+            "action": "check_out", "latitude": remote_latitude,
+            "longitude": remote_longitude, "accuracy": 4,
         })
-        self.assertEqual(check_out["branch"]["id"], checkout_branch["id"])
+        self.assertEqual(check_out["branch"]["id"], valid_branch["id"])
         self.assertTrue(check_out["branch"]["unassigned_fallback"])
+        self.assertTrue(check_out["checkout_anywhere"])
         self.assertEqual(check_out["attendance"]["branch_id"], valid_branch["id"])
+        self.assertEqual(check_out["attendance"]["check_out_lat"], remote_latitude)
+        self.assertEqual(check_out["attendance"]["check_out_lng"], remote_longitude)
+        self.assertEqual(check_out["attendance"]["check_out_accuracy"], 4)
+        self.assertIsNotNone(check_out["attendance"]["check_out_at"])
+        self.assertEqual(check_out["recorded_location"], {
+            "latitude": remote_latitude, "longitude": remote_longitude, "accuracy": 4.0,
+        })
+        self.assertGreater(check_out["attendance"]["check_out_distance_m"], valid_branch["radius_m"])
+        with sqlite3.connect(self.db_path) as db:
+            attempt = db.execute(
+                "SELECT branch_id,accepted,reason,latitude,longitude,created_at FROM attendance_attempts WHERE employee_id=? AND action='check_out' ORDER BY id DESC LIMIT 1",
+                (unassigned["id"],),
+            ).fetchone()
+        self.assertEqual(attempt[:3], (valid_branch["id"], 1, "unassigned_remote_checkout"))
+        self.assertEqual(attempt[3:5], (remote_latitude, remote_longitude))
+        self.assertTrue(attempt[5])
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn("function attendanceCheckoutLocation(row)", app)
+        self.assertIn("data.checkout_anywhere", app)
+        self.assertIn("<th>موقع الخروج</th>", index)
+        self.assertIn("'موقع الخروج':'Check-out location'", translations)
+        self.assertIn("'تم تسجيل الخروج وحفظ الموقع والوقت':'Check-out recorded with location and time saved.'", translations)
 
         outside = worker.request("POST", "/api/attendance/punch", {
             "action": "check_in", "latitude": 0.0, "longitude": 0.0, "accuracy": 4,
@@ -4700,7 +4851,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261031-production-r23", index)
+        self.assertIn("build=20261105-production-r24", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5240,7 +5391,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261031-production-r23", index)
+        self.assertIn("build=20261105-production-r24", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")

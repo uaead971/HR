@@ -196,6 +196,84 @@ GENERIC_JOB_GOALS = (
     ("التطوير والتحسين المستمر", "تطوير المهارات واقتراح تحسينات قابلة للتطبيق في نطاق العمل.", "إتمام خطة التطوير وعدد التحسينات المنفذة", 15),
 )
 
+# Approved sales-employee criteria from the annual evaluation form supplied by
+# the organization.  The weights and 1-10 scoring bands intentionally mirror
+# the source form so the library can be copied into an evaluation as-is.
+SALES_EMPLOYEE_GOALS = (
+    (
+        "أداء المبيعات",
+        "يقيس مدى تحقيق الموظف لأهداف المبيعات الشهرية أو السنوية المحددة، بمقارنة المبيعات الفعلية بالأهداف المقررة.",
+        "9-10: تحقيق 100% فأكثر؛ 7-8: تحقيق 80-99%؛ 5-6: تحقيق 60-79%؛ 3-4: تحقيق 40-59%؛ 1-2: أقل من 40%.",
+        35,
+    ),
+    (
+        "خدمة العملاء ورضا العملاء",
+        "يقيس مستوى رضا العملاء عن الخدمة المقدمة من الموظف من خلال استطلاعات الرضا وعدد الشكاوى والملاحظات المباشرة.",
+        "9-10: ممتاز بلا شكاوى؛ 7-8: جيد جداً وشكاوى نادرة؛ 5-6: جيد مع بعض الشكاوى؛ 3-4: شكاوى متكررة؛ 1-2: شكاوى مستمرة وسلبية.",
+        25,
+    ),
+    (
+        "المعرفة بالمنتجات وطريقة عرضها",
+        "يقيس مدى إلمام الموظف بتفاصيل المنتجات وقدرته على شرح مزاياها للعملاء بوضوح.",
+        "9-10: معرفة شاملة وممتازة؛ 7-8: معرفة جيدة جداً بمعظم المنتجات؛ 5-6: معرفة جيدة بالمنتجات الأساسية؛ 3-4: معرفة محدودة؛ 1-2: معرفة ضعيفة جداً.",
+        20,
+    ),
+    (
+        "الالتزام بالحضور والمواعيد",
+        "يقيس مدى التزام الموظف بمواعيد العمل والحضور والانصراف.",
+        "9-10: لا تأخير أو غياب؛ 7-8: تأخير أو غياب نادر؛ 5-6: بعض حالات التأخير؛ 3-4: تأخير أو غياب متكرر؛ 1-2: تأخير أو غياب مستمر.",
+        10,
+    ),
+    (
+        "التعاون مع الفريق والالتزام بسياسات الشركة",
+        "يقيس مدى تعاون الموظف مع زملائه والتزامه بالسياسات واللوائح الداخلية للشركة.",
+        "9-10: تعاون ممتاز والتزام كامل؛ 7-8: تعاون جيد جداً والتزام عالٍ؛ 5-6: تعاون جيد والتزام عام؛ 3-4: تعاون متوسط مع مخالفات بسيطة؛ 1-2: تعاون ضعيف ومخالفات متكررة.",
+        10,
+    ),
+)
+
+# Approved procurement and logistics officer criteria from the organization's
+# annual evaluation form.  Department and title matching accepts the common
+# Arabic spellings for logistics as well as English reference names.
+PROCUREMENT_LOGISTICS_GOALS = (
+    (
+        "الحصول على أفضل الأسعار وشروط التوريد",
+        "يقيس قدرة الموظف على التفاوض للحصول على أفضل الأسعار وشروط الدفع والتوريد مقارنة بالميزانية المعتمدة والسوق.",
+        "9-10: وفورات 15% فأكثر عن الميزانية؛ 7-8: وفورات 10-14%؛ 5-6: وفورات 5-9%؛ 3-4: وفورات أقل من 5%؛ 1-2: دون وفورات أو مع تجاوز الميزانية.",
+        20,
+    ),
+    (
+        "دقة ومتابعة أوامر الشراء ومواعيد التسليم",
+        "يقيس دقة إعداد أوامر الشراء ومتابعتها لضمان التسليم في الموعد المحدد وبالمواصفات الصحيحة.",
+        "9-10: جميع الطلبات صحيحة وفي الموعد؛ 7-8: أخطاء أو تأخيرات نادرة؛ 5-6: بعض الأخطاء أو التأخيرات البسيطة؛ 3-4: أخطاء أو تأخيرات متكررة؛ 1-2: أخطاء وتأخيرات مستمرة.",
+        20,
+    ),
+    (
+        "دقة والتزام مواعيد الشحن والتخليص الجمركي",
+        "يقيس الالتزام بمواعيد الشحن وإجراءات التخليص الجمركي وسلامة المستندات المطلوبة لإتمام العمليات دون تأخير.",
+        "9-10: لا تأخير في الشحن أو التخليص؛ 7-8: تأخير نادر جداً؛ 5-6: بعض حالات التأخير البسيطة؛ 3-4: تأخير متكرر يؤثر في العمل؛ 1-2: تأخيرات مستمرة أو مخالفات جمركية متكررة.",
+        25,
+    ),
+    (
+        "إدارة علاقات الموردين وشركات الشحن والتفاوض",
+        "يقيس مهارة الموظف في بناء علاقات فعالة مع الموردين وشركات الشحن وقدرته على التفاوض لتحقيق أفضل الشروط.",
+        "9-10: علاقات ممتازة وتفاوض يحقق أفضل الشروط باستمرار؛ 7-8: علاقات جيدة جداً وتفاوض فعال؛ 5-6: علاقات جيدة وتفاوض مقبول؛ 3-4: علاقات متوسطة أو تفاوض ضعيف؛ 1-2: علاقات ضعيفة ومشاكل متكررة.",
+        15,
+    ),
+    (
+        "الالتزام بالحضور والمواعيد",
+        "يقيس مدى التزام الموظف بمواعيد العمل والحضور والانصراف.",
+        "9-10: لا تأخير أو غياب؛ 7-8: تأخير أو غياب نادر؛ 5-6: بعض حالات التأخير؛ 3-4: تأخير أو غياب متكرر؛ 1-2: تأخير أو غياب مستمر.",
+        10,
+    ),
+    (
+        "التعاون مع الفريق والالتزام بسياسات الشركة",
+        "يقيس مدى تعاون الموظف مع زملائه والأقسام الأخرى والتزامه بالسياسات واللوائح الداخلية للشركة.",
+        "9-10: تعاون ممتاز والتزام كامل؛ 7-8: تعاون جيد جداً والتزام عالٍ؛ 5-6: تعاون جيد والتزام عام؛ 3-4: تعاون متوسط مع مخالفات بسيطة؛ 1-2: تعاون ضعيف ومخالفات متكررة.",
+        10,
+    ),
+)
+
 SPECIALIZED_JOB_GOALS = {
     "أخصائي عمليات": (
         ("دقة تنفيذ العمليات والالتزام بالإجراءات", "تنفيذ المعاملات التشغيلية وفق الإجراءات ومستويات الخدمة المعتمدة.", "نسبة المعاملات المنجزة دون أخطاء", 30),
@@ -228,8 +306,79 @@ SPECIALIZED_JOB_GOALS = {
 }
 
 
-def seed_job_goal_templates(db: sqlite3.Connection, job_title_id: int, job_title_name: str, stamp: str) -> None:
-    templates = SPECIALIZED_JOB_GOALS.get(job_title_name, GENERIC_JOB_GOALS)
+def job_goal_templates(job_title_name: str, department_name: str | None = None) -> tuple[tuple[str, str, str, int], ...]:
+    """Choose approved goals by exact role first, then by department context."""
+    if job_title_name in SPECIALIZED_JOB_GOALS:
+        return SPECIALIZED_JOB_GOALS[job_title_name]
+    title = job_title_name.strip().lower()
+    department = (department_name or "").strip().lower()
+    sales_context = "مبيعات" in title or "مبيعات" in department or "sales" in title or "sales" in department
+    procurement_terms = ("مشتريات", "شراء", "لوجست", "procurement", "purchas", "logistic")
+    procurement_context = any(term in value for term in procurement_terms for value in (title, department))
+    leadership_title = any(word in title for word in ("مدير", "مديرة", "رئيس", "رئيسة", "مشرف", "مشرفة", "قائد", "قائدة"))
+    if sales_context and not leadership_title:
+        return SALES_EMPLOYEE_GOALS
+    if procurement_context and not leadership_title:
+        return PROCUREMENT_LOGISTICS_GOALS
+    return GENERIC_JOB_GOALS
+
+
+def goal_rows_match_profile(rows: list[sqlite3.Row], profile: tuple[tuple[str, str, str, int], ...]) -> bool:
+    if len(rows) != len(profile):
+        return False
+    for sort_order, (row, expected) in enumerate(zip(rows, profile), 1):
+        title, description, measure, weight = expected
+        if (
+            row["title"] != title
+            or row["description"] != description
+            or row["measure"] != measure
+            or abs(float(row["default_weight"]) - float(weight)) > 0.000001
+            or int(row["sort_order"]) != sort_order
+            or not bool(row["active"])
+        ):
+            return False
+    return True
+
+
+def seed_job_goal_templates(
+    db: sqlite3.Connection,
+    job_title_id: int,
+    job_title_name: str,
+    stamp: str,
+    department_name: str | None = None,
+) -> None:
+    templates = job_goal_templates(job_title_name, department_name)
+    existing = db.execute(
+        "SELECT * FROM evaluation_goal_templates WHERE job_title_id=? ORDER BY sort_order,id",
+        (job_title_id,),
+    ).fetchall()
+    if existing:
+        if goal_rows_match_profile(existing, templates):
+            return
+        built_in_profiles = (
+            GENERIC_JOB_GOALS, SALES_EMPLOYEE_GOALS, PROCUREMENT_LOGISTICS_GOALS,
+            *SPECIALIZED_JOB_GOALS.values(),
+        )
+        if not any(goal_rows_match_profile(existing, profile) for profile in built_in_profiles):
+            # HR may have customized, disabled or added goals.  Never overwrite
+            # that approved library merely because the title or department moved.
+            return
+        # Preserve template ids already referenced by historical evaluations.
+        # Temporary unique titles avoid collisions while profiles are replaced.
+        for row in existing:
+            db.execute(
+                "UPDATE evaluation_goal_templates SET title=?,updated_at=? WHERE id=?",
+                (f"__system_goal_{job_title_id}_{row['id']}__", stamp, row["id"]),
+            )
+        for sort_order, (row, template) in enumerate(zip(existing, templates), 1):
+            title, description, measure, weight = template
+            db.execute(
+                """UPDATE evaluation_goal_templates
+                      SET title=?,description=?,measure=?,default_weight=?,sort_order=?,active=1,updated_at=?
+                    WHERE id=?""",
+                (title, description, measure, weight, sort_order, stamp, row["id"]),
+            )
+        return
     for sort_order, (title, description, measure, weight) in enumerate(templates, 1):
         db.execute(
             """INSERT OR IGNORE INTO evaluation_goal_templates
@@ -2506,7 +2655,10 @@ def initialize_database(db_path: Path) -> None:
                      WHERE id=1 AND legal_name IN ('مجموعة أفق المؤسسية ذ.م.م','مجموعة أفق المؤسسية','منصة موارد','موارد')""",
                 (stamp,),
             )
-            for name in ("الإدارة العامة", "الموارد البشرية", "العمليات", "المالية"):
+            for name in (
+                "الإدارة العامة", "الموارد البشرية", "العمليات", "المالية",
+                "المبيعات", "المشتريات واللوجستك",
+            ):
                 db.execute("INSERT OR IGNORE INTO departments(name,created_at) VALUES(?,?)", (name, stamp))
             for code, name, level_a, level_b, level_c, level_d in JOB_GRADE_SALARY_SCALE:
                 salaries = (level_a * 100, level_b * 100, level_c * 100, level_d * 100)
@@ -2524,6 +2676,16 @@ def initialize_database(db_path: Path) -> None:
             hr_dept = db.execute("SELECT id FROM departments WHERE name='الموارد البشرية'").fetchone()[0]
             ops_dept = db.execute("SELECT id FROM departments WHERE name='العمليات'").fetchone()[0]
             gm_dept = db.execute("SELECT id FROM departments WHERE name='الإدارة العامة'").fetchone()[0]
+            sales_dept = db.execute("SELECT id FROM departments WHERE name='المبيعات'").fetchone()[0]
+            procurement_dept = db.execute("SELECT id FROM departments WHERE name='المشتريات واللوجستك'").fetchone()[0]
+            for title, department_id in (
+                ("موظف مبيعات", sales_dept),
+                ("مسؤول المشتريات واللوجستيك", procurement_dept),
+            ):
+                db.execute(
+                    "INSERT OR IGNORE INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)",
+                    (title, department_id, stamp, stamp),
+                )
             db.execute(
                 "INSERT OR IGNORE INTO branches(name,address,latitude,longitude,radius_m,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                 ("المقر الرئيسي", "دبي، الإمارات العربية المتحدة", 25.204849, 55.270783, 250, 1, stamp, stamp),
@@ -2553,8 +2715,17 @@ def initialize_database(db_path: Path) -> None:
                 title_id = db.execute("SELECT id FROM job_titles WHERE name=?", (title,)).fetchone()[0]
                 grade_id = db.execute("SELECT id FROM job_grades WHERE code=?", (grade,)).fetchone()[0]
                 db.execute("UPDATE employees SET job_title_id=COALESCE(job_title_id,?),job_grade_id=COALESCE(job_grade_id,?) WHERE employee_no=?", (title_id, grade_id, employee_no))
-            for title_row in db.execute("SELECT id,name FROM job_titles").fetchall():
-                seed_job_goal_templates(db, int(title_row["id"]), str(title_row["name"]), stamp)
+            for title_row in db.execute(
+                """SELECT jt.id,jt.name,d.name AS department_name
+                     FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id"""
+            ).fetchall():
+                seed_job_goal_templates(
+                    db,
+                    int(title_row["id"]),
+                    str(title_row["name"]),
+                    stamp,
+                    str(title_row["department_name"]) if title_row["department_name"] else None,
+                )
             if employee_ids:
                 gm_emp = employee_ids["EMP-1001"]
                 manager_emp = employee_ids["EMP-1002"]
@@ -5003,7 +5174,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     cur=self.db.execute("INSERT INTO job_titles(name,department_id,created_at,updated_at) VALUES(?,?,?,?)",(name,department_id,stamp,stamp))
-                    seed_job_goal_templates(self.db, int(cur.lastrowid), name, stamp)
+                    department = self.db.execute("SELECT name FROM departments WHERE id=?", (department_id,)).fetchone() if department_id else None
+                    seed_job_goal_templates(self.db, int(cur.lastrowid), name, stamp, str(department["name"]) if department else None)
                     audit(self.db,user["id"],"job_title.create","job_title",cur.lastrowid)
             except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(201,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(cur.lastrowid,)).fetchone())})
@@ -5020,6 +5192,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     self.db.execute("UPDATE job_titles SET "+",".join(f"{k}=?" for k in values)+" WHERE id=?",(*values.values(),title_id))
+                    if "name" in values or "department_id" in values:
+                        updated = self.db.execute(
+                            """SELECT jt.name,d.name AS department_name
+                                 FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id
+                                WHERE jt.id=?""",
+                            (title_id,),
+                        ).fetchone()
+                        seed_job_goal_templates(
+                            self.db,
+                            title_id,
+                            str(updated["name"]),
+                            str(values["updated_at"]),
+                            str(updated["department_name"]) if updated["department_name"] else None,
+                        )
                     audit(self.db,user["id"],"job_title.update","job_title",title_id,values)
             except sqlite3.IntegrityError as exc: raise APIError(409,"المسمى مستخدم.","duplicate_reference") from exc
             self.send_json(200,{"job_title":dict(self.db.execute("SELECT * FROM job_titles WHERE id=?",(title_id,)).fetchone())})
@@ -7557,50 +7743,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not employee or not bool(employee["active"]):
                 raise APIError(403, "ملف الموظف غير نشط.", "inactive_employee")
             unassigned_branch_fallback = employee["branch_id"] is None
-            branch = None
-            distance = 0.0
-            if employee["branch_id"]:
-                branch = self.db.execute("SELECT * FROM branches WHERE id=?", (employee["branch_id"],)).fetchone()
-                if branch is not None and bool(branch["active"]):
-                    distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
-            else:
-                # An employee without a branch assignment may attend from any
-                # active company branch.  The same geofence validation remains
-                # mandatory; we select the nearest active branch so overlapping
-                # geofences and rejection messages stay deterministic.
-                active_branches = self.db.execute("SELECT * FROM branches WHERE active=1 ORDER BY id").fetchall()
-                if active_branches:
-                    measured = [
-                        (haversine_m(latitude, longitude, candidate["latitude"], candidate["longitude"]), candidate)
-                        for candidate in active_branches
-                    ]
-                    containing = [item for item in measured if item[0] <= item[1]["radius_m"]]
-                    distance, branch = min(containing or measured, key=lambda item: item[0])
-            if branch is None or not bool(branch["active"]):
-                with self.db:
-                    self.db.execute("INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,accepted,reason,created_at) VALUES(?,?,?,?,?,?,0,?,?)", (employee_id, employee["branch_id"], action, latitude, longitude, accuracy, "no_active_branch", now_iso()))
-                message = "لا توجد فروع نشطة متاحة لتسجيل الحضور. راجع الموارد البشرية." if unassigned_branch_fallback else "لا يوجد فرع نشط مرتبط بملفك. راجع الموارد البشرية."
-                raise APIError(403, message, "no_active_branch")
-            inside = distance <= branch["radius_m"]
             punch_time = local_now()
             stamp = punch_time.isoformat(timespec="seconds")
-            with self.db:
-                self.db.execute(
-                    "INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,distance_m,accepted,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (employee_id, branch["id"], action, latitude, longitude, accuracy, round(distance, 2), int(inside), None if inside else "outside_geofence", stamp),
-                )
-            if not inside:
-                message = (
-                    f"أنت خارج نطاق جميع الفروع النشطة. أقرب فرع «{branch['name']}» يبعد {round(distance)} م، والنطاق المسموح {branch['radius_m']} م."
-                    if unassigned_branch_fallback
-                    else f"أنت خارج نطاق فرع «{branch['name']}». المسافة الحالية {round(distance)} م، والنطاق المطلوب {branch['radius_m']} م."
-                )
-                raise APIError(
-                    403,
-                    message,
-                    "outside_geofence",
-                    {"distance_m": round(distance, 1), "radius_m": branch["radius_m"], "branch": branch["name"], "unassigned_branch_fallback": unassigned_branch_fallback},
-                )
             work_day = punch_time.date()
             work_date = work_day.isoformat()
             current = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, work_date)).fetchone()
@@ -7620,6 +7764,66 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         if checked_in_at <= punch_time <= expected_end + timedelta(hours=12):
                             current = previous
                             work_date = previous_day.isoformat()
+
+            # Mobile employees with no fixed branch must still start their day
+            # inside an active branch.  After a valid check-in, however, they
+            # may finish field work anywhere; the original attendance branch is
+            # retained and the exact checkout coordinates and time are stored.
+            checkout_anywhere = bool(
+                unassigned_branch_fallback
+                and action == "check_out"
+                and current
+                and current["check_in_at"]
+            )
+            branch = None
+            distance = 0.0
+            if checkout_anywhere:
+                branch = self.db.execute("SELECT * FROM branches WHERE id=?", (current["branch_id"],)).fetchone()
+                if branch is not None:
+                    distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
+            elif employee["branch_id"]:
+                branch = self.db.execute("SELECT * FROM branches WHERE id=?", (employee["branch_id"],)).fetchone()
+                if branch is not None and bool(branch["active"]):
+                    distance = haversine_m(latitude, longitude, branch["latitude"], branch["longitude"])
+            else:
+                # An employee without a branch assignment may attend from any
+                # active company branch.  The same geofence validation remains
+                # mandatory; we select the nearest active branch so overlapping
+                # geofences and rejection messages stay deterministic.
+                active_branches = self.db.execute("SELECT * FROM branches WHERE active=1 ORDER BY id").fetchall()
+                if active_branches:
+                    measured = [
+                        (haversine_m(latitude, longitude, candidate["latitude"], candidate["longitude"]), candidate)
+                        for candidate in active_branches
+                    ]
+                    containing = [item for item in measured if item[0] <= item[1]["radius_m"]]
+                    distance, branch = min(containing or measured, key=lambda item: item[0])
+            if branch is None or (not checkout_anywhere and not bool(branch["active"])):
+                with self.db:
+                    self.db.execute("INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,accepted,reason,created_at) VALUES(?,?,?,?,?,?,0,?,?)", (employee_id, employee["branch_id"], action, latitude, longitude, accuracy, "no_active_branch", now_iso()))
+                message = "لا توجد فروع نشطة متاحة لتسجيل الحضور. راجع الموارد البشرية." if unassigned_branch_fallback else "لا يوجد فرع نشط مرتبط بملفك. راجع الموارد البشرية."
+                raise APIError(403, message, "no_active_branch")
+            inside = checkout_anywhere or distance <= branch["radius_m"]
+            with self.db:
+                self.db.execute(
+                    "INSERT INTO attendance_attempts(employee_id,branch_id,action,latitude,longitude,accuracy,distance_m,accepted,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        employee_id, branch["id"], action, latitude, longitude, accuracy, round(distance, 2), int(inside),
+                        "unassigned_remote_checkout" if checkout_anywhere else None if inside else "outside_geofence", stamp,
+                    ),
+                )
+            if not inside:
+                message = (
+                    f"أنت خارج نطاق جميع الفروع النشطة. أقرب فرع «{branch['name']}» يبعد {round(distance)} م، والنطاق المسموح {branch['radius_m']} م."
+                    if unassigned_branch_fallback
+                    else f"أنت خارج نطاق فرع «{branch['name']}». المسافة الحالية {round(distance)} م، والنطاق المطلوب {branch['radius_m']} م."
+                )
+                raise APIError(
+                    403,
+                    message,
+                    "outside_geofence",
+                    {"distance_m": round(distance, 1), "radius_m": branch["radius_m"], "branch": branch["name"], "unassigned_branch_fallback": unassigned_branch_fallback},
+                )
             with self.db:
                 if action == "check_in":
                     if current and current["check_in_at"]:
@@ -7634,14 +7838,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if current["check_out_at"]:
                         raise APIError(409, "تم تسجيل الخروج لهذا اليوم بالفعل.", "already_checked_out")
                     self.db.execute("UPDATE attendance SET check_out_at=?,check_out_lat=?,check_out_lng=?,check_out_accuracy=?,check_out_distance_m=?,updated_at=? WHERE id=?", (stamp, latitude, longitude, accuracy, round(distance, 2), stamp, current["id"]))
-                audit(self.db, user["id"], f"attendance.{action}", "employee", employee_id, {"branch_id": branch["id"], "distance_m": round(distance, 2), "unassigned_branch_fallback": unassigned_branch_fallback})
+                audit(self.db, user["id"], f"attendance.{action}", "employee", employee_id, {
+                    "branch_id": branch["id"], "distance_m": round(distance, 2),
+                    "unassigned_branch_fallback": unassigned_branch_fallback,
+                    "checkout_anywhere": checkout_anywhere,
+                })
             saved = self.db.execute("SELECT * FROM attendance WHERE employee_id=? AND work_date=?", (employee_id, work_date)).fetchone()
             shift = self.shift_for_employee(employee_id, date.fromisoformat(work_date))
             overtime = self.db.execute("SELECT COALESCE(SUM(duration_minutes),0) FROM overtime_requests WHERE employee_id=? AND work_date=? AND status='approved'", (employee_id, work_date)).fetchone()[0]
             relief = self.attendance_relief_for_day(employee_id, date.fromisoformat(work_date))
             with self.db:
                 self.ensure_lateness_warning(employee_id, int(user["id"]))
-            self.send_json(200, {"attendance": self.attendance_metrics(saved, shift, overtime, relief["permission_minutes"], relief["emergency_excused"]), "distance_m": round(distance, 1), "branch": {"id": int(branch["id"]), "name": branch["name"], "unassigned_fallback": unassigned_branch_fallback}, "monthly_lateness": self.monthly_lateness_summary(employee_id, work_date[:7])})
+            self.send_json(200, {
+                "attendance": self.attendance_metrics(saved, shift, overtime, relief["permission_minutes"], relief["emergency_excused"]),
+                "distance_m": round(distance, 1),
+                "branch": {"id": int(branch["id"]), "name": branch["name"], "unassigned_fallback": unassigned_branch_fallback},
+                "checkout_anywhere": checkout_anywhere,
+                "recorded_location": {"latitude": latitude, "longitude": longitude, "accuracy": accuracy},
+                "monthly_lateness": self.monthly_lateness_summary(employee_id, work_date[:7]),
+            })
 
         def api_attendance_daily(self) -> None:
             user = self.current_user(True)
@@ -9084,7 +9299,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 job_title_id = int(employee["job_title_id"])
                 if requested is not None and requested != job_title_id:
                     raise APIError(403, "لا يمكنك عرض أهداف مسمى وظيفي آخر.", "forbidden")
-            title = self.db.execute("SELECT id,name,active FROM job_titles WHERE id=?", (job_title_id,)).fetchone()
+            title = self.db.execute(
+                """SELECT jt.id,jt.name,jt.active,jt.department_id,d.name AS department_name
+                     FROM job_titles jt LEFT JOIN departments d ON d.id=jt.department_id
+                    WHERE jt.id=?""",
+                (job_title_id,),
+            ).fetchone()
             if title is None:
                 raise APIError(404, "المسمى الوظيفي غير موجود.", "not_found")
             return user, title
@@ -9097,7 +9317,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 sql += " AND active=1"
             rows = self.db.execute(sql + " ORDER BY sort_order,id", (title["id"],)).fetchall()
             self.send_json(200, {
-                "job_title": {"id": title["id"], "name": title["name"], "active": bool(title["active"])},
+                "job_title": {
+                    "id": title["id"], "name": title["name"], "active": bool(title["active"]),
+                    "department_id": title["department_id"], "department_name": title["department_name"],
+                },
                 "items": [dict(row) | {"active": bool(row["active"])} for row in rows],
                 "weight_total": round(sum(float(row["default_weight"]) for row in rows if bool(row["active"])), 2),
                 "can_manage": has_permission(self.db, user, "reference.manage"),
@@ -9554,7 +9777,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 recipients = []
                 rows = self.db.execute(
                     """SELECT ev.id AS evaluation_id,ev.status,ev.submitted_late,ev.manager_employee_id,
-                              emp.id AS employee_id,emp.full_name,emp.employee_no,mgr.full_name AS manager_name
+                              emp.id AS employee_id,emp.full_name,emp.employee_no,emp.hire_date,
+                              mgr.full_name AS manager_name
                          FROM evaluations ev JOIN employees emp ON emp.id=ev.employee_id
                          LEFT JOIN employees mgr ON mgr.id=ev.manager_employee_id
                         WHERE ev.cycle_id=? ORDER BY emp.full_name""",
@@ -9562,6 +9786,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 ).fetchall()
                 for row in rows:
                     item = dict(row)
+                    hire_date = parse_date(row["hire_date"], "hire_date") if row["hire_date"] else None
+                    six_month_completion = add_calendar_months(hire_date, 6) if hire_date else None
+                    item["under_six_months"] = bool(six_month_completion and today < six_month_completion)
+                    item["six_month_completion_date"] = six_month_completion.isoformat() if six_month_completion else None
                     item["due_state"] = "missing_manager" if row["manager_employee_id"] is None else "late" if (bool(row["submitted_late"]) or (row["status"] == "draft" and today > due)) else "on_track"
                     item["submitted_late"] = bool(row["submitted_late"])
                     recipients.append(item)

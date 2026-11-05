@@ -219,6 +219,12 @@
     'إضافة وتعديل وتعطيل أنواع الإجازات متاح لحامل الصلاحية، وتبقى الطلبات وسجل الاعتمادات محفوظة.':'Authorized users can add, edit, or disable leave types while requests and approval history remain preserved.',
     'لا تملك صلاحية إدارة الرسائل الداخلية.':'You do not have permission to manage internal messages.','تعديل وإخفاء الإشعارات المرسلة':'Edit and hide sent notifications',
     'إدارة أنواع الإجازات وسياسة التقويم':'Manage leave types and calendar policy','إضافة وتعديل أرصدة الموظفين':'Add and edit employee leave balances',
+    'جارٍ تحديد الموقع…':'Getting location…','جارٍ الحصول على إحداثيات دقيقة والتحقق من سياسة موقع الحضور…':'Getting precise coordinates and checking the attendance location policy…','جارٍ التحقق من سياسة الموقع…':'Checking location policy…',
+    'تم تسجيل الدخول':'Check-in recorded','تم تسجيل الانصراف':'Check-out recorded','تم تسجيل الخروج الميداني':'Field check-out recorded','لم يتم قبول التسجيل':'Attendance record was not accepted',
+    'تم تسجيل الدخول داخل النطاق بنجاح':'Check-in recorded successfully within the geofence.','تم تسجيل الخروج داخل النطاق بنجاح':'Check-out recorded successfully within the geofence.','تم تسجيل الخروج وحفظ الموقع والوقت':'Check-out recorded with location and time saved.',
+    'تم تسجيل الخروج الساعة {time} وحفظ الموقع الجغرافي ({latitude}, {longitude}).':'Check-out recorded at {time}; location saved ({latitude}, {longitude}).',
+    'المسافة الحالية {distance} م، والمسموح {radius} م.':'Current distance is {distance} m; the allowed radius is {radius} m.',
+    'أنت خارج النطاق الجغرافي المسموح لتسجيل الحضور.':'You are outside the permitted attendance geofence.','لا يوجد فرع نشط متاح لتسجيل الحضور.':'No active branch is available for attendance.','تم تسجيل الدخول لهذا اليوم بالفعل.':'Check-in has already been recorded for today.','يجب تسجيل الدخول قبل تسجيل الخروج.':'Check in before checking out.','تم تسجيل الخروج لهذا اليوم بالفعل.':'Check-out has already been recorded for today.','ملف الموظف غير نشط.':'The employee profile is inactive.',
     'تم قبول الموقع داخل نطاق فرع «{branch}» على بعد {distance} م؛ ملفك غير مرتبط بفرع محدد.':'Location accepted within the “{branch}” branch geofence, {distance} m away; your profile is not assigned to a specific branch.',
     'تم قبول الموقع داخل نطاق فرع «{branch}» على بعد {distance} م.':'Location accepted within the “{branch}” branch geofence, {distance} m away.'
   });
@@ -431,6 +437,33 @@
     'حدث خطأ غير متوقع.':'An unexpected error occurred.'
   });
 
+  Object.assign(english, {
+    'يحتاج متابعة':'Needs attention','لا توجد رسائل ضمن هذا التصنيف.':'No messages in this category.',
+    'ظاهرة':'Visible','مخفية عن الجميع':'Hidden from everyone','إخفاء للجميع':'Hide for everyone','لا توجد رسائل مرسلة.':'No sent messages.',
+    'لا توجد حملات بريدية بعد.':'No email campaigns yet.','المصدر: قاعدة بيانات الموظفين والأقسام وحسابات المستخدمين':'Source: employee, department and user-account records',
+    'السلطة الأعلى · المدير العام':'Highest authority · General Manager','لم يحدد رئيس للقسم.':'No department head is assigned.','لم يتم تعيين رئيس للقسم.':'No department head has been assigned.',
+    'لا يوجد موظفون أسفل رئيس القسم.':'No employees report under the department head.','يتولى مسار الاعتماد الإداري للموظفين غير المرتبطين بمدير مباشر.':'Handles the administrative approval path for employees without a direct manager.',
+    'لا توجد أقسام تطابق التصفية.':'No departments match the filters.','لا توجد نتائج تطابق عوامل التصفية.':'No results match the filters.','لا يوجد مستوى أعلى':'No higher level',
+    'نطاق':'Geofence','بلا اتصال · الإدخال اليدوي متاح':'Offline · manual entry available','معتمدة فقط':'Approved only','ضمن الفترة':'Within the period','الحضور':'Attendance','الإثنين':'Monday',
+    'لا توجد طلبات إجازة.':'No leave requests.','لا توجد طلبات بيع رصيد.':'No leave-balance sale requests.','لا توجد طلبات عمل إضافي.':'No overtime requests.',
+    'لا توجد طلبات شهادة راتب.':'No salary-certificate requests.','لا يوجد سجل إصدار حتى الآن.':'No issuance history yet.','لا توجد طلبات سلفة.':'No advance requests.',
+    'لا توجد عناصر في هذه القائمة.':'No items in this list.','كل الموظفين النشطين لديهم حسابات، أو لا توجد ملفات بلا حساب.':'All active employees have accounts, or there are no employee files without accounts.',
+    'مستند نشط':'Active document','تصنيف متاح':'Available category','بحث بالاسم أو الرقم':'Search by name or number','محفوظة في سجل التدقيق':'Retained in the audit log',
+    'أضف عقد عمل بتاريخ بداية وانتهاء لإصدار البطاقة.':'Add an employment contract with start and end dates to issue the card.','لم تتم إضافة عطل رسمية بعد.':'No official holidays have been added.',
+    'مدفوعة الأجر':'Paid','غير مدفوعة الأجر':'Unpaid','حسب الموافقة':'Subject to approval','حسب الطلب':'As requested','يتطلب مرفقاً':'Attachment required','وفق التقرير الطبي والاعتماد':'Per medical report and approval',
+    'استحقاق سنوي':'Annual entitlement','رصيد سنوي':'Annual balance','الاعتماد النهائي لدى الموارد البشرية':'Final approval by HR','طلبات فريقي بانتظار قراري':'My team requests awaiting my decision',
+    'المقر الرئيسي':'Head Office','الإدارة العامة':'General Management','العمليات':'Operations','المالية':'Finance','دبي، الإمارات العربية المتحدة':'Dubai, United Arab Emirates','الدوام الإداري':'Administrative shift',
+    'أخصائي عمليات':'Operations Specialist','مديرة العمليات':'Operations Manager','مديرة الموارد البشرية':'HR Manager',
+    'الدرجة السابعة':'Grade 7','الدرجة الثانية عشرة':'Grade 12','الدرجة الخامسة عشرة':'Grade 15',
+    'إجازة سنوية':'Annual leave','إجازة أمومة':'Maternity leave','إجازة والدية':'Parental leave','إجازة حداد':'Bereavement leave','إجازة دراسية':'Study leave',
+    'ترخيص خلال ساعات العمل (حتى ساعتين)':'Work-hours permission (up to two hours)','استئذان ظروف جوية قهرية':'Severe-weather emergency permission','استئذان حالات طوارئ وقوة قاهرة':'Emergency and force-majeure permission',
+    'رخص الشركة':'Company Licences','قوانين الشركة':'Company Policies','المخالفات والجزاءات':'Violations & Penalties','السلف وإيصالات المدفوعات':'Advances & Payment Receipts',
+    'تعطيل':'Disable','إدخال يدوي':'Manual entry',
+    'موقع الخروج':'Check-out location','دقة الموقع: {accuracy} م':'Location accuracy: {accuracy} m','موقع جغرافي محفوظ':'Saved location','عرض موقع الخروج على الخريطة':'View check-out location on the map',
+    'تحديد الكل':'Select all','إلغاء تحديد الكل':'Clear selection','أقل من ٦ أشهر':'Under 6 months','إكمال الستة أشهر':'Six-month completion',
+    'اختر الموظفين الذين لم يرسلوا لتذكيرهم مرة واحدة اليوم. الاسم الأحمر يعني أن الموظف لم يُكمل ستة أشهر ويحتاج قرار استبعاد يدوي.':'Select employees who have not submitted for one reminder today. A red name means the employee has not completed six months and needs a manual exclusion decision.'
+  });
+
   const originals = new WeakMap();
   const originalAttributes = new WeakMap();
   let locale = readLocale();
@@ -487,6 +520,30 @@
       [/^مرحباً، (.+)$/, 'Welcome, $1'],
       [/^(\d+(?:\.\d+)?) يوم$/, '$1 days'],
       [/^(\d+) موظف$/, '$1 employees'],
+      [/^(\d+) قسم$/, '$1 departments'],
+      [/^· (\d+) موظف$/, '· $1 employees'],
+      [/^(\d+) قرأوها$/, '$1 read'],
+      [/^(\d+) بانتظار إجراءك$/, '$1 awaiting your action'],
+      [/^(\d+) موظف · رئيس القسم: (.+)$/, '$1 employees · Department head: $2'],
+      [/^(.+) · (\d+) موظف · رئيس القسم: (.+)$/, '$1 · $2 employees · Department head: $3'],
+      [/^الفريق المباشر · (\d+) موظف$/, 'Direct team · $1 employees'],
+      [/^لـ (.+) · مستخدم (.+) · معلق (.+)$/, 'For $1 · Used $2 · Pending $3'],
+      [/^معلق: (.+) · متاح للاستخدام: (.+)$/, 'Pending: $1 · Available to use: $2'],
+      [/^(.+) · المتاح الحالي (.+) يوم · فائض مجمد (.+) يوم$/, '$1 · currently available: $2 days · frozen surplus: $3 days'],
+      [/^(.+) · المتاح الحالي (.+) يوم$/, '$1 · currently available: $2 days'],
+      [/^استحقاق الخدمة: (.+) يوم · مرحل (.+) · فائض مجمد للبيع فقط (.+)$/, 'Service entitlement: $1 days · Carried: $2 · Frozen sale-only surplus: $3'],
+      [/^(\d+(?:\.\d+)?) يوم سنوياً$/, '$1 days annually'],
+      [/^حتى (\d+(?:\.\d+)?) ساعة$/, 'Up to $1 hours'],
+      [/^مدفوعة الأجر · (\d+(?:\.\d+)?) يوم سنوياً$/, 'Paid · $1 days annually'],
+      [/^غير مدفوعة الأجر · حسب الطلب$/, 'Unpaid · as requested'],
+      [/^مدفوعة الأجر · حسب الطلب$/, 'Paid · as requested'],
+      [/^مدفوعة الأجر · حسب الطلب · حد (\d+(?:\.\d+)?) ساعة$/, 'Paid · as requested · limit $1 hours'],
+      [/^معاينة ببيانات (.+)$/, 'Preview using $1 data'],
+      [/^(\d+) \/ (\d+) وزن نشط$/, '$1 / $2 active weight'],
+      [/^مؤشر القياس: (.+)$/, 'Measure: $1'],
+      [/^إعلان تقييم الأداء (\d{4})$/, 'Performance Review Announcement $1'],
+      [/^تقييم الأداء (\d{4})(.*)$/, 'Performance Review $1$2'],
+      [/^تم إعلان تقييم الأداء (\d{4})\. فترة الأداء من (.+) إلى (.+)\. يفتح التقييم الذاتي في (.+) وآخر موعد للإرسال (.+)\. افتح صفحة التقييم السنوي لإكمال أهدافك وتقييمك الذاتي\.$/, 'Performance Review $1 has been announced. The performance period runs from $2 to $3. Self-assessment opens on $4 and submissions close on $5. Open Annual Performance to complete your goals and self-assessment.'],
       [/^تم استيراد (\d+) صفاً من Excel$/, 'Imported $1 rows from Excel'],
       [/^من (\d+(?:\.\d+)?)$/, 'of $1'],
       [/^تقييم (\d+)$/, 'Review $1'],

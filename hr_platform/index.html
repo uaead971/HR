@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261031-production-r23">
+  <link rel="stylesheet" href="styles.css?v=5.8.0&build=20261105-production-r24">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -221,7 +221,7 @@
             <section class="attendance-report-sheet attendance-daily-report" id="attendanceDailyReport">
               <header class="attendance-report-head"><div><span class="eyebrow">كشف اليوم المختار</span><h2 id="attendanceDailyTitle">اختر يوماً من التقويم</h2><p id="attendanceDailyContext">اضغط على يوم موثّق لعرض تقريره هنا.</p></div><button class="secondary" type="button" id="printAttendanceDay" data-print-target="attendanceDailyReport" disabled><svg class="ui-icon" aria-hidden="true"><use href="#icon-print"></use></svg><span>طباعة اليوم المختار</span></button></header>
               <div class="attendance-daily-kpis" id="attendanceDailyKpis"></div>
-              <div class="table-wrap attendance-daily-table-wrap"><table><caption class="sr-only">تفاصيل الحضور والانصراف لليوم المختار</caption><thead><tr><th>الموظف</th><th>المناوبة</th><th>الدخول</th><th>الخروج</th><th>صافي الساعات</th><th>مدة التأخير</th><th>مدة الترخيص المعتمد</th><th>الحالة / تصنيف الإجازة</th></tr></thead><tbody id="attendanceDailyRows"><tr><td colspan="8"><div class="empty">لم يتم اختيار يوم بعد.</div></td></tr></tbody></table></div>
+              <div class="table-wrap attendance-daily-table-wrap"><table><caption class="sr-only">تفاصيل الحضور والانصراف لليوم المختار</caption><thead><tr><th>الموظف</th><th>المناوبة</th><th>الدخول</th><th>الخروج</th><th>موقع الخروج</th><th>صافي الساعات</th><th>مدة التأخير</th><th>مدة الترخيص المعتمد</th><th>الحالة / تصنيف الإجازة</th></tr></thead><tbody id="attendanceDailyRows"><tr><td colspan="9"><div class="empty">لم يتم اختيار يوم بعد.</div></td></tr></tbody></table></div>
             </section>
           </article>
         </section>
@@ -421,7 +421,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.0&build=20261031-production-r23"></script>
-  <script src="app.js?v=5.8.0&build=20261031-production-r23"></script>
+  <script src="i18n.js?v=5.8.0&build=20261105-production-r24"></script>
+  <script src="app.js?v=5.8.0&build=20261105-production-r24"></script>
 </body>
 </html>
