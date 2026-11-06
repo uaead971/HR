@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.3"
+APP_VERSION = "5.8.4"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -4284,6 +4284,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("PATCH", r"/api/shifts/(\d+)", self.api_shift_patch),
                     ("DELETE", r"/api/shifts/(\d+)", self.api_shift_delete),
                     ("POST", r"/api/shifts/(\d+)/assign", self.api_shift_assign),
+                    ("DELETE", r"/api/shift-assignments/(\d+)", self.api_shift_assignment_delete),
                     ("GET", r"/api/overtime", self.api_overtime_get),
                     ("POST", r"/api/overtime", self.api_overtime_post),
                     ("POST", r"/api/overtime/(\d+)/decision", self.api_overtime_decision),
@@ -9153,6 +9154,61 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not batch_request:
                 response["assignment"] = assignments[0]
             self.send_json(201, response)
+
+        def api_shift_assignment_delete(self, assignment_id: int) -> None:
+            user = self.require_permission("shift.manage")
+            assignment = self.db.execute(
+                """SELECT a.*,s.name AS shift_name,e.full_name AS employee_name
+                     FROM employee_shift_assignments a
+                     JOIN shifts s ON s.id=a.shift_id
+                     JOIN employees e ON e.id=a.employee_id
+                     WHERE a.id=?""",
+                (assignment_id,),
+            ).fetchone()
+            if not assignment:
+                raise APIError(404, "تعيين المناوبة غير موجود.", "not_found")
+            today = local_now().date()
+            effective_from = date.fromisoformat(str(assignment["effective_from"]))
+            effective_to = date.fromisoformat(str(assignment["effective_to"])) if assignment["effective_to"] else None
+            if effective_to and effective_to < today:
+                raise APIError(409, "لا يمكن إزالة تعيين منتهي من السجل التاريخي.", "shift_assignment_ended")
+            with self.db:
+                if effective_from >= today:
+                    self.db.execute("DELETE FROM employee_shift_assignments WHERE id=?", (assignment_id,))
+                    removal_mode = "deleted"
+                    removed_effective_on = effective_from.isoformat()
+                else:
+                    closed_on = today - timedelta(days=1)
+                    self.db.execute(
+                        "UPDATE employee_shift_assignments SET effective_to=? WHERE id=?",
+                        (closed_on.isoformat(), assignment_id),
+                    )
+                    removal_mode = "closed"
+                    removed_effective_on = today.isoformat()
+                audit(
+                    self.db,
+                    user["id"],
+                    "shift.unassign",
+                    "employee",
+                    int(assignment["employee_id"]),
+                    {
+                        "assignment_id": assignment_id,
+                        "shift_id": int(assignment["shift_id"]),
+                        "mode": removal_mode,
+                        "removed_effective_on": removed_effective_on,
+                    },
+                )
+            self.send_json(
+                200,
+                {
+                    "ok": True,
+                    "assignment_id": assignment_id,
+                    "employee_id": int(assignment["employee_id"]),
+                    "shift_id": int(assignment["shift_id"]),
+                    "mode": removal_mode,
+                    "removed_effective_on": removed_effective_on,
+                },
+            )
 
         # Overtime
         def api_overtime_get(self) -> None:

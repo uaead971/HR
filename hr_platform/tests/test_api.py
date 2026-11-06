@@ -171,7 +171,7 @@ class ShiftManagementFrontendTests(unittest.TestCase):
         self.assertIn('data-edit-shift="${shift.id}"', app)
         self.assertIn('data-assign-shift-card="${shift.id}"', app)
         self.assertIn('data-delete-shift="${shift.id}"', app)
-        self.assertIn("'[data-assign-shift],[data-edit-shift],[data-assign-shift-card],[data-delete-shift]','shift.manage'", app)
+        self.assertIn("'[data-assign-shift],[data-edit-shift],[data-assign-shift-card],[data-delete-shift],[data-manage-shift-assignment],[data-remove-shift-assignment]','shift.manage'", app)
         self.assertIn("[data-delete-lifecycle],[data-delete-shift]','archive'", app)
         self.assertIn("function shiftModal(shift=null)", app)
         self.assertIn("method:editing?'PATCH':'POST'", app)
@@ -187,7 +187,7 @@ class ShiftManagementFrontendTests(unittest.TestCase):
         self.assertIn("label:'مجدول'", app)
         self.assertIn("label:'منتهي'", app)
         self.assertIn("function currentShiftAssignments(shiftId)", app)
-        self.assertIn("function shiftRosterMarkup(shift)", app)
+        self.assertIn("function shiftRosterMarkup(shift,mayManage=false)", app)
         self.assertIn('<details class="shift-roster-disclosure">', app)
         self.assertIn('data-shift-assignment-search', app)
         self.assertNotIn('data-shift-assignment-search autofocus', app)
@@ -196,6 +196,12 @@ class ShiftManagementFrontendTests(unittest.TestCase):
         self.assertIn('name="employee_ids"', app)
         self.assertIn("body:{employee_ids:employeeIds,effective_from:from.value,effective_to:to.value||null}", app)
         self.assertIn("function deleteShift(shift,button)", app)
+        self.assertIn("function manageShiftAssignmentModal(assignment)", app)
+        self.assertIn("function saveManagedShiftAssignment(form)", app)
+        self.assertIn("function removeShiftAssignment(assignment,button)", app)
+        self.assertIn('data-manage-shift-assignment="${assignment.id}"', app)
+        self.assertIn("api(`/api/shift-assignments/${assignment.id}`,{method:'DELETE'})", app)
+        self.assertIn("if(route==='shiftAssignmentManageForm')saveManagedShiftAssignment(f)", app)
         self.assertIn("حذف المناوبة «{name}» نهائياً؟ لا يمكن التراجع عن الحذف.", app)
         self.assertIn("api(`/api/shifts/${shift.id}`,{method:'DELETE'})", app)
         self.assertIn("setBusy(button,true,'جارٍ حذف المناوبة…')", app)
@@ -204,6 +210,8 @@ class ShiftManagementFrontendTests(unittest.TestCase):
         self.assertIn(".selected-shift-summary", styles)
         self.assertIn(".shift-card-footer", styles)
         self.assertIn(".shift-roster-disclosure", styles)
+        self.assertIn(".shift-roster-manage", styles)
+        self.assertIn(".shift-assignment-manage-actions", styles)
         self.assertIn(".shift-employee-checklist", styles)
         self.assertIn(".modal .shift-employee-search{display:grid;margin:0}", styles)
         self.assertIn(".modal .shift-employee-search input{display:block;width:100%;min-width:0;min-height:41px;margin:0", styles)
@@ -215,6 +223,8 @@ class ShiftManagementFrontendTests(unittest.TestCase):
         self.assertIn("'المناوبة المختارة':'Selected shift'", translations)
         self.assertIn("'موظفو المناوبة':'Shift employees'", translations)
         self.assertIn("'تعيين موظفين':'Assign employees'", translations)
+        self.assertIn("'نقل أو إزالة':'Move or remove'", translations)
+        self.assertIn("'إزالة من المناوبة':'Remove from shift'", translations)
         self.assertIn("'تحديد كل الظاهر':'Select all visible'", translations)
         self.assertIn("'حذف المناوبة':'Delete shift'", translations)
         self.assertIn("Deactivate it instead.", translations)
@@ -257,8 +267,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         public = APIClient(self.base_url)
         health = public.request("GET", "/api/health")
         self.assertTrue(health["ok"])
-        self.assertEqual(hr_server.APP_VERSION, "5.8.3")
-        self.assertEqual(health["version"], "5.8.3")
+        self.assertEqual(hr_server.APP_VERSION, "5.8.4")
+        self.assertEqual(health["version"], "5.8.4")
         org = public.request("GET", "/api/org")["organization"]
         self.assertTrue(org["display_name"])
         public.request("GET", "/api/auth/me", expected=401)
@@ -318,8 +328,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("alertMessage('لا يملك حسابك صلاحية فتح هذه الوحدة.'", app)
         self.assertIn('integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="', index)
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
         self.assertIn('@media(max-width:650px){.login-visual-runtime .visual-runtime-copy{position:absolute;inset:auto 14px 64px', styles)
         self.assertIn('.visual-runtime-copy:has(h2:empty){display:none}', styles)
 
@@ -332,7 +342,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.3&build=20261106-production-r34")
+        application_script = index.index("app.js?v=5.8.4&build=20261106-production-r35")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -451,7 +461,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("استوديو العلامة المؤسسية", i18n)
         self.assertIn("Organization brand studio", i18n)
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.3', index)
+            self.assertIn(f'{asset}?v=5.8.4', index)
 
     def test_53_v54_migrates_v532_visual_identity_without_changing_tenant_data(self):
         with tempfile.TemporaryDirectory(prefix="hr-v54-migration-") as folder:
@@ -777,7 +787,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.3', index)
+            self.assertIn(f'{asset}?v=5.8.4', index)
         for token in ("--mineral-950:#071b22", "--mineral-900:#0b2530", "--emerald-700:#0e6655", "--bronze-500:#c99545", "--parchment-100:#f4f2ec"):
             self.assertIn(token, styles)
         for symbol in ("dashboard", "home", "users", "org", "map", "clock", "calendar", "shift", "overtime", "wallet", "certificate", "loan", "target", "recruitment", "onboarding", "learning", "benefits", "offboarding", "bell", "mail", "report", "shield", "settings", "search", "menu", "print", "edit", "archive", "download"):
@@ -810,7 +820,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.3', index)
+            self.assertIn(f'{asset}?v=5.8.4', index)
         self.assertIn('.sidebar-collapsed .sidebar,.sidebar-collapsed .sidebar.open{width:min(310px,88vw)}', styles)
         self.assertIn('.sidebar-collapsed .sidebar a>span,', styles)
         self.assertIn('.sidebar-collapsed .sidebar .nav-label,', styles)
@@ -842,7 +852,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.3', index)
+            self.assertIn(f'{asset}?v=5.8.4', index)
         self.assertIn("function metricValue(value)", app)
         self.assertIn("<small>${esc(tr(m[0]))}</small>", app)
         self.assertIn("<span>${esc(tr(m[2]))}</span>", app)
@@ -875,9 +885,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         app = (root / "app.js").read_text(encoding="utf-8")
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('i18n.js?v=5.8.3', index)
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('i18n.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
         self.assertGreaterEqual(index.count('data-locale="ar"'), 2)
         self.assertGreaterEqual(index.count('data-locale="en"'), 2)
         self.assertIn("khaisha.ui.locale", index + i18n)
@@ -977,7 +987,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("if(requested&&!requestedAllowed)history.replaceState", app)
         index = (root / "index.html").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.3', index)
+            self.assertIn(f'{asset}?v=5.8.4', index)
 
         required_performance_resources = (
             "الفترة من", "متبقٍ {days} يوم", "مسودة الموظف", "أهداف الموظف",
@@ -1054,8 +1064,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             r"api\(`/api/evaluations/\$\{state\.evaluation\.id\}/submit`,"
             r"\{method:'POST'\}\)",
         )
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
 
     def test_42_v512_dossier_observer_and_mobile_weight_badge_contract(self):
         root = Path(__file__).parents[1]
@@ -1080,8 +1090,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("flex:0 0 auto", weight_rule.group(1))
         self.assertIn("min-width:max-content", weight_rule.group(1))
         self.assertIn("@media(max-width:440px)", styles)
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
 
     def test_keep_alive_connection_refreshes_authentication_each_request(self):
         """Anonymous -> login -> authenticated -> logout must work on one TCP connection."""
@@ -1966,8 +1976,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         sources = {name: (root / name).read_text(encoding="utf-8") for name in ("index.html", "app.js", "styles.css", "server.py", "schema.sql")}
         index, app, styles = sources["index.html"], sources["app.js"], sources["styles.css"]
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
         for template in ("portrait_orbit", "executive_horizontal", "minimal_vertical"):
             self.assertIn(f'data-card-template-choice="{template}"', index)
             self.assertIn(f"template-{template}", styles)
@@ -2208,8 +2218,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('class="org-fit-stage"', app)
         self.assertIn(".org-fit-stage.fitted{overflow:hidden}", styles)
         self.assertIn("MutationObserver", app)
-        self.assertIn("styles.css?v=5.8.3", index)
-        self.assertIn("app.js?v=5.8.3", index)
+        self.assertIn("styles.css?v=5.8.4", index)
+        self.assertIn("app.js?v=5.8.4", index)
         self.assertIn('rel="icon" href="favicon.svg"', index)
 
     def test_30_v47_salary_certificate_serial_barcode_integrity_and_verification(self):
@@ -2887,7 +2897,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261106-production-r34", index)
+        self.assertIn("build=20261106-production-r35", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3101,7 +3111,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261106-production-r34", index)
+        self.assertIn("build=20261106-production-r35", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3206,8 +3216,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server = (root / "server.py").read_text(encoding="utf-8")
         schema = (root / "schema.sql").read_text(encoding="utf-8")
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
         for marker in ("evaluationWorkflowRibbon", "evaluationPrivacyGate", "myEvaluationHistory", "managerEvaluationForm", "hrApproveForm", "evaluationGrievanceForm"):
             self.assertIn(marker, index + app)
         for endpoint in ("manager-review", "hr-review", "/grievance", "evaluation-grievances"):
@@ -3657,8 +3667,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("@media(max-width:440px)", styles)
         self.assertIn("overflow-x:hidden", styles)
         self.assertIn("evaluation.cycle.manage", app + schema + (root / "server.py").read_text(encoding="utf-8"))
-        self.assertIn('styles.css?v=5.8.3', index)
-        self.assertIn('app.js?v=5.8.3', index)
+        self.assertIn('styles.css?v=5.8.4', index)
+        self.assertIn('app.js?v=5.8.4', index)
 
 
     def test_57_v56_profile_fields_age_privacy_permissions_and_emergency_contacts(self):
@@ -3881,7 +3891,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server_source = (root / "server.py").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.3', index)
+            self.assertIn(f'{asset}?v=5.8.4', index)
         for marker in ("employee.profile.edit", "employee.emergency.manage", "employee_emergency_contacts", "api_attendance_range", "invalid_date_range"):
             self.assertIn(marker, server_source + app)
         for marker in ("employeeProfileForm", "emergencyContactForm", "profile-completeness", "attendanceRangeForm", "attendanceSummary", "attendance-table-wrap"):
@@ -5350,7 +5360,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261106-production-r34", index)
+        self.assertIn("build=20261106-production-r35", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5481,6 +5491,47 @@ class HRAPIEndToEndTests(unittest.TestCase):
             if row["employee_id"] in employee_ids and row["shift_id"] == shift["id"]
         ]
         self.assertEqual({row["employee_id"] for row in persisted}, employee_ids)
+
+    def test_79c_shift_assignment_removal_preserves_history_and_requires_manage_permission(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        employee_client = self.client("employee@demo.ae", "Emp@12345")
+        suffix = uuid.uuid4().hex[:8]
+        employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"SHIFT-REMOVE-{suffix}",
+            "full_name": f"موظف إزالة مناوبة {suffix}",
+            "email": f"shift-remove-{suffix}@demo.ae",
+            "hire_date": "2024-01-01",
+        }, expected=201)["employee"]
+        shift = admin.request("POST", "/api/shifts", {
+            "name": f"مناوبة إزالة {suffix}", "start_time": "08:00", "end_time": "17:00",
+            "break_minutes": 60, "grace_minutes": 10, "daily_limit_minutes": 480,
+            "working_days": [0, 1, 2, 3, 4], "rest_days": [5, 6], "active": True,
+        }, expected=201)["shift"]
+        today = hr_server.local_now().date()
+        current = admin.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": (today - timedelta(days=10)).isoformat(),
+        }, expected=201)["assignment"]
+
+        forbidden = employee_client.request(
+            "DELETE", f"/api/shift-assignments/{current['id']}", expected=403,
+        )
+        self.assertEqual(forbidden["code"], "forbidden")
+        removed = admin.request("DELETE", f"/api/shift-assignments/{current['id']}")
+        self.assertEqual(removed["mode"], "closed")
+        self.assertEqual(removed["removed_effective_on"], today.isoformat())
+        preserved = next(
+            row for row in admin.request("GET", "/api/shifts")["assignments"]
+            if row["id"] == current["id"]
+        )
+        self.assertEqual(preserved["effective_to"], (today - timedelta(days=1)).isoformat())
+
+        future = admin.request("POST", f"/api/shifts/{shift['id']}/assign", {
+            "employee_id": employee["id"], "effective_from": (today + timedelta(days=10)).isoformat(),
+        }, expected=201)["assignment"]
+        cancelled = admin.request("DELETE", f"/api/shift-assignments/{future['id']}")
+        self.assertEqual(cancelled["mode"], "deleted")
+        remaining_ids = {row["id"] for row in admin.request("GET", "/api/shifts")["assignments"]}
+        self.assertNotIn(future["id"], remaining_ids)
 
     def test_80_shift_delete_allows_unused_and_protects_every_assignment_period(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -5971,7 +6022,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261106-production-r34", index)
+        self.assertIn("build=20261106-production-r35", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6526,7 +6577,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261106-production-r34", index)
+        self.assertIn("build=20261106-production-r35", index)
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

@@ -584,7 +584,26 @@
     'تم تعيين موظف واحد للمناوبة المحددة':'One employee was assigned to the selected shift',
     'تم تعيين {count} موظفاً للمناوبة المحددة':'{count} employees were assigned to the selected shift',
     'لا يمكن تعيين أكثر من 500 موظف في دفعة واحدة.':'A maximum of 500 employees can be assigned in one batch.',
-    'تتضمن القائمة موظفاً غير موجود أو غير نشط.':'The list includes an employee who does not exist or is inactive.'
+    'تتضمن القائمة موظفاً غير موجود أو غير نشط.':'The list includes an employee who does not exist or is inactive.',
+    'الإجراء':'Action',
+    'إدارة':'Manage',
+    'نقل أو إزالة':'Move or remove',
+    'إدارة تعيين المناوبة':'Manage shift assignment',
+    'الموظف المختار':'Selected employee',
+    'اختر مناوبة أخرى لنقل الموظف، أو استخدم إزالة لإيقاف تعيينه الحالي. يحتفظ النظام بالسجل السابق.':'Choose another shift to move the employee, or remove them from the current shift. Previous history is retained.',
+    'المناوبة الجديدة':'New shift',
+    'المناوبة الحالية':'Current shift',
+    'لا توجد مناوبة نشطة متاحة للنقل؛ ما زالت الإزالة متاحة.':'No active shift is available for transfer; removal is still available.',
+    'حفظ ونقل الموظف':'Save and move employee',
+    'إزالة من المناوبة':'Remove from shift',
+    'جارٍ نقل الموظف…':'Moving employee…',
+    'تم نقل الموظف وتحديث تعيين المناوبة':'The employee was moved and the shift assignment was updated',
+    'إزالة {employee} من مناوبة {shift}؟ سيحتفظ النظام بسجل الفترات السابقة.':'Remove {employee} from {shift}? Previous assignment periods will be retained.',
+    'جارٍ إزالة الموظف…':'Removing employee…',
+    'تمت إزالة الموظف من المناوبة':'The employee was removed from the shift',
+    'لا يمكن تعديل تعيين منتهي.':'An ended assignment cannot be changed.',
+    'تعيين المناوبة غير موجود.':'Shift assignment not found.',
+    'لا يمكن إزالة تعيين منتهي من السجل التاريخي.':'An ended assignment cannot be removed from historical records.'
   });
 
   const originals = new WeakMap();
