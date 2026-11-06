@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.2"
+APP_VERSION = "5.8.3"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -343,6 +343,85 @@ SPECIALIZED_JOB_GOALS = {
 }
 
 
+# English copies for the legacy built-in job profiles that predate the master
+# catalogue.  Production tenants can still have these rows in their job-title
+# libraries, so they must be migrated as well as catalogue-linked goals.
+GENERIC_JOB_GOALS_EN = (
+    ("Quality and accuracy of delivery", "Complete core responsibilities in accordance with approved procedures and with the fewest possible errors.", "Percentage of work accepted on the first submission", 25),
+    ("Productivity and adherence to deadlines", "Achieve the target workload and deliver tasks on time.", "Percentage of tasks completed within the target time", 25),
+    ("Achievement of job KPIs", "Achieve the operational performance indicators assigned to the job title.", "Percentage achievement of approved performance indicators", 20),
+    ("Collaboration and stakeholder service", "Collaborate with the team and provide a professional experience for internal and external stakeholders.", "Stakeholder satisfaction and collaboration rating", 15),
+    ("Development and continuous improvement", "Develop skills and propose practical improvements within the scope of work.", "Completion of the development plan and number of implemented improvements", 15),
+)
+
+SALES_EMPLOYEE_GOALS_EN = (
+    ("Sales performance", "Measures the employee's achievement of assigned monthly or annual sales targets by comparing actual sales with the approved targets.", "9–10: 100% or more achieved; 7–8: 80–99%; 5–6: 60–79%; 3–4: 40–59%; 1–2: below 40%.", 35),
+    ("Customer service and customer satisfaction", "Measures customer satisfaction with the employee's service through satisfaction surveys, complaint counts and direct feedback.", "9–10: excellent with no complaints; 7–8: very good with rare complaints; 5–6: good with some complaints; 3–4: repeated complaints; 1–2: persistent negative complaints.", 25),
+    ("Product knowledge and presentation", "Measures the employee's knowledge of product details and ability to explain their benefits clearly to customers.", "9–10: comprehensive and excellent knowledge; 7–8: very good knowledge of most products; 5–6: good knowledge of core products; 3–4: limited knowledge; 1–2: very weak knowledge.", 20),
+    ("Attendance and punctuality", "Measures the employee's adherence to working hours, attendance and departure times.", "9–10: no lateness or absence; 7–8: rare lateness or absence; 5–6: some lateness; 3–4: repeated lateness or absence; 1–2: persistent lateness or absence.", 10),
+    ("Teamwork and compliance with company policies", "Measures the employee's cooperation with colleagues and compliance with the company's internal policies and regulations.", "9–10: excellent cooperation and full compliance; 7–8: very good cooperation and high compliance; 5–6: good cooperation and general compliance; 3–4: average cooperation with minor violations; 1–2: weak cooperation and repeated violations.", 10),
+)
+
+PROCUREMENT_LOGISTICS_GOALS_EN = (
+    ("Obtaining the best prices and supply terms", "Measures the employee's ability to negotiate the best prices and payment and delivery terms against the approved budget and market conditions.", "9–10: savings of 15% or more against budget; 7–8: savings of 10–14%; 5–6: savings of 5–9%; 3–4: savings below 5%; 1–2: no savings or budget exceeded.", 20),
+    ("Accuracy and follow-up of purchase orders and delivery dates", "Measures the accuracy of purchase-order preparation and follow-up to ensure on-time delivery to the correct specifications.", "9–10: all orders correct and on time; 7–8: rare errors or delays; 5–6: some minor errors or delays; 3–4: repeated errors or delays; 1–2: persistent errors and delays.", 20),
+    ("Accuracy and adherence to shipping and customs-clearance schedules", "Measures adherence to shipping schedules and customs-clearance procedures, and the accuracy of documents required to complete operations without delay.", "9–10: no shipping or clearance delay; 7–8: very rare delay; 5–6: some minor delays; 3–4: repeated delays affecting work; 1–2: persistent delays or repeated customs violations.", 25),
+    ("Supplier and freight-provider relationship management and negotiation", "Measures the employee's skill in building effective relationships with suppliers and freight providers and negotiating the best terms.", "9–10: excellent relationships and consistently optimal terms; 7–8: very good relationships and effective negotiation; 5–6: good relationships and acceptable negotiation; 3–4: average relationships or weak negotiation; 1–2: weak relationships and repeated problems.", 15),
+    ("Attendance and punctuality", "Measures the employee's adherence to working hours, attendance and departure times.", "9–10: no lateness or absence; 7–8: rare lateness or absence; 5–6: some lateness; 3–4: repeated lateness or absence; 1–2: persistent lateness or absence.", 10),
+    ("Teamwork and compliance with company policies", "Measures the employee's cooperation with colleagues and other departments and compliance with the company's internal policies and regulations.", "9–10: excellent cooperation and full compliance; 7–8: very good cooperation and high compliance; 5–6: good cooperation and general compliance; 3–4: average cooperation with minor violations; 1–2: weak cooperation and repeated violations.", 10),
+)
+
+SPECIALIZED_JOB_GOALS_EN = {
+    "أخصائي عمليات": (
+        ("Operational accuracy and procedural compliance", "Execute operational transactions in accordance with approved procedures and service levels.", "Percentage of transactions completed without errors", 30),
+        ("Productivity and adherence to completion deadlines", "Complete the target workload within the specified time for each transaction.", "Percentage of transactions completed within the target time", 25),
+        ("Stakeholder service quality", "Handle requests and feedback professionally and improve the stakeholder experience.", "Stakeholder satisfaction rate and percentage of feedback cases closed", 20),
+        ("Operational process improvement", "Propose and implement improvements that reduce time, errors or cost.", "Number of approved improvements and their measurable impact", 15),
+        ("Collaboration and professional development", "Share knowledge and complete the job-related development plan.", "Collaboration rating and development-plan completion rate", 10),
+    ),
+    "مديرة العمليات": (
+        ("Achievement of the operational plan", "Lead implementation of the department plan and align it with organization priorities.", "Percentage completion of operational initiatives and indicators", 30),
+        ("Improving efficiency and productivity", "Improve workflow and resource utilization and reduce waste.", "Improvement in cycle time, productivity and cost", 25),
+        ("Team leadership and development", "Assign goals, follow up, coach and build team capability.", "Achievement of team goals and development plans", 20),
+        ("Service quality and stakeholder satisfaction", "Ensure output quality and respond to feedback.", "Quality and satisfaction rates and complaint-closure rate", 15),
+        ("Risk management and compliance", "Monitor operational risks and compliance with policies and controls.", "Risk-closure rate and non-recurrence of violations", 10),
+    ),
+    "مديرة الموارد البشرية": (
+        ("Implementation of the HR strategy", "Translate organization priorities into a measurable workforce plan and initiatives.", "Plan-completion rate and workforce indicators", 25),
+        ("Accuracy of HR operations and employment data", "Ensure employee files, attendance data and payroll inputs are accurate and completed on time.", "Accuracy rate and completion within the operating cycle", 25),
+        ("Talent acquisition and retention", "Fill critical vacancies and improve the joining and retention experience.", "Time to fill and retention rate", 20),
+        ("Compliance and policies", "Update policies and monitor compliance with labour law and internal controls.", "Percentage of completed reviews and closed observations", 15),
+        ("Employee experience and development", "Increase engagement and implement organizational learning and development plans.", "Employee satisfaction and development-plan completion rate", 15),
+    ),
+    "المدير العام": (
+        ("Achievement of the organization's strategic objectives", "Lead implementation of the strategic plan and achieve approved organizational results.", "Percentage achievement of strategic indicators and initiatives", 35),
+        ("Financial and operational sustainability", "Strengthen resource efficiency, sustainable results and disciplined growth.", "Financial results and operational efficiency", 25),
+        ("Governance and risk management", "Strengthen oversight, compliance and data-driven decision-making.", "Compliance level and closure of material risks", 15),
+        ("Human capital leadership", "Build leadership capability and improve organizational engagement and performance.", "Performance, succession and engagement indicators", 15),
+        ("Innovation and digital transformation", "Sponsor improvement and transformation initiatives that increase organizational quality and efficiency.", "Value and impact of implemented initiatives", 10),
+    ),
+}
+
+
+def built_in_job_goal_translations() -> dict[tuple[str, str, str], tuple[str, str, str]]:
+    profile_pairs = [
+        (GENERIC_JOB_GOALS, GENERIC_JOB_GOALS_EN),
+        (SALES_EMPLOYEE_GOALS, SALES_EMPLOYEE_GOALS_EN),
+        (PROCUREMENT_LOGISTICS_GOALS, PROCUREMENT_LOGISTICS_GOALS_EN),
+        *[(SPECIALIZED_JOB_GOALS[key], SPECIALIZED_JOB_GOALS_EN[key]) for key in SPECIALIZED_JOB_GOALS],
+    ]
+    translations: dict[tuple[str, str, str], tuple[str, str, str]] = {}
+    for arabic_profile, english_profile in profile_pairs:
+        if len(arabic_profile) != len(english_profile):
+            raise RuntimeError("Built-in evaluation goal translation count mismatch")
+        for arabic_goal, english_goal in zip(arabic_profile, english_profile):
+            translations[arabic_goal[:3]] = english_goal[:3]
+    return translations
+
+
+BUILT_IN_JOB_GOAL_TRANSLATIONS = built_in_job_goal_translations()
+
+
 # Stable, tenant-independent source catalogue supplied by the organization.
 # The first five lines in every category are general goals (10%); the next
 # ten are specialized goals (20%).  INSERT OR IGNORE seeding below deliberately
@@ -362,32 +441,110 @@ EVALUATION_GOAL_CATALOG_SEED = (
 )
 
 
+# Approved English copy for every stable catalogue entry.  The stable keys keep
+# the translation attached to the same goal even after it is assigned to a job
+# title or copied into an annual evaluation snapshot.
+EVALUATION_GOAL_CATALOG_ENGLISH = {
+    "sales_branches": (
+        "Sales Department – Branch Employees",
+        """Adhere to approved attendance, departure and working hours.|Comply with company systems, policies and direct manager instructions.|Maintain high productivity and complete daily tasks.|Perform work accurately and reduce errors and repeated observations.|Collaborate with colleagues and other departments and take ownership of work.|Achieve the branch's assigned monthly and annual sales targets.|Increase the average invoice value through upselling.|Improve the conversion rate of branch visitors into purchasing customers.|Provide accurate information about products, prices and promotions.|Maintain a high level of customer satisfaction.|Address customer complaints and feedback within the specified time.|Maintain product arrangement and the cleanliness of display areas.|Monitor product availability and report shortages early.|Ensure the accuracy of invoices, cash collections and assigned funds.|Develop product knowledge and sales and customer service skills.""",
+    ),
+    "procurement": (
+        "Procurement Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with company policies and maintain integrity in supplier dealings.|Maintain high productivity and complete purchase requests.|Process transactions accurately and reduce errors and delays.|Collaborate with warehouses, accounts, logistics and requesting departments.|Provide the required products and quantities within the specified deadlines.|Obtain the best prices and payment and delivery terms.|Compare quotations and select the most suitable offer.|Follow up with suppliers and ensure their commitment to delivery schedules.|Ensure products conform to the required specifications and quality.|Reduce stockouts caused by procurement delays.|Develop the supplier database and source alternative suppliers.|Evaluate supplier performance and address underperformance.|Complete purchase orders, contracts, approvals and supporting documents.|Forecast future needs and coordinate with warehouses and sales.""",
+    ),
+    "warehouses": (
+        "Warehouse Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with company systems and safety and security instructions.|Maintain high productivity in warehouse operations.|Execute receiving, issuing and order preparation accurately.|Collaborate with procurement, sales, logistics and accounts.|Maintain alignment between physical inventory and system records.|Receive, inspect, record and put away products on time.|Prepare branch and customer orders without shortages or errors.|Hand orders to transport or the requesting party on time.|Reduce damage, loss, breakage and inventory variances.|Record all inventory movements in the system immediately.|Conduct periodic and annual stock counts and resolve discrepancies.|Maintain warehouse cleanliness, organization and safety.|Apply the appropriate storage method for each product type.|Monitor slow-moving and near-expiry products.""",
+    ),
+    "human_resources": (
+        "Human Resources Department",
+        """Adhere to work schedules and maintain a professional image.|Comply with company policies and protect confidential information.|Maintain high productivity and complete transactions.|Perform work accurately and reduce administrative errors.|Collaborate with all departments and provide the required support.|Recruit the required talent within the specified time.|Complete employee joining procedures and onboarding programmes.|Create and update employee files and ensure their completeness.|Maintain accurate attendance, leave and absence data.|Review payroll and entitlement data and reduce errors.|Complete employee requests and address enquiries and complaints.|Follow up employee performance reviews and ensure completion.|Prepare and implement training and professional development plans.|Follow up contracts, residencies, insurance and documents.|Ensure compliance with labour law and HR policies.""",
+    ),
+    "logistics": (
+        "Logistics Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with company systems and transport and safety procedures.|Maintain high productivity and speed of completion.|Perform work and prepare documents accurately and reduce errors.|Collaborate with procurement, warehouses, sales and accounts.|Provide products and shipments within the required deadlines.|Prepare and follow up shipping, transport and supply-chain plans.|Track shipments, update their status and report delays.|Complete customs-clearance transactions within the target time.|Ensure shipping and customs documents are accurate and complete.|Reduce transport costs, demurrage, storage charges and penalties.|Develop alternatives for supply-chain disruption or delay.|Ensure goods are delivered complete, intact and on time.|Monitor the safety of drivers, vehicles and goods.|Collect proof of delivery and documents and close trips.""",
+    ),
+    "ecommerce": (
+        "E-commerce and Online Sales Department",
+        """Adhere to work schedules and coverage times for the website and communication channels.|Comply with company policies and protect customer data.|Maintain high productivity and complete tasks and orders.|Execute operations accurately and reduce order, data and pricing errors.|Collaborate with warehouses, logistics, accounts and marketing.|Manage website content and ensure pages and sections are ready.|Add products, images, descriptions, specifications and categories.|Update prices, quantities, inventory and promotions on the website.|Receive orders and review customer, address and payment details.|Follow up order preparation and ensure accuracy and completeness.|Hand orders to customers or couriers and track delivery.|Achieve e-commerce sales targets and improve conversion rate.|Respond to customer enquiries and address complaints.|Manage cancellations, exchanges, returns and online-payment issues.|Prepare e-commerce reports and monitor website performance.""",
+    ),
+    "marketing": (
+        "Marketing Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with company policies and brand identity.|Maintain a high level of productivity.|Deliver work and campaigns within the specified deadlines.|Collaborate with sales, e-commerce and design.|Prepare and implement the marketing plan in line with approved objectives.|Launch marketing and advertising campaigns on schedule.|Achieve campaign targets for leads and sales.|Improve return on advertising spend.|Control the cost of acquiring a lead or new customer.|Prepare and implement the content and publishing plan.|Increase reach and engagement with the target audience.|Comply with the approved marketing budget and expenditure.|Analyse campaign results and provide recommendations for improvement.|Monitor the market and competitors and propose new ideas.""",
+    ),
+    "graphic_design": (
+        "Graphic Design Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with company policies and visual-material usage rights.|Maintain a high level of productivity.|Deliver work within the specified deadlines.|Collaborate with marketing, e-commerce and other departments.|Prepare designs according to the required specifications and objective.|Comply with the company's approved visual identity.|Maintain the technical and marketing quality of designs.|Reduce spelling and technical errors before publishing.|Increase the first-review approval rate for designs.|Produce the required number of designs while maintaining quality.|Organize files, source files and templates.|Prepare designs in the appropriate sizes and formats for each platform.|Implement revision notes within the specified time.|Develop new visual ideas and templates.""",
+    ),
+    "maintenance": (
+        "Maintenance Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with safety and security instructions during maintenance.|Maintain a high level of productivity.|Perform maintenance accurately and reduce errors.|Collaborate with branches, warehouses, procurement and accounts.|Complete the target number of device repairs.|Respond to maintenance reports and begin work promptly.|Repair devices correctly the first time.|Reduce repeated faults and returns for the same fault.|Meet the specified time for inspection, repair and device delivery.|Maintain essential spare parts and monitor minimum stock levels.|Maintain accurate spare-part balances and movements.|Implement the preventive-maintenance plan for devices and equipment.|Document faults, repairs, parts and warranties.|Maintain beneficiary satisfaction and service quality.""",
+    ),
+    "accounts": (
+        "Accounts Department",
+        """Adhere to approved attendance, departure and working hours.|Comply with financial policies and protect confidential information.|Maintain a high level of productivity.|Complete transactions and reports within the specified deadlines.|Collaborate with departments and provide the required financial information.|Record accounting entries and financial transactions accurately and on time.|Complete monthly and annual closing within the approved schedule.|Prepare accurate financial and management reports.|Perform bank and account reconciliations regularly.|Follow up collection of customer receivables.|Process and review supplier payments when due.|Maintain the accuracy of cash, cashboxes and assigned funds.|Review invoices, documents and approvals before payment.|Comply with tax and regulatory requirements.|Analyse variances and expenses and support decisions.""",
+    ),
+    "leadership": (
+        "Management, Branch Managers and General Manager",
+        """Adhere to work schedules and act as a professional role model.|Comply with governance, systems and policies.|Protect the confidentiality of company information and decisions.|Strengthen collaboration and coordination across departments and branches.|Make timely decisions and follow up their implementation.|Achieve revenue, sales and profitability targets.|Monitor department and branch performance indicators.|Implement the strategic plan and approved initiatives.|Control expenditure and comply with the budget.|Manage the performance of managers and employees and develop their capabilities.|Ensure the availability of resources and products required for business continuity.|Monitor risks, violations and remediation plans.|Increase customer satisfaction and improve service quality.|Prepare accurate management reports on time.|Ensure business continuity and crisis preparedness.""",
+    ),
+}
+
+
+def catalogue_seed_copy(stable_key: str, arabic_titles_text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """Return the approved English category and one-to-one bilingual goals."""
+    category_en, english_titles_text = EVALUATION_GOAL_CATALOG_ENGLISH[stable_key]
+    arabic_titles = tuple(title.strip() for title in arabic_titles_text.split("|") if title.strip())
+    english_titles = tuple(title.strip() for title in english_titles_text.split("|") if title.strip())
+    if len(arabic_titles) != 15 or len(english_titles) != 15:
+        raise RuntimeError(f"Invalid bilingual goal catalogue category {stable_key}: expected 15")
+    return category_en, tuple(zip(arabic_titles, english_titles, strict=True))
+
+
 def seed_evaluation_goal_catalog(db: sqlite3.Connection, stamp: str) -> None:
     """Seed the canonical 11×15 catalogue without overwriting tenant edits."""
     for category_order, (stable_key, category_name, titles_text) in enumerate(EVALUATION_GOAL_CATALOG_SEED, 1):
+        category_name_en, bilingual_titles = catalogue_seed_copy(stable_key, titles_text)
         db.execute(
             """INSERT OR IGNORE INTO evaluation_goal_catalog_categories
-               (stable_key,name,sort_order,active,created_at,updated_at)
-               VALUES(?,?,?,1,?,?)""",
-            (stable_key, category_name, category_order, stamp, stamp),
+               (stable_key,name,name_ar,name_en,sort_order,active,created_at,updated_at)
+               VALUES(?,?,?,?,?,1,?,?)""",
+            (stable_key, category_name, category_name, category_name_en, category_order, stamp, stamp),
+        )
+        db.execute(
+            """UPDATE evaluation_goal_catalog_categories
+                  SET name_ar=CASE WHEN TRIM(name_ar)='' THEN name ELSE name_ar END,
+                      name_en=CASE WHEN TRIM(name_en)='' THEN ? ELSE name_en END
+                WHERE stable_key=?""",
+            (category_name_en, stable_key),
         )
         category = db.execute(
             "SELECT id FROM evaluation_goal_catalog_categories WHERE stable_key=?", (stable_key,)
         ).fetchone()
         assert category is not None
-        titles = tuple(title.strip() for title in titles_text.split("|") if title.strip())
-        if len(titles) != 15:
-            raise RuntimeError(f"Invalid goal catalogue category {stable_key}: expected 15, got {len(titles)}")
-        for goal_order, title in enumerate(titles, 1):
+        for goal_order, (title_ar, title_en) in enumerate(bilingual_titles, 1):
             goal_type = "general" if goal_order <= 5 else "specialized"
             default_weight = 10 if goal_type == "general" else 20
-            measure = f"نسبة تحقيق الهدف وفق المستهدف المعتمد: {title.rstrip('.')}"
+            measure_ar = f"نسبة تحقيق الهدف وفق المستهدف المعتمد: {title_ar.rstrip('.')}"
+            measure_en = f"Achievement rate against the approved target: {title_en.rstrip('.')}"
             db.execute(
                 """INSERT OR IGNORE INTO evaluation_goal_catalog
-                   (category_id,stable_key,goal_type,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
-                   VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
-                (category["id"], f"{stable_key}:{goal_order:02d}", goal_type, title, "", measure,
-                 default_weight, goal_order, stamp, stamp),
+                   (category_id,stable_key,goal_type,title,title_ar,title_en,description,description_ar,description_en,
+                    measure,measure_ar,measure_en,default_weight,sort_order,active,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+                (category["id"], f"{stable_key}:{goal_order:02d}", goal_type, title_ar, title_ar, title_en,
+                 "", "", "", measure_ar, measure_ar, measure_en, default_weight, goal_order, stamp, stamp),
+            )
+            db.execute(
+                """UPDATE evaluation_goal_catalog
+                      SET title_ar=CASE WHEN TRIM(title_ar)='' THEN title ELSE title_ar END,
+                          title_en=CASE WHEN TRIM(title_en)='' THEN ? ELSE title_en END,
+                          description_ar=CASE WHEN TRIM(description_ar)='' THEN description ELSE description_ar END,
+                          measure_ar=CASE WHEN TRIM(measure_ar)='' THEN measure ELSE measure_ar END,
+                          measure_en=CASE WHEN TRIM(measure_en)='' THEN ? ELSE measure_en END
+                    WHERE stable_key=?""",
+                (title_en, measure_en, f"{stable_key}:{goal_order:02d}"),
             )
 
 
@@ -425,6 +582,30 @@ def goal_rows_match_profile(rows: list[sqlite3.Row], profile: tuple[tuple[str, s
     return True
 
 
+def backfill_built_in_job_goal_english(db: sqlite3.Connection) -> int:
+    """Translate untouched legacy system profiles without changing tenant copy."""
+    updated = 0
+    rows = db.execute(
+        """SELECT id,title,description,measure,title_en,description_en,measure_en
+             FROM evaluation_goal_templates"""
+    ).fetchall()
+    for row in rows:
+        english = BUILT_IN_JOB_GOAL_TRANSLATIONS.get((row["title"], row["description"], row["measure"]))
+        if english is None:
+            continue
+        title_en, description_en, measure_en = english
+        cursor = db.execute(
+            """UPDATE evaluation_goal_templates
+                  SET title_en=CASE WHEN TRIM(title_en)='' THEN ? ELSE title_en END,
+                      description_en=CASE WHEN TRIM(description_en)='' THEN ? ELSE description_en END,
+                      measure_en=CASE WHEN TRIM(measure_en)='' THEN ? ELSE measure_en END
+                WHERE id=? AND (TRIM(title_en)='' OR TRIM(description_en)='' OR TRIM(measure_en)='')""",
+            (title_en, description_en, measure_en, row["id"]),
+        )
+        updated += int(cursor.rowcount)
+    return updated
+
+
 def seed_job_goal_templates(
     db: sqlite3.Connection,
     job_title_id: int,
@@ -439,6 +620,7 @@ def seed_job_goal_templates(
     ).fetchall()
     if existing:
         if goal_rows_match_profile(existing, templates):
+            backfill_built_in_job_goal_english(db)
             return
         built_in_profiles = (
             GENERIC_JOB_GOALS, SALES_EMPLOYEE_GOALS, PROCUREMENT_LOGISTICS_GOALS,
@@ -457,19 +639,26 @@ def seed_job_goal_templates(
             )
         for sort_order, (row, template) in enumerate(zip(existing, templates), 1):
             title, description, measure, weight = template
+            title_en, description_en, measure_en = BUILT_IN_JOB_GOAL_TRANSLATIONS[(title, description, measure)]
             db.execute(
                 """UPDATE evaluation_goal_templates
-                      SET title=?,description=?,measure=?,default_weight=?,sort_order=?,active=1,updated_at=?
+                      SET title=?,title_ar=?,title_en=?,description=?,description_ar=?,description_en=?,
+                          measure=?,measure_ar=?,measure_en=?,
+                          default_weight=?,sort_order=?,active=1,updated_at=?
                     WHERE id=?""",
-                (title, description, measure, weight, sort_order, stamp, row["id"]),
+                (title, title, title_en, description, description, description_en, measure, measure, measure_en,
+                 weight, sort_order, stamp, row["id"]),
             )
         return
     for sort_order, (title, description, measure, weight) in enumerate(templates, 1):
+        title_en, description_en, measure_en = BUILT_IN_JOB_GOAL_TRANSLATIONS[(title, description, measure)]
         db.execute(
             """INSERT OR IGNORE INTO evaluation_goal_templates
-               (job_title_id,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,1,?,?)""",
-            (job_title_id, title, description, measure, weight, sort_order, stamp, stamp),
+               (job_title_id,title,title_ar,title_en,description,description_ar,description_en,measure,measure_ar,measure_en,
+                default_weight,sort_order,active,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+            (job_title_id, title, title, title_en, description, description, description_en, measure, measure, measure_en,
+             weight, sort_order, stamp, stamp),
         )
 DEFAULT_CARD_INSTRUCTIONS = "البطاقة شخصية ولا يجوز استخدامها من غير صاحبها. عند العثور عليها يرجى التواصل مع المؤسسة."
 LANGUAGE_CATALOG: dict[str, dict[str, str]] = {
@@ -2434,10 +2623,16 @@ def initialize_database(db_path: Path) -> None:
                 "evaluation_goal_templates": {
                     "source_catalog_goal_id": "INTEGER",
                     "objective_type": "TEXT NOT NULL DEFAULT 'general' CHECK (objective_type IN ('general','specialized'))",
+                    "title_ar": "TEXT NOT NULL DEFAULT ''", "title_en": "TEXT NOT NULL DEFAULT ''",
+                    "description_ar": "TEXT NOT NULL DEFAULT ''", "description_en": "TEXT NOT NULL DEFAULT ''",
+                    "measure_ar": "TEXT NOT NULL DEFAULT ''", "measure_en": "TEXT NOT NULL DEFAULT ''",
                 },
                 "evaluation_goals": {
                     "source_template_id": "INTEGER",
                     "objective_type": "TEXT NOT NULL DEFAULT 'general' CHECK (objective_type IN ('general','specialized'))",
+                    "title_ar": "TEXT NOT NULL DEFAULT ''", "title_en": "TEXT NOT NULL DEFAULT ''",
+                    "description_ar": "TEXT NOT NULL DEFAULT ''", "description_en": "TEXT NOT NULL DEFAULT ''",
+                    "measure_ar": "TEXT NOT NULL DEFAULT ''", "measure_en": "TEXT NOT NULL DEFAULT ''",
                     "awarded_points": "REAL",
                     "goal_type": "TEXT NOT NULL DEFAULT 'result'",
                     "start_date": "TEXT",
@@ -2446,6 +2641,14 @@ def initialize_database(db_path: Path) -> None:
                     "evidence_note": "TEXT NOT NULL DEFAULT ''",
                     "evidence_file_name": "TEXT NOT NULL DEFAULT ''",
                     "evidence_file_data": "TEXT",
+                },
+                "evaluation_goal_catalog_categories": {
+                    "name_ar": "TEXT NOT NULL DEFAULT ''", "name_en": "TEXT NOT NULL DEFAULT ''",
+                },
+                "evaluation_goal_catalog": {
+                    "title_ar": "TEXT NOT NULL DEFAULT ''", "title_en": "TEXT NOT NULL DEFAULT ''",
+                    "description_ar": "TEXT NOT NULL DEFAULT ''", "description_en": "TEXT NOT NULL DEFAULT ''",
+                    "measure_ar": "TEXT NOT NULL DEFAULT ''", "measure_en": "TEXT NOT NULL DEFAULT ''",
                 },
                 "notifications": {
                     "available_at": "TEXT", "hidden_at": "TEXT", "hidden_by": "INTEGER", "edited_at": "TEXT",
@@ -2866,6 +3069,48 @@ def initialize_database(db_path: Path) -> None:
                 db.execute("ALTER TABLE employee_documents_v44 RENAME TO employee_documents")
             stamp = now_iso()
             seed_evaluation_goal_catalog(db, stamp)
+            # Preserve the legacy Arabic columns as the compatibility source,
+            # then attach approved catalogue English to every linked template
+            # and evaluation snapshot (including historical evaluations).
+            db.execute(
+                """UPDATE evaluation_goal_templates
+                      SET title_ar=CASE WHEN TRIM(title_ar)='' THEN title ELSE title_ar END,
+                          description_ar=CASE WHEN TRIM(description_ar)='' THEN description ELSE description_ar END,
+                          measure_ar=CASE WHEN TRIM(measure_ar)='' THEN measure ELSE measure_ar END"""
+            )
+            backfill_built_in_job_goal_english(db)
+            db.execute(
+                """UPDATE evaluation_goal_templates AS t
+                      SET title_en=CASE WHEN TRIM(title_en)='' THEN COALESCE((
+                              SELECT c.title_en FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id
+                          ),'') ELSE title_en END,
+                          description_en=CASE WHEN TRIM(description_en)='' THEN COALESCE((
+                              SELECT c.description_en FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id
+                          ),'') ELSE description_en END,
+                          measure_en=CASE WHEN TRIM(measure_en)='' THEN COALESCE((
+                              SELECT c.measure_en FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id
+                          ),'') ELSE measure_en END
+                    WHERE source_catalog_goal_id IS NOT NULL"""
+            )
+            db.execute(
+                """UPDATE evaluation_goals
+                      SET title_ar=CASE WHEN TRIM(title_ar)='' THEN title ELSE title_ar END,
+                          description_ar=CASE WHEN TRIM(description_ar)='' THEN description ELSE description_ar END,
+                          measure_ar=CASE WHEN TRIM(measure_ar)='' THEN measure ELSE measure_ar END"""
+            )
+            db.execute(
+                """UPDATE evaluation_goals AS g
+                      SET title_en=CASE WHEN TRIM(title_en)='' THEN COALESCE((
+                              SELECT t.title_en FROM evaluation_goal_templates t WHERE t.id=g.source_template_id
+                          ),'') ELSE title_en END,
+                          description_en=CASE WHEN TRIM(description_en)='' THEN COALESCE((
+                              SELECT t.description_en FROM evaluation_goal_templates t WHERE t.id=g.source_template_id
+                          ),'') ELSE description_en END,
+                          measure_en=CASE WHEN TRIM(measure_en)='' THEN COALESCE((
+                              SELECT t.measure_en FROM evaluation_goal_templates t WHERE t.id=g.source_template_id
+                          ),'') ELSE measure_en END
+                    WHERE source_template_id IS NOT NULL"""
+            )
             if template_objective_type_missing:
                 # Bring pre-r27 catalogue assignments onto the live-sync
                 # contract once.  A manual template with the new title wins the
@@ -2880,8 +3125,14 @@ def initialize_database(db_path: Path) -> None:
                                      AND other.title=(SELECT c.title FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id)
                               ) THEN (SELECT c.title FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id)
                               ELSE t.title END,
+                              title_ar=(SELECT c.title_ar FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              title_en=(SELECT c.title_en FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
                               description=(SELECT c.description FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              description_ar=(SELECT c.description_ar FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              description_en=(SELECT c.description_en FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
                               measure=(SELECT c.measure FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              measure_ar=(SELECT c.measure_ar FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
+                              measure_en=(SELECT c.measure_en FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
                               default_weight=(SELECT c.default_weight FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
                               objective_type=(SELECT c.goal_type FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
                               active=(SELECT c.active FROM evaluation_goal_catalog c WHERE c.id=t.source_catalog_goal_id),
@@ -2893,8 +3144,14 @@ def initialize_database(db_path: Path) -> None:
                 db.execute(
                     """UPDATE evaluation_goals AS g
                           SET title=(SELECT t.title FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              title_ar=(SELECT t.title_ar FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              title_en=(SELECT t.title_en FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
                               description=(SELECT t.description FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              description_ar=(SELECT t.description_ar FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              description_en=(SELECT t.description_en FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
                               measure=(SELECT t.measure FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              measure_ar=(SELECT t.measure_ar FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
+                              measure_en=(SELECT t.measure_en FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
                               weight=(SELECT t.default_weight FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
                               objective_type=(SELECT t.objective_type FROM evaluation_goal_templates t WHERE t.id=g.source_template_id),
                               updated_at=?
@@ -9991,7 +10248,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     department["job_titles"].append(title)
             if unassigned_titles:
                 departments.append({
-                    "id": None, "name": "مسميات غير مرتبطة بقسم", "active": True,
+                    "id": None, "name": "مسميات غير مرتبطة بقسم", "name_ar": "مسميات غير مرتبطة بقسم",
+                    "name_en": "Job titles without a department", "active": True,
                     "virtual": True, "job_titles": unassigned_titles,
                 })
             for department in departments:
@@ -10037,12 +10295,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 clauses.append("g.active=?")
                 params.append(1 if status == "active" else 0)
             if search:
-                clauses.append("(LOWER(g.title) LIKE ? OR LOWER(g.description) LIKE ? OR LOWER(g.measure) LIKE ? OR LOWER(c.name) LIKE ?)")
+                clauses.append("(LOWER(g.title) LIKE ? OR LOWER(g.title_en) LIKE ? OR LOWER(g.description) LIKE ? OR LOWER(g.description_en) LIKE ? OR LOWER(g.measure) LIKE ? OR LOWER(g.measure_en) LIKE ? OR LOWER(c.name) LIKE ? OR LOWER(c.name_en) LIKE ?)")
                 term = f"%{search}%"
-                params.extend((term, term, term, term))
+                params.extend((term, term, term, term, term, term, term, term))
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             goals = [dict(row) | {"active": bool(row["active"])} for row in self.db.execute(
-                """SELECT g.*,c.name AS category_name,c.stable_key AS category_key
+                """SELECT g.*,c.name AS category_name,c.name_ar AS category_name_ar,c.name_en AS category_name_en,
+                          c.stable_key AS category_key
                      FROM evaluation_goal_catalog g
                      JOIN evaluation_goal_catalog_categories c ON c.id=g.category_id"""
                 + where + " ORDER BY c.sort_order,g.sort_order,g.id",
@@ -10085,11 +10344,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if goal_type not in {"general", "specialized"}:
                     raise APIError(422, "نوع الهدف غير صالح.", "validation_error")
                 values["goal_type"] = goal_type
-            if not partial or "title" in data:
-                values["title"] = require_text(data, "title", 240)
-            for key, max_len in (("description", 2000), ("measure", 500)):
-                if key in data or not partial:
-                    values[key] = optional_text(data, key, max_len)
+            if not partial or "title" in data or "title_ar" in data:
+                title_ar = require_text({"title_ar": data.get("title_ar", data.get("title"))}, "title_ar", 240)
+                values.update({"title": title_ar, "title_ar": title_ar})
+            if not partial or "title_en" in data:
+                values["title_en"] = optional_text(data, "title_en", 240)
+            for field, max_len in (("description", 2000), ("measure", 500)):
+                if not partial or field in data or f"{field}_ar" in data:
+                    value_ar = optional_text({f"{field}_ar": data.get(f"{field}_ar", data.get(field, ""))}, f"{field}_ar", max_len)
+                    values.update({field: value_ar, f"{field}_ar": value_ar})
+                if not partial or f"{field}_en" in data:
+                    values[f"{field}_en"] = optional_text(data, f"{field}_en", max_len)
             if not partial or "default_weight" in data:
                 values["default_weight"] = as_float(data.get("default_weight"), "default_weight", 0.01, 100)
             if "sort_order" in data or not partial:
@@ -10107,12 +10372,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 return 0
             cursor = self.db.execute(
                 """UPDATE evaluation_goals
-                      SET title=?,description=?,measure=?,weight=?,objective_type=?,updated_at=?
+                      SET title=?,title_ar=?,title_en=?,description=?,description_ar=?,description_en=?,
+                          measure=?,measure_ar=?,measure_en=?,weight=?,objective_type=?,updated_at=?
                     WHERE source_template_id=?
                       AND evaluation_id IN (
                           SELECT id FROM evaluations WHERE status IN ('draft','returned')
                       )""",
-                (template["title"], template["description"], template["measure"],
+                (template["title"], template["title_ar"], template["title_en"],
+                 template["description"], template["description_ar"], template["description_en"],
+                 template["measure"], template["measure_ar"], template["measure_en"],
                  template["default_weight"], template["objective_type"], stamp, template_id),
             )
             return int(cursor.rowcount)
@@ -10130,9 +10398,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchall()
             self.db.execute(
                 """UPDATE evaluation_goal_templates
-                      SET title=?,description=?,measure=?,default_weight=?,objective_type=?,active=?,updated_at=?
+                      SET title=?,title_ar=?,title_en=?,description=?,description_ar=?,description_en=?,
+                          measure=?,measure_ar=?,measure_en=?,default_weight=?,objective_type=?,active=?,updated_at=?
                     WHERE source_catalog_goal_id=?""",
-                (goal["title"], goal["description"], goal["measure"], goal["default_weight"],
+                (goal["title"], goal["title_ar"], goal["title_en"],
+                 goal["description"], goal["description_ar"], goal["description_en"],
+                 goal["measure"], goal["measure_ar"], goal["measure_en"], goal["default_weight"],
                  goal["goal_type"], goal["active"], stamp, goal_id),
             )
             evaluation_goal_count = sum(
@@ -10234,20 +10505,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 for goal_id in goal_ids:
                     goal = goals_by_id[goal_id]
                     if goal_id in by_source:
-                        already_assigned.append({"catalog_goal_id": goal_id, "template_id": by_source[goal_id]["id"], "title": goal["title"]})
+                        already_assigned.append({"catalog_goal_id": goal_id, "template_id": by_source[goal_id]["id"], "title": goal["title"], "title_ar": goal["title_ar"], "title_en": goal["title_en"]})
                         continue
                     if str(goal["title"]) in by_title:
-                        conflicts.append({"catalog_goal_id": goal_id, "template_id": by_title[str(goal["title"])]["id"], "title": goal["title"]})
+                        conflicts.append({"catalog_goal_id": goal_id, "template_id": by_title[str(goal["title"])]["id"], "title": goal["title"], "title_ar": goal["title_ar"], "title_en": goal["title_en"]})
                         continue
                     cursor = self.db.execute(
                         """INSERT INTO evaluation_goal_templates
-                           (job_title_id,source_catalog_goal_id,objective_type,title,description,measure,default_weight,sort_order,active,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,?,1,?,?)""",
-                        (job_title_id, goal_id, goal["goal_type"], goal["title"], goal["description"], goal["measure"],
+                           (job_title_id,source_catalog_goal_id,objective_type,title,title_ar,title_en,
+                            description,description_ar,description_en,measure,measure_ar,measure_en,
+                            default_weight,sort_order,active,created_at,updated_at)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)""",
+                        (job_title_id, goal_id, goal["goal_type"], goal["title"], goal["title_ar"], goal["title_en"],
+                         goal["description"], goal["description_ar"], goal["description_en"],
+                         goal["measure"], goal["measure_ar"], goal["measure_en"],
                          goal["default_weight"], next_order, stamp, stamp),
                     )
                     template_id = int(cursor.lastrowid)
-                    added.append({"catalog_goal_id": goal_id, "template_id": template_id, "title": goal["title"]})
+                    added.append({"catalog_goal_id": goal_id, "template_id": template_id, "title": goal["title"], "title_ar": goal["title_ar"], "title_en": goal["title_en"]})
                     by_source[goal_id] = {"id": template_id}
                     by_title[str(goal["title"])] = {"id": template_id}
                     next_order += 1
@@ -10269,11 +10544,17 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if objective_type not in {"general", "specialized"}:
                     raise APIError(422, "تصنيف الهدف يجب أن يكون عاماً أو تخصصياً.", "invalid_objective_type")
                 values["objective_type"] = objective_type
-            if not partial or "title" in data:
-                values["title"] = require_text(data, "title", 240)
-            for key, max_len in (("description", 2000), ("measure", 500)):
-                if key in data or not partial:
-                    values[key] = optional_text(data, key, max_len)
+            if not partial or "title" in data or "title_ar" in data:
+                title_ar = require_text({"title_ar": data.get("title_ar", data.get("title"))}, "title_ar", 240)
+                values.update({"title": title_ar, "title_ar": title_ar})
+            if not partial or "title_en" in data:
+                values["title_en"] = optional_text(data, "title_en", 240)
+            for field, max_len in (("description", 2000), ("measure", 500)):
+                if not partial or field in data or f"{field}_ar" in data:
+                    value_ar = optional_text({f"{field}_ar": data.get(f"{field}_ar", data.get(field, ""))}, f"{field}_ar", max_len)
+                    values.update({field: value_ar, f"{field}_ar": value_ar})
+                if not partial or f"{field}_en" in data:
+                    values[f"{field}_en"] = optional_text(data, f"{field}_en", max_len)
             if not partial or "default_weight" in data:
                 values["default_weight"] = as_float(data.get("default_weight"), "default_weight", 0.01, 100)
             if "sort_order" in data or not partial:
@@ -10467,11 +10748,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if objective_type not in {"general", "specialized"}:
                     raise APIError(422, "تصنيف الهدف يجب أن يكون عاماً أو تخصصياً.", "invalid_objective_type")
                 result["objective_type"] = objective_type
-            if not partial or "title" in data:
-                result["title"] = require_text(data, "title", 240)
-            if not partial or "measure" in data:
-                result["measure"] = require_text(data, "measure", 500)
-            for key, max_len in (("description", 2000), ("employee_comment", 2000), ("evidence_note", 4000)):
+            if not partial or "title" in data or "title_ar" in data:
+                title_ar = require_text({"title_ar": data.get("title_ar", data.get("title"))}, "title_ar", 240)
+                result.update({"title": title_ar, "title_ar": title_ar})
+            if not partial or "title_en" in data:
+                result["title_en"] = optional_text(data, "title_en", 240)
+            if not partial or "measure" in data or "measure_ar" in data:
+                measure_ar = require_text({"measure_ar": data.get("measure_ar", data.get("measure"))}, "measure_ar", 500)
+                result.update({"measure": measure_ar, "measure_ar": measure_ar})
+            if not partial or "measure_en" in data:
+                result["measure_en"] = optional_text(data, "measure_en", 500)
+            if not partial or "description" in data or "description_ar" in data:
+                description_ar = optional_text({"description_ar": data.get("description_ar", data.get("description", ""))}, "description_ar", 2000)
+                result.update({"description": description_ar, "description_ar": description_ar})
+            if not partial or "description_en" in data:
+                result["description_en"] = optional_text(data, "description_en", 2000)
+            for key, max_len in (("employee_comment", 2000), ("evidence_note", 4000)):
                 if key in data or not partial:
                     result[key] = optional_text(data, key, max_len)
             if not partial or "weight" in data:
@@ -10535,9 +10827,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "source_template_id": template_id,
                     "objective_type": template["objective_type"],
                     "title": template["title"],
+                    "title_ar": template["title_ar"],
+                    "title_en": template["title_en"],
                     "description": template["description"],
+                    "description_ar": template["description_ar"],
+                    "description_en": template["description_en"],
                     "weight": float(template["default_weight"]),
                     "measure": template["measure"],
+                    "measure_ar": template["measure_ar"],
+                    "measure_en": template["measure_en"],
                     "achievement": as_float(data.get("achievement", 0), "achievement", 0, 100),
                     "employee_comment": optional_text(data, "employee_comment", 2000),
                     "goal_type": str(data.get("goal_type", "result")),
@@ -10602,10 +10900,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 for template in rows:
                     cursor = self.db.execute(
                         """INSERT INTO evaluation_goals
-                           (evaluation_id,source_template_id,objective_type,title,description,weight,measure,achievement,employee_comment,
+                           (evaluation_id,source_template_id,objective_type,title,title_ar,title_en,
+                            description,description_ar,description_en,weight,measure,measure_ar,measure_en,achievement,employee_comment,
                             goal_type,start_date,end_date,progress_status,evidence_note,created_at,updated_at)
-                           VALUES(?,?,?,?,?,?,?,0,'','result',?,?,'not_completed','',?,?)""",
-                        (evaluation_id, template["id"], template["objective_type"], template["title"], template["description"], template["default_weight"], template["measure"], evaluation["period_start"], evaluation["period_end"], stamp, stamp),
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,0,'','result',?,?,'not_completed','',?,?)""",
+                        (evaluation_id, template["id"], template["objective_type"],
+                         template["title"], template["title_ar"], template["title_en"],
+                         template["description"], template["description_ar"], template["description_en"],
+                         template["default_weight"], template["measure"], template["measure_ar"], template["measure_en"],
+                         evaluation["period_start"], evaluation["period_end"], stamp, stamp),
                     )
                     added_ids.append(int(cursor.lastrowid))
                 audit(self.db, user["id"], "evaluation.goals_from_templates", "evaluation", evaluation_id, {"template_ids": [int(row["id"]) for row in rows], "goal_ids": added_ids})

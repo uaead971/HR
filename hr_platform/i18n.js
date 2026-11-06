@@ -506,7 +506,8 @@
     'أضف {count} من الأهداف التخصصية قبل الإرسال.':'Add {count} specialized goal(s) before submission.','اختر الأهداف قبل الإرسال. يجب أن يتضمن تقييمك هدفين تخصصيين على الأقل.':'Select goals before submission. Your evaluation must include at least two specialized goals.',
     'تصنيف الهدف':'Goal classification','نوع القياس':'Measurement type','يلزم هدفان تخصصيان على الأقل قبل الإرسال.':'At least two specialized goals are required before submission.','التصنيف معتمد من مكتبة الوظيفة.':'Classification is controlled by the job goals library.',
     'أكمل هدفين تخصصيين':'Complete two specialized goals','اختر أهدافك أو اكتب هدفاً مخصصاً؛ لن يقبل الإرسال إلا عند اكتمال الحقول ومجموع ١٠٠ ووجود هدفين تخصصيين على الأقل.':'Select goals or write a custom goal. Submission requires complete fields, a total weight of 100, and at least two specialized goals.',
-    'ينعكس الهدف النشط مباشرة في مكتبة موظفي هذا المسمى والتقييمات القابلة للتعديل.':'An active goal is immediately reflected in this job title’s employee library and editable evaluations.'
+    'ينعكس الهدف النشط مباشرة في مكتبة موظفي هذا المسمى والتقييمات القابلة للتعديل.':'An active goal is immediately reflected in this job title’s employee library and editable evaluations.',
+    'بيانات الهدف باللغتين':'Goal details in both languages','اسم الهدف بالعربية':'Goal name in Arabic','اسم الهدف بالإنجليزية':'Goal name in English','عنوان الهدف بالعربية':'Goal title in Arabic','عنوان الهدف بالإنجليزية':'Goal title in English','الوصف بالعربية':'Description in Arabic','الوصف بالإنجليزية':'Description in English','معيار القياس بالعربية':'Measurement criterion in Arabic','معيار القياس بالإنجليزية':'Measurement criterion in English','مؤشر القياس بالعربية':'Measurement indicator in Arabic','مؤشر القياس بالإنجليزية':'Measurement indicator in English'
   });
 
   Object.assign(english, {
