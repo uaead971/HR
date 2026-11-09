@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.6"
+APP_VERSION = "5.8.7"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -4464,6 +4464,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/evaluations/(\d+)/decision", self.api_evaluation_decision),
                     ("POST", r"/api/evaluations/(\d+)/manager-review", self.api_evaluation_manager_review),
                     ("POST", r"/api/evaluations/(\d+)/hr-review", self.api_evaluation_hr_review),
+                    ("POST", r"/api/evaluations/(\d+)/return", self.api_evaluation_return),
                     ("POST", r"/api/evaluations/(\d+)/return-to-employee", self.api_evaluation_return_to_employee),
                     ("POST", r"/api/evaluations/(\d+)/grievance", self.api_evaluation_grievance_post),
                     ("POST", r"/api/evaluation-grievances/(\d+)/resolve", self.api_evaluation_grievance_resolve),
@@ -11570,6 +11571,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "can_manager_override": bool(manager_override and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
                 "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
                 "can_admin_return": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
+                "can_admin_return_to_employee": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
+                "can_admin_return_to_manager": bool(is_system_admin(user) and not published and evaluation["status"] in {"in_review", "approved"}),
                 "can_grieve": bool(own and published and grievance_row is None),
                 "manager_fallback": bool(manager_fallback),
                 "score_total": round(score_total, 2) if score_total is not None else None,
@@ -11594,7 +11597,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "id", "cycle_id", "employee_id", "year", "cycle_name", "full_name", "employee_no", "status",
                 "workflow_version", "manager_employee_id", "manager_name", "weighted_score", "rating", "disclosure_date",
                 "published", "can_manager_review", "can_hr_review", "can_grieve", "score_total", "submitted_late",
-                "can_manager_override", "can_admin_return", "manager_fallback",
+                "can_manager_override", "can_admin_return", "can_admin_return_to_employee",
+                "can_admin_return_to_manager", "manager_fallback",
                 "period_start", "period_end", "self_opens_on", "self_due_on", "manager_due_on", "hr_due_on",
                 "cycle_status", "announcement_title", "announcement_body", "announced_at",
             )} | {"grievance_status": payload["grievance"]["status"] if payload["grievance"] else None}
@@ -11852,18 +11856,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {"score": score, "disclosure_date": disclosure.isoformat()})
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
-        def api_evaluation_return_to_employee(self, evaluation_id: int) -> None:
-            """Let a system administrator reopen any evaluation not yet disclosed."""
+        def api_evaluation_return(self, evaluation_id: int, forced_target: str | None = None) -> None:
+            """Return an unpublished evaluation to the employee or prior manager stage."""
             user = self.current_user(True)
             assert user is not None
             if not is_system_admin(user):
-                raise APIError(403, "مسؤول النظام وحده يستطيع إعادة التقييم إلى الموظف.", "forbidden")
+                raise APIError(403, "مسؤول النظام وحده يستطيع إعادة التقييم حسب التسلسل.", "forbidden")
             evaluation = self.evaluation_row(evaluation_id)
             if self.evaluation_is_published(evaluation):
-                raise APIError(409, "لا يمكن إعادة تقييم نُشرت نتيجته للموظف.", "evaluation_already_published")
-            if evaluation["status"] == "draft":
-                raise APIError(409, "التقييم موجود بالفعل كمسودة لدى الموظف.", "evaluation_already_with_employee")
+                raise APIError(409, "لا يمكن إعادة تقييم نُشرت نتيجته.", "evaluation_already_published")
             data = self.read_json()
+            target = forced_target or str(data.get("target") or "").strip().lower()
+            if target not in {"employee", "manager"}:
+                raise APIError(422, "اختر الإعادة إلى الموظف أو المسؤول المباشر.", "invalid_return_target")
+            if target == "employee" and evaluation["status"] == "draft":
+                raise APIError(409, "التقييم موجود بالفعل كمسودة لدى الموظف.", "evaluation_already_with_employee")
+            if target == "manager" and evaluation["status"] not in {"in_review", "approved"}:
+                raise APIError(409, "التقييم موجود بالفعل لدى المسؤول المباشر أو لم يصل بعد إلى مرحلة يمكن إعادتها إليه.", "evaluation_already_with_manager")
             reason = require_text(data, "reason", 3000)
             stamp = now_iso()
             manager_id, manager_fallback = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
@@ -11871,6 +11880,14 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "SELECT id FROM users WHERE employee_id=? AND active=1",
                 (evaluation["employee_id"],),
             ).fetchone()
+            manager_user = self.db.execute(
+                "SELECT id FROM users WHERE employee_id=? AND active=1",
+                (manager_id,),
+            ).fetchone() if manager_id else None
+            fallback_recipients = self.evaluation_fallback_reviewer_user_ids(manager_id) if manager_fallback else []
+            manager_recipient_ids = fallback_recipients if manager_fallback else ([int(manager_user["id"])] if manager_user else [])
+            if target == "manager" and not manager_recipient_ids:
+                raise APIError(409, "لا يوجد مسؤول مباشر أو رئيس موارد بشرية أو مسؤول نظام نشط لاستلام التقييم.", "manager_missing")
             with self.db:
                 # A future disclosure notification created during HR approval
                 # must not become visible after the evaluation is reopened.
@@ -11887,39 +11904,69 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         (stamp, user["id"], employee_user["id"], evaluation["finalized_at"]),
                     )
                 self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
-                self.db.execute(
-                    "UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?",
-                    (stamp, evaluation_id),
-                )
-                self.db.execute(
-                    """UPDATE evaluations
-                          SET workflow_version=2,status='draft',manager_employee_id=?,current_step=1,
-                              weighted_score=NULL,rating=NULL,submitted_at=NULL,submitted_late=0,
-                              manager_report='',manager_submitted_at=NULL,hr_reviewed_by=NULL,
-                              hr_comment=?,disclosure_date=NULL,finalized_at=NULL,updated_at=?
-                        WHERE id=?""",
-                    (manager_id, reason, stamp, evaluation_id),
-                )
-                if employee_user:
+                if target == "employee":
+                    self.db.execute(
+                        "UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?",
+                        (stamp, evaluation_id),
+                    )
+                    self.db.execute(
+                        """UPDATE evaluations
+                              SET workflow_version=2,status='draft',manager_employee_id=?,current_step=1,
+                                  weighted_score=NULL,rating=NULL,submitted_at=NULL,submitted_late=0,
+                                  manager_report='',manager_submitted_at=NULL,hr_reviewed_by=NULL,
+                                  hr_comment=?,disclosure_date=NULL,finalized_at=NULL,updated_at=?
+                            WHERE id=?""",
+                        (manager_id, reason, stamp, evaluation_id),
+                    )
+                    if employee_user:
+                        create_internal_notification(
+                            self.db,
+                            user["id"],
+                            [int(employee_user["id"])],
+                            "أعيد التقييم السنوي إليك",
+                            f"أعاد مسؤول النظام التقييم إلى مسودتك لاستكماله وإرساله من جديد. السبب: {reason}",
+                        )
+                else:
+                    if manager_id is not None:
+                        self.db.execute(
+                            """INSERT INTO evaluation_approvals
+                               (evaluation_id,step_no,approver_employee_id,status,comment,decided_at,created_at)
+                               VALUES(?,1,?,'pending','',NULL,?)""",
+                            (evaluation_id, manager_id, stamp),
+                        )
+                    self.db.execute(
+                        """UPDATE evaluations
+                              SET workflow_version=2,status='returned',manager_employee_id=?,current_step=1,
+                                  weighted_score=NULL,rating=NULL,manager_submitted_at=NULL,
+                                  hr_reviewed_by=NULL,hr_comment=?,disclosure_date=NULL,
+                                  finalized_at=NULL,updated_at=?
+                            WHERE id=?""",
+                        (manager_id, reason, stamp, evaluation_id),
+                    )
                     create_internal_notification(
                         self.db,
                         user["id"],
-                        [int(employee_user["id"])],
-                        "أعيد التقييم السنوي إليك",
-                        f"أعاد مسؤول النظام التقييم إلى مسودتك لاستكماله وإرساله من جديد. السبب: {reason}",
+                        manager_recipient_ids,
+                        "أعيد التقييم السنوي للمسؤول المباشر",
+                        f"أعاد مسؤول النظام التقييم لتعديل نقاط المسؤول وتقريره ثم إرساله إلى الموارد البشرية. السبب: {reason}",
                     )
                 audit(
                     self.db,
                     user["id"],
-                    "evaluation.admin_return_to_employee",
+                    f"evaluation.admin_return_to_{target}",
                     "evaluation",
                     evaluation_id,
                     {
-                        "from_status": evaluation["status"], "reason": reason,
+                        "from_status": evaluation["status"], "target": target, "reason": reason,
                         "manager_employee_id": manager_id, "manager_fallback": manager_fallback,
+                        "fallback_reviewer_user_ids": fallback_recipients,
                     },
                 )
             self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_return_to_employee(self, evaluation_id: int) -> None:
+            """Backward-compatible employee-return route."""
+            self.api_evaluation_return(evaluation_id, "employee")
 
         def published_evaluation_summaries(self, employee_id: int) -> list[dict[str, Any]]:
             rows = self.db.execute(
