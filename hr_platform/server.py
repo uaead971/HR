@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.7"
+APP_VERSION = "5.8.8"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -11572,7 +11572,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
                 "can_admin_return": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
                 "can_admin_return_to_employee": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
-                "can_admin_return_to_manager": bool(is_system_admin(user) and not published and evaluation["status"] in {"in_review", "approved"}),
+                "can_admin_return_to_manager": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
                 "can_grieve": bool(own and published and grievance_row is None),
                 "manager_fallback": bool(manager_fallback),
                 "score_total": round(score_total, 2) if score_total is not None else None,
@@ -11871,8 +11871,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "اختر الإعادة إلى الموظف أو المسؤول المباشر.", "invalid_return_target")
             if target == "employee" and evaluation["status"] == "draft":
                 raise APIError(409, "التقييم موجود بالفعل كمسودة لدى الموظف.", "evaluation_already_with_employee")
-            if target == "manager" and evaluation["status"] not in {"in_review", "approved"}:
-                raise APIError(409, "التقييم موجود بالفعل لدى المسؤول المباشر أو لم يصل بعد إلى مرحلة يمكن إعادتها إليه.", "evaluation_already_with_manager")
+            if target == "manager" and evaluation["status"] == "draft":
+                raise APIError(409, "لم يرسل الموظف تقييمه بعد، لذلك لا يمكن نقله إلى المسؤول المباشر.", "evaluation_still_with_employee")
             reason = require_text(data, "reason", 3000)
             stamp = now_iso()
             manager_id, manager_fallback = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
