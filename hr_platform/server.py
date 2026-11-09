@@ -119,6 +119,7 @@ PERMISSION_CATALOG: dict[str, dict[str, str]] = {
 }
 
 ALL_PERMISSIONS = {permission for group in PERMISSION_CATALOG.values() for permission in group}
+SUPERVISOR_DEFAULT_PERMISSIONS = ALL_PERMISSIONS - set(PERMISSION_CATALOG["security"])
 
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
@@ -127,6 +128,10 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     # permission catalogue, while target-level guards below keep every system
     # administrator account outside its visibility and control.
     "hr": set(ALL_PERMISSIONS),
+    # Supervisors are standalone operational accounts, not employees.  They
+    # start at the HR operational level while security administration remains
+    # an explicit grant that a system administrator can add when needed.
+    "supervisor": set(SUPERVISOR_DEFAULT_PERMISSIONS),
     # Legacy databases may still contain this value.  It is deliberately
     # limited to the direct-manager ceiling and is migrated to ``manager``.
     "general_manager": {"attendance.team", "leave.team"},
@@ -136,10 +141,10 @@ ROLE_PERMISSIONS: dict[str, set[str]] = {
     "employee": set(),
 }
 
-ACCOUNT_ROLES = {"admin", "hr", "manager", "employee"}
-PEOPLE_ADMIN_ROLES = {"admin", "hr"}
-ROLE_AUTHORITY = {"employee": 10, "manager": 20, "general_manager": 20, "hr": 30, "admin": 100}
-DELEGABLE_PERMISSION_ROLES = {"manager", "general_manager"}
+ACCOUNT_ROLES = {"admin", "hr", "supervisor", "manager", "employee"}
+PEOPLE_ADMIN_ROLES = {"admin", "hr", "supervisor"}
+ROLE_AUTHORITY = {"employee": 10, "manager": 20, "general_manager": 20, "supervisor": 30, "hr": 30, "admin": 100}
+DELEGABLE_PERMISSION_ROLES = {"manager", "general_manager", "supervisor"}
 
 DOCUMENT_TYPES = {
     "passport", "identity", "residency", "visa", "work_permit", "contract", "job_offer",
@@ -2593,6 +2598,57 @@ def process_evaluation_reminders(db: sqlite3.Connection, today: date | None = No
     return sent
 
 
+def migrate_users_supervisor_role(db: sqlite3.Connection) -> None:
+    """Expand the users role constraint without changing account identities."""
+    schema_row = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'"
+    ).fetchone()
+    if schema_row is None or "'supervisor'" in str(schema_row["sql"] or ""):
+        return
+    db.commit()
+    db.execute("PRAGMA foreign_keys=OFF")
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            """CREATE TABLE users_v589 (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                   display_name TEXT NOT NULL,
+                   role TEXT NOT NULL CHECK (role IN ('admin','hr','supervisor','manager','employee')),
+                   password_hash TEXT NOT NULL,
+                   password_salt TEXT NOT NULL,
+                   employee_id INTEGER UNIQUE,
+                   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+                   must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0,1)),
+                   is_super_admin INTEGER NOT NULL DEFAULT 0 CHECK (is_super_admin IN (0,1)),
+                   last_password_change_at TEXT,
+                   created_at TEXT NOT NULL,
+                   updated_at TEXT NOT NULL,
+                   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE SET NULL
+               )"""
+        )
+        db.execute(
+            """INSERT INTO users_v589(
+                   id,email,display_name,role,password_hash,password_salt,employee_id,active,
+                   must_change_password,is_super_admin,last_password_change_at,created_at,updated_at
+               )
+               SELECT id,email,display_name,role,password_hash,password_salt,employee_id,active,
+                      must_change_password,is_super_admin,last_password_change_at,created_at,updated_at
+                 FROM users"""
+        )
+        db.execute("DROP TABLE users")
+        db.execute("ALTER TABLE users_v589 RENAME TO users")
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.execute("PRAGMA foreign_keys=ON")
+    violations = db.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError("Foreign-key check failed after expanding user roles")
+
+
 def initialize_database(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     schema = SCHEMA_FILE.read_text(encoding="utf-8")
@@ -3482,6 +3538,7 @@ def initialize_database(db_path: Path) -> None:
             refresh_legacy_generated_contracts(db)
             process_evaluation_reminders(db)
             ensure_birthday_notifications(db)
+        migrate_users_supervisor_role(db)
     finally:
         db.close()
 
@@ -3555,6 +3612,17 @@ def effective_permissions(db: sqlite3.Connection, user: dict[str, Any]) -> tuple
     return sorted(granted), reasons
 
 
+def is_hr_privacy_account(db: sqlite3.Connection, user: dict[str, Any] | sqlite3.Row) -> bool:
+    """Return whether an account may handle HR-wide confidential workflows."""
+    candidate = dict(user)
+    role = str(candidate.get("role") or "").lower()
+    return bool(
+        is_system_admin(candidate)
+        or role == "hr"
+        or (role == "supervisor" and has_permission(db, candidate, "employee.view"))
+    )
+
+
 def audit(db: sqlite3.Connection, actor_id: int | None, action: str, entity_type: str, entity_id: Any, details: Any = None) -> None:
     db.execute(
         "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
@@ -3617,7 +3685,7 @@ def compliance_notification_recipients(
         role = str(candidate.get("role") or "").lower()
         if include_system_admins and is_system_admin(candidate):
             recipients.add(int(candidate["id"]))
-        if include_hr and role == "hr":
+        if include_hr and (role == "hr" or (role == "supervisor" and has_permission(db, candidate, "employee.view"))):
             recipients.add(int(candidate["id"]))
         if include_general_manager and is_configured_general_manager(db, candidate):
             recipients.add(int(candidate["id"]))
@@ -3631,7 +3699,7 @@ def may_view_notification(db: sqlite3.Connection, user: dict[str, Any], notifica
     keys = notification.keys() if hasattr(notification, "keys") else notification
     scope = str(notification["notification_scope"] if "notification_scope" in keys else "recipient")
     if scope == "personal":
-        if is_system_admin(user) or str(user.get("role") or "").lower() == "hr":
+        if is_hr_privacy_account(db, user):
             return True
         notification_id = notification["id"] if "id" in keys else notification["notification_id"] if "notification_id" in keys else None
         if not notification_id:
@@ -3642,13 +3710,13 @@ def may_view_notification(db: sqlite3.Connection, user: dict[str, Any], notifica
         ).fetchone() is not None
     if scope != "administrative":
         return True
-    return is_system_admin(user) or str(user.get("role") or "").lower() == "hr" or is_configured_general_manager(db, user)
+    return is_hr_privacy_account(db, user) or is_configured_general_manager(db, user)
 
 
 def system_notification_sender(db: sqlite3.Connection) -> int | None:
     row = db.execute(
         """SELECT id FROM users WHERE active=1
-           ORDER BY CASE WHEN is_super_admin=1 THEN 0 WHEN role='admin' THEN 1 WHEN role='hr' THEN 2 ELSE 3 END,id
+           ORDER BY CASE WHEN is_super_admin=1 THEN 0 WHEN role='admin' THEN 1 WHEN role='hr' THEN 2 WHEN role='supervisor' THEN 3 ELSE 4 END,id
            LIMIT 1"""
     ).fetchone()
     return int(row["id"]) if row else None
@@ -4320,6 +4388,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/org/grid", self.api_org_grid),
                     ("GET", r"/api/admin/permissions/catalog", self.api_permission_catalog),
                     ("GET", r"/api/admin/users", self.api_admin_users),
+                    ("POST", r"/api/admin/supervisors", self.api_supervisor_account_post),
                     ("POST", r"/api/employees/(\d+)/account", self.api_employee_account_post),
                     ("PATCH", r"/api/admin/users/(\d+)", self.api_admin_user_patch),
                     ("GET", r"/api/admin/users/(\d+)/permissions", self.api_user_permissions_get),
@@ -4745,7 +4814,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             return database_evaluation_manager_id(self.db, employee_id)
 
         def evaluation_fallback_reviewer_user_ids(self, hr_head_employee_id: int | None) -> list[int]:
-            """Return the HR head and every active system administrator."""
+            """Return every active account authorized for HR evaluation review."""
             recipient_ids: set[int] = set()
             if hr_head_employee_id is not None:
                 account = self.db.execute(
@@ -4755,7 +4824,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if account:
                     recipient_ids.add(int(account["id"]))
             for account in self.db.execute("SELECT * FROM users WHERE active=1").fetchall():
-                if is_system_admin(account):
+                candidate = dict(account)
+                if is_system_admin(candidate) or has_permission(self.db, candidate, "evaluation.review"):
                     recipient_ids.add(int(account["id"]))
             return sorted(recipient_ids)
 
@@ -5158,6 +5228,43 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             ).fetchall()
             self.send_json(200, {"items": [self.admin_user_payload(row) for row in rows], "account_candidates": [dict(row) for row in candidates]})
 
+        def api_supervisor_account_post(self) -> None:
+            """Create an operational account that is deliberately not an employee."""
+            actor = self.current_user(True)
+            assert actor is not None
+            if not is_system_admin(actor):
+                raise APIError(403, "إنشاء حسابات المشرفين متاح لمسؤول النظام فقط.", "system_admin_required")
+            data = self.read_json()
+            display_name = require_text(data, "display_name", 180)
+            email = str(data.get("email") or "").strip().lower()
+            if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+                raise APIError(422, "أدخل بريداً إلكترونياً صالحاً للمشرف.", "validation_error", {"field": "email"})
+            if self.db.execute("SELECT 1 FROM users WHERE lower(email)=lower(?)", (email,)).fetchone():
+                raise APIError(409, "البريد مستخدم في حساب آخر.", "duplicate_email")
+            password = str(data.get("password") or "")
+            if password != str(data.get("confirm_password") or ""):
+                raise APIError(422, "تأكيد كلمة المرور غير مطابق.", "password_mismatch")
+            validate_password_strength(password)
+            stamp = now_iso()
+            digest, salt = password_record(password)
+            try:
+                with self.db:
+                    cursor = self.db.execute(
+                        """INSERT INTO users(
+                               email,display_name,role,password_hash,password_salt,employee_id,
+                               active,must_change_password,created_at,updated_at
+                           ) VALUES(?,?,'supervisor',?,?,NULL,1,1,?,?)""",
+                        (email, display_name, digest, salt, stamp, stamp),
+                    )
+                    supervisor_id = int(cursor.lastrowid)
+                    audit(
+                        self.db, actor["id"], "security.supervisor_create", "user", supervisor_id,
+                        {"email": email, "standalone": True, "default_permissions": sorted(SUPERVISOR_DEFAULT_PERMISSIONS)},
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise APIError(409, "تعذر إنشاء حساب المشرف لأن البريد مستخدم بالفعل.", "duplicate_email") from exc
+            self.send_json(201, {"user": self.admin_user_payload(self.admin_target(supervisor_id, actor))})
+
         def api_employee_account_post(self, employee_id: int) -> None:
             """Provision a login later for a profile created without one."""
             actor = self.require_permission("security.manage_users")
@@ -5178,6 +5285,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             validate_password_strength(password)
             role = str(data.get("role") or "employee")
             self.validate_role_assignment(actor, role)
+            if role == "supervisor":
+                raise APIError(422, "حساب المشرف مستقل ولا يُربط بملف موظف.", "standalone_supervisor_required", {"field": "role"})
             stamp = now_iso(); digest, salt = password_record(password)
             try:
                 with self.db:
@@ -5229,6 +5338,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if "role" in data:
                 role = str(data["role"])
                 self.validate_role_assignment(actor, role)
+                if role == "supervisor" and target["employee_id"] is not None:
+                    raise APIError(422, "حساب المشرف مستقل ولا يُربط بملف موظف.", "standalone_supervisor_required", {"field": "role"})
+                if target["role"] == "supervisor" and role != "supervisor":
+                    raise APIError(422, "لا يمكن تحويل حساب المشرف المستقل إلى دور موظف؛ أنشئ حساب الموظف من ملفه.", "standalone_supervisor_role_locked", {"field": "role"})
                 if int(actor["id"]) == int(target["id"]) and role != str(target["role"]):
                     next_permissions = ROLE_PERMISSIONS.get(role, set())
                     if not {"security.manage_users", "security.manage_permissions"}.issubset(next_permissions):
@@ -7354,6 +7467,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         validate_password_strength(password)
                         role = str(data.get("role", "employee"))
                         self.validate_role_assignment(user, role)
+                        if role == "supervisor":
+                            raise APIError(422, "حساب المشرف مستقل ولا يُربط بملف موظف.", "standalone_supervisor_required", {"field": "role"})
                         digest, salt = password_record(password)
                         account_cursor = self.db.execute(
                             "INSERT INTO users(email,display_name,role,password_hash,password_salt,employee_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -9390,7 +9505,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 params.append(status)
             where = " WHERE " + " AND ".join(conditions) if conditions else ""
             rows = self.db.execute("SELECT o.*,e.employee_no,e.full_name,d.name AS department_name,a.full_name AS approval_employee_name,u.display_name AS decided_by_name FROM overtime_requests o JOIN employees e ON e.id=o.employee_id LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees a ON a.id=o.approval_employee_id LEFT JOIN users u ON u.id=o.decided_by" + where + " ORDER BY o.created_at DESC", params).fetchall()
-            if not (is_system_admin(user) or str(user.get("role") or "").lower() == "hr"):
+            if not (is_system_admin(user) or has_permission(self.db, user, "overtime.approve")):
                 employee_id = int(user.get("employee_id") or 0)
                 rows = [
                     row for row in rows
@@ -9459,7 +9574,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(409, "تم اتخاذ قرار على هذا الطلب سابقاً.", "invalid_status")
             if user.get("employee_id") == request_row["employee_id"]:
                 raise APIError(403, "لا يمكن اعتماد طلبك الشخصي.", "self_approval_forbidden")
-            if not is_system_admin and request_row["approval_employee_id"] and int(user.get("employee_id") or 0) != int(request_row["approval_employee_id"]):
+            hr_level_approver = str(user.get("role") or "").lower() in {"hr", "supervisor"}
+            if not is_system_admin and not hr_level_approver and request_row["approval_employee_id"] and int(user.get("employee_id") or 0) != int(request_row["approval_employee_id"]):
                 raise APIError(403, "هذا الطلب محال لمسؤول اعتماد آخر.", "approval_manager_required")
             reason = optional_text(data, "reason", 1000)
             if action == "reject" and not reason:
@@ -9710,7 +9826,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 and (
                     not data.get("approval_employee_id")
                     or int(user.get("employee_id") or 0) == int(data.get("approval_employee_id") or 0)
-                    or str(user.get("role") or "") == "admin"
+                    or str(user.get("role") or "").lower() in {"admin", "hr", "supervisor"}
                 )
             )
             can_decide = bool(
@@ -10147,6 +10263,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     not request_row["approval_employee_id"]
                     or int(user.get("employee_id") or 0) == int(request_row["approval_employee_id"])
                     or is_system_admin
+                    or str(user.get("role") or "").lower() in {"hr", "supervisor"}
                 )
             )
             if not is_direct_manager and not is_hr_final_approver and not is_system_admin:
@@ -12056,7 +12173,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_notification_manage_get(self) -> None:
             user = self.require_notification_admin()
-            privacy_officer = is_system_admin(user) or str(user.get("role") or "").lower() == "hr"
+            privacy_officer = is_hr_privacy_account(self.db, user)
             privacy_filter = "" if privacy_officer else """WHERE n.notification_scope<>'personal'
                 OR EXISTS (SELECT 1 FROM notification_recipients own WHERE own.notification_id=n.id AND own.user_id=?)"""
             params: tuple[Any, ...] = () if privacy_officer else (user["id"],)
@@ -12077,7 +12194,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if row is None:
                 raise APIError(404, "الإشعار غير موجود.", "not_found")
             if str(row["notification_scope"] or "recipient") == "personal" and not (
-                is_system_admin(user) or str(user.get("role") or "").lower() == "hr"
+                is_hr_privacy_account(self.db, user)
             ):
                 raise APIError(403, "الإشعارات الخاصة لا يعدلها إلا مسؤول النظام أو الموارد البشرية.", "forbidden")
             data = self.read_json(); updates: dict[str, Any] = {}; stamp = now_iso()

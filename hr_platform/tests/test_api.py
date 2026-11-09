@@ -376,7 +376,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.8&build=20261109-production-r39")
+        application_script = index.index("app.js?v=5.8.8&build=20261109-production-r40")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2931,7 +2931,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261109-production-r39", index)
+        self.assertIn("build=20261109-production-r40", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3145,7 +3145,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261109-production-r39", index)
+        self.assertIn("build=20261109-production-r40", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -4285,8 +4285,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         schema = (root / "schema.sql").read_text(encoding="utf-8")
         app = (root / "app.js").read_text(encoding="utf-8")
-        self.assertIn("role IN ('admin','hr','manager','employee')", schema)
-        self.assertIn("const roleLabels={admin:'مدير النظام',hr:'رئيس قسم الموارد البشرية',manager:'مسؤول مباشر',employee:'موظف'}", app)
+        self.assertIn("role IN ('admin','hr','supervisor','manager','employee')", schema)
+        self.assertIn("const roleLabels={admin:'مدير النظام',hr:'رئيس قسم الموارد البشرية',supervisor:'مشرف',manager:'مسؤول مباشر',employee:'موظف'}", app)
         self.assertNotIn('<option value="general_manager">مدير عام</option>', app)
 
     def test_68_v58_permission_limits_rest_override_and_excused_lateness(self):
@@ -5392,7 +5392,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261109-production-r39", index)
+        self.assertIn("build=20261109-production-r40", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -6094,7 +6094,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261109-production-r39", index)
+        self.assertIn("build=20261109-production-r40", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6712,6 +6712,70 @@ class HRAPIEndToEndTests(unittest.TestCase):
             ).fetchone()
             self.assertIn("إعادة التقييم قبل موعد النشر", audit_row["details"])
 
+    def test_standalone_supervisor_accounts_are_hr_operational_and_customizable(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        email = f"supervisor-{suffix}@demo.ae"
+        temporary_password = "Supervisor@12345"
+        denied = hr.request("POST", "/api/admin/supervisors", {
+            "display_name": "مشرف غير مصرح", "email": f"denied-{email}",
+            "password": temporary_password, "confirm_password": temporary_password,
+        }, expected=403)
+        self.assertEqual(denied["code"], "system_admin_required")
+        created = admin.request("POST", "/api/admin/supervisors", {
+            "display_name": "مشرف عمليات مستقل", "email": email,
+            "password": temporary_password, "confirm_password": temporary_password,
+        }, expected=201)["user"]
+        self.assertEqual(created["role"], "supervisor")
+        self.assertIsNone(created["employee_id"])
+        self.assertTrue(created["must_change_password"])
+        self.assertEqual(set(created["permissions"]), hr_server.ALL_PERMISSIONS - set(hr_server.PERMISSION_CATALOG["security"]))
+        self.assertTrue({"employee.view", "evaluation.review", "leave.approve", "overtime.approve"}.issubset(created["permissions"]))
+        self.assertNotIn("security.manage_users", created["permissions"])
+        with sqlite3.connect(self.db_path) as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM employees WHERE lower(email)=lower(?)", (email,)).fetchone()[0], 0)
+        supervisor = APIClient(self.base_url)
+        supervisor.login(email, temporary_password)
+        supervisor.request("GET", "/api/employees", expected=428)
+        supervisor.request("POST", "/api/auth/change-password", {
+            "current_password": temporary_password, "password": "SupervisorNew@12345",
+            "confirm_password": "SupervisorNew@12345",
+        })
+        supervisor = self.client(email, "SupervisorNew@12345")
+        self.assertEqual(supervisor.request("GET", "/api/employees")["scope"], "all")
+        updated = admin.request(
+            "PATCH", f"/api/admin/users/{created['id']}/permissions",
+            {"overrides": [
+                {"permission": "employee.manage", "granted": False},
+                {"permission": "security.manage_users", "granted": True},
+            ]},
+        )["user"]
+        self.assertNotIn("employee.manage", updated["permissions"])
+        self.assertIn("security.manage_users", updated["permissions"])
+        supervisor = self.client(email, "SupervisorNew@12345")
+        identity = supervisor.request("GET", "/api/auth/me")
+        self.assertNotIn("employee.manage", identity["permissions"])
+        self.assertIn("security.manage_users", identity["permissions"])
+        supervisor.request("GET", "/api/admin/users")
+        employee = admin.request("POST", "/api/employees", {
+            "employee_no": f"SUP-LINK-{suffix}", "full_name": "ملف موظف لا يقبل دور مشرف",
+            "email": f"linked-{email}", "hire_date": "2025-01-01", "salary": 4000,
+        }, expected=201)["employee"]
+        rejected = admin.request("POST", f"/api/employees/{employee['id']}/account", {
+            "email": f"linked-{email}", "password": temporary_password,
+            "confirm_password": temporary_password, "role": "supervisor",
+        }, expected=422)
+        self.assertEqual(rejected["code"], "standalone_supervisor_required")
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        self.assertIn("function createSupervisorAccountModal", app)
+        self.assertIn("/api/admin/supervisors", app)
+        self.assertIn('id="createSupervisorAccount"', index)
+        self.assertIn("'مشرف':'Supervisor'", translations)
+
 class NotificationPrivacyMigrationTests(unittest.TestCase):
     def test_legacy_sensitive_broadcasts_are_retired_and_narrow_history_is_guarded(self):
         with tempfile.TemporaryDirectory(prefix="hr-notification-privacy-") as folder:
@@ -6824,7 +6888,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261109-production-r39", index)
+        self.assertIn("build=20261109-production-r40", index)
 
     def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
         with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:
@@ -6898,6 +6962,26 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
                 self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
                 index_names = {row["name"] for row in db.execute("PRAGMA index_list(purchase_requests)")}
                 self.assertTrue({"idx_purchase_requests_employee", "idx_purchase_requests_status"}.issubset(index_names))
+
+    def test_legacy_users_role_constraint_migrates_for_supervisors(self):
+        with tempfile.TemporaryDirectory(prefix="supervisor-role-migration-") as directory:
+            db_path = Path(directory) / "legacy.sqlite3"
+            schema = (Path(__file__).parents[1] / "schema.sql").read_text(encoding="utf-8")
+            legacy_schema = schema.replace(
+                "role IN ('admin','hr','supervisor','manager','employee')",
+                "role IN ('admin','hr','manager','employee')",
+                1,
+            )
+            with contextlib.closing(hr_server.open_db(db_path)) as db:
+                db.executescript(legacy_schema)
+                legacy_id = hr_server.seed_user(db, "legacy-admin@example.ae", "LegacyAdmin@123", "Legacy Admin", "admin", None)
+                db.commit()
+            hr_server.initialize_database(db_path)
+            with contextlib.closing(hr_server.open_db(db_path)) as db:
+                users_sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='users'").fetchone()["sql"]
+                self.assertIn("'supervisor'", users_sql)
+                self.assertEqual(db.execute("SELECT email FROM users WHERE id=?", (legacy_id,)).fetchone()["email"], "legacy-admin@example.ae")
+                self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

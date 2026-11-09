@@ -784,6 +784,21 @@
   function formatNumber(value, options) { return new Intl.NumberFormat(LOCALES[locale], { ...(options || {}), numberingSystem: 'latn' }).format(Number(value) || 0); }
   function formatCurrency(value) { return formatNumber(value, { style: 'currency', currency: 'AED', maximumFractionDigits: 2 }); }
 
+  Object.assign(english, {
+    'مشرف':'Supervisor','حساب مستقل':'Standalone account','حساب مشرف مستقل':'Standalone supervisor account',
+    'صلاحيات الموارد البشرية التشغيلية قابلة للتخصيص':'Operational HR permissions can be customized.',
+    'صلاحيات المشرف الافتراضية':'Default supervisor permissions',
+    'إنشاء الحسابات':'Create accounts','إنشاء حساب مشرف':'Create supervisor account','إنشاء حساب المشرف':'Create supervisor account',
+    'أنشئ حساب مشرف مستقلاً عن الهيكل، أو أنشئ حساب دخول لملف موظف موجود.':'Create a supervisor account outside the organization structure, or create a login for an existing employee profile.',
+    'المشرف ليس موظفاً ولا يظهر في الهيكل الوظيفي. يبدأ بصلاحيات الموارد البشرية التشغيلية، ويمكن تعديل صلاحياته من القائمة أدناه.':'A supervisor is not an employee and does not appear in the organization structure. The account starts with operational HR permissions, which can be customized below.',
+    'حساب مستقل لا يرتبط بموظف ولا يظهر في الهيكل الوظيفي. يحصل على صلاحيات الموارد البشرية التشغيلية افتراضياً، ويمكن توسيعها أو تقييدها بعد الإنشاء.':'This standalone account is not linked to an employee and does not appear in the organization structure. It receives operational HR permissions by default, which can be expanded or restricted after creation.',
+    'هذا الحساب مرتبط بملف الموظف. حساب المشرف المستقل يُنشأ من زر «إنشاء حساب مشرف».':'This account is linked to the employee profile. Use “Create supervisor account” for a standalone supervisor.',
+    'اسم المشرف':'Supervisor name','كلمة المرور المؤقتة':'Temporary password',
+    'سيُطلب من المشرف تغيير كلمة المرور عند أول دخول. ١٠ أحرف على الأقل، حرف كبير وصغير، رقم ورمز خاص.':'The supervisor must change this password at first sign-in. Use at least 10 characters with uppercase, lowercase, a number, and a special character.',
+    'جارٍ إنشاء حساب المشرف…':'Creating supervisor account…',
+    'مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات تلقائياً. المشرف حساب مستقل يبدأ بصلاحيات الموارد البشرية التشغيلية ويمكن تخصيصها، ولا يظهر في الهيكل الوظيفي. ويمكن منح المدير العام أو المسؤول المباشر صلاحيات إضافية حسب الحاجة.':'The system administrator is the protected highest authority. HR has all permissions automatically. A supervisor is a standalone account with customizable operational HR permissions and does not appear in the organization structure. The general manager and line managers may receive additional permissions as needed.'
+  });
+
   window.HR_I18N = { t: translate, translate, setLocale, apply, get locale() { return locale; }, formatDate, formatNumber, formatCurrency, storageKey: STORAGE_KEY, resources: { ar: {}, en: english } };
   document.addEventListener('click', event => { const button = event.target.closest('[data-locale]'); if (button) setLocale(button.dataset.locale); });
   document.addEventListener('DOMContentLoaded', () => {

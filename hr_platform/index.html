@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.8&build=20261109-production-r39">
+  <link rel="stylesheet" href="styles.css?v=5.8.8&build=20261109-production-r40">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -405,8 +405,8 @@
 
       <section class="page" id="access-control">
         <div class="page-head"><div><span class="eyebrow">الإدارة والأمان</span><h1>المستخدمون والصلاحيات</h1><p>يعطي المنصب صلاحيات افتراضية، وتظهر جميع صلاحيات النظام في القائمة لمنحها للمسؤولين حسب الحاجة.</p></div></div>
-        <div class="security-callout access-hierarchy-note"><b>تسلسل الصلاحيات:</b> مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات التشغيلية والإدارية تلقائياً. ويمكن منح المدير العام أو المسؤول المباشر أي صلاحية من القائمة، دون السماح لهم برؤية حساب مسؤول النظام أو تعديله أو إعادة تعيين كلمة مروره.</div>
-        <section class="card account-provision-panel" data-permission="security.manage_users"><div class="section-head"><div><h2>إنشاء حسابات الموظفين</h2><p>ملفات الموظفين التي أُنشئت بلا حساب تظهر هنا. أنشئ الحساب لاحقاً من البريد المسجل وكلمة مرور تختارها.</p></div><span class="status">إدارة المستخدمين</span></div><div id="accountCandidateList" class="account-candidate-list"><div class="loading-block">جارٍ تحميل الملفات بلا حساب…</div></div></section>
+        <div class="security-callout access-hierarchy-note"><b>تسلسل الصلاحيات:</b> مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات تلقائياً. المشرف حساب مستقل يبدأ بصلاحيات الموارد البشرية التشغيلية ويمكن تخصيصها، ولا يظهر في الهيكل الوظيفي. ويمكن منح المدير العام أو المسؤول المباشر صلاحيات إضافية حسب الحاجة.</div>
+        <section class="card account-provision-panel" data-permission="security.manage_users"><div class="section-head"><div><h2>إنشاء الحسابات</h2><p>أنشئ حساب مشرف مستقلاً عن الهيكل، أو أنشئ حساب دخول لملف موظف موجود.</p></div><div class="button-row"><button class="primary" id="createSupervisorAccount" type="button" data-system-admin-only>إنشاء حساب مشرف</button><span class="status">إدارة المستخدمين</span></div></div><div class="security-callout supervisor-account-note" data-system-admin-only>المشرف ليس موظفاً ولا يظهر في الهيكل الوظيفي. يبدأ بصلاحيات الموارد البشرية التشغيلية، ويمكن تعديل صلاحياته من القائمة أدناه.</div><div id="accountCandidateList" class="account-candidate-list"><div class="loading-block">جارٍ تحميل الملفات بلا حساب…</div></div></section>
         <div class="access-layout"><aside class="card user-directory"><label class="permission-search">بحث المستخدمين<input id="accessUserSearch" type="search" placeholder="الاسم أو البريد أو الدور"></label><div id="accessUserList" class="stack loading-block">جارٍ تحميل المستخدمين…</div></aside><article class="card permission-workbench"><div id="permissionEmpty" class="empty">اختر مستخدماً لمعاينة صلاحياته الفعّالة.</div><div id="permissionEditor" hidden><div class="permission-user-head" id="permissionUserHead"></div><div class="permission-toolbar"><input id="permissionSearch" type="search" placeholder="ابحث في الصلاحيات"><select id="permissionGroupFilter"><option value="">كل مجموعات الصلاحيات</option></select><button class="secondary" id="grantVisible" type="button">منح الظاهر</button><button class="secondary" id="denyVisible" type="button">منع الظاهر</button></div><form id="permissionForm"><div id="permissionMatrix" class="permission-matrix"></div><div class="sticky-save"><span id="effectivePermissionCount">—</span><button class="primary" id="savePermissionsButton" type="submit">حفظ الصلاحيات</button></div></form></div></article></div>
       </section>
 
@@ -461,7 +461,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.8&build=20261109-production-r39"></script>
-  <script src="app.js?v=5.8.8&build=20261109-production-r39"></script>
+  <script src="i18n.js?v=5.8.8&build=20261109-production-r40"></script>
+  <script src="app.js?v=5.8.8&build=20261109-production-r40"></script>
 </body>
 </html>

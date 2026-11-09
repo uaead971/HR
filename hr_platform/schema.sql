@@ -238,7 +238,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin','hr','manager','employee')),
+  role TEXT NOT NULL CHECK (role IN ('admin','hr','supervisor','manager','employee')),
   password_hash TEXT NOT NULL,
   password_salt TEXT NOT NULL,
   employee_id INTEGER UNIQUE,
