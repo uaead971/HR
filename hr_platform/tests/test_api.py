@@ -251,6 +251,12 @@ class EvaluationWorkflowFrontendTests(unittest.TestCase):
         self.assertIn(".evaluation-submit-readiness.blocked", styles)
         self.assertIn("'تعذر الإرسال حالياً':'Submission is currently blocked'", translations)
         self.assertIn("'دليل الإنجاز / النتيجة (اختياري)':'Achievement evidence / outcome (optional)'", translations)
+        self.assertIn("data-admin-return-evaluation", app)
+        self.assertIn("adminReturnEvaluationForm", app)
+        self.assertIn("/return-to-employee", app)
+        self.assertIn("ev.manager_fallback", app)
+        self.assertIn("'إعادة التقييم إلى الموظف':'Return review to employee'", translations)
+        self.assertIn("'مسؤولية بديلة لموظف بلا مسؤول مباشر':'Fallback responsibility for an employee without a line manager'", translations)
 
 
 class HRAPIEndToEndTests(unittest.TestCase):
@@ -290,8 +296,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         public = APIClient(self.base_url)
         health = public.request("GET", "/api/health")
         self.assertTrue(health["ok"])
-        self.assertEqual(hr_server.APP_VERSION, "5.8.5")
-        self.assertEqual(health["version"], "5.8.5")
+        self.assertEqual(hr_server.APP_VERSION, "5.8.6")
+        self.assertEqual(health["version"], "5.8.6")
         org = public.request("GET", "/api/org")["organization"]
         self.assertTrue(org["display_name"])
         public.request("GET", "/api/auth/me", expected=401)
@@ -351,8 +357,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("alertMessage('لا يملك حسابك صلاحية فتح هذه الوحدة.'", app)
         self.assertIn('integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="', index)
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
         self.assertIn('@media(max-width:650px){.login-visual-runtime .visual-runtime-copy{position:absolute;inset:auto 14px 64px', styles)
         self.assertIn('.visual-runtime-copy:has(h2:empty){display:none}', styles)
 
@@ -365,7 +371,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.5&build=20261109-production-r36")
+        application_script = index.index("app.js?v=5.8.6&build=20261109-production-r37")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -484,7 +490,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("استوديو العلامة المؤسسية", i18n)
         self.assertIn("Organization brand studio", i18n)
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.5', index)
+            self.assertIn(f'{asset}?v=5.8.6', index)
 
     def test_53_v54_migrates_v532_visual_identity_without_changing_tenant_data(self):
         with tempfile.TemporaryDirectory(prefix="hr-v54-migration-") as folder:
@@ -810,7 +816,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.5', index)
+            self.assertIn(f'{asset}?v=5.8.6', index)
         for token in ("--mineral-950:#071b22", "--mineral-900:#0b2530", "--emerald-700:#0e6655", "--bronze-500:#c99545", "--parchment-100:#f4f2ec"):
             self.assertIn(token, styles)
         for symbol in ("dashboard", "home", "users", "org", "map", "clock", "calendar", "shift", "overtime", "wallet", "certificate", "loan", "target", "recruitment", "onboarding", "learning", "benefits", "offboarding", "bell", "mail", "report", "shield", "settings", "search", "menu", "print", "edit", "archive", "download"):
@@ -843,7 +849,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.5', index)
+            self.assertIn(f'{asset}?v=5.8.6', index)
         self.assertIn('.sidebar-collapsed .sidebar,.sidebar-collapsed .sidebar.open{width:min(310px,88vw)}', styles)
         self.assertIn('.sidebar-collapsed .sidebar a>span,', styles)
         self.assertIn('.sidebar-collapsed .sidebar .nav-label,', styles)
@@ -875,7 +881,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.5', index)
+            self.assertIn(f'{asset}?v=5.8.6', index)
         self.assertIn("function metricValue(value)", app)
         self.assertIn("<small>${esc(tr(m[0]))}</small>", app)
         self.assertIn("<span>${esc(tr(m[2]))}</span>", app)
@@ -908,9 +914,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         app = (root / "app.js").read_text(encoding="utf-8")
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('i18n.js?v=5.8.5', index)
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('i18n.js?v=5.8.6', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
         self.assertGreaterEqual(index.count('data-locale="ar"'), 2)
         self.assertGreaterEqual(index.count('data-locale="en"'), 2)
         self.assertIn("khaisha.ui.locale", index + i18n)
@@ -1010,7 +1016,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("if(requested&&!requestedAllowed)history.replaceState", app)
         index = (root / "index.html").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.5', index)
+            self.assertIn(f'{asset}?v=5.8.6', index)
 
         required_performance_resources = (
             "الفترة من", "متبقٍ {days} يوم", "مسودة الموظف", "أهداف الموظف",
@@ -1087,8 +1093,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             r"api\(`/api/evaluations/\$\{state\.evaluation\.id\}/submit`,"
             r"\{method:'POST'\}\)",
         )
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
 
     def test_42_v512_dossier_observer_and_mobile_weight_badge_contract(self):
         root = Path(__file__).parents[1]
@@ -1113,8 +1119,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("flex:0 0 auto", weight_rule.group(1))
         self.assertIn("min-width:max-content", weight_rule.group(1))
         self.assertIn("@media(max-width:440px)", styles)
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
 
     def test_keep_alive_connection_refreshes_authentication_each_request(self):
         """Anonymous -> login -> authenticated -> logout must work on one TCP connection."""
@@ -1999,8 +2005,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         sources = {name: (root / name).read_text(encoding="utf-8") for name in ("index.html", "app.js", "styles.css", "server.py", "schema.sql")}
         index, app, styles = sources["index.html"], sources["app.js"], sources["styles.css"]
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
         for template in ("portrait_orbit", "executive_horizontal", "minimal_vertical"):
             self.assertIn(f'data-card-template-choice="{template}"', index)
             self.assertIn(f"template-{template}", styles)
@@ -2241,8 +2247,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('class="org-fit-stage"', app)
         self.assertIn(".org-fit-stage.fitted{overflow:hidden}", styles)
         self.assertIn("MutationObserver", app)
-        self.assertIn("styles.css?v=5.8.5", index)
-        self.assertIn("app.js?v=5.8.5", index)
+        self.assertIn("styles.css?v=5.8.6", index)
+        self.assertIn("app.js?v=5.8.6", index)
         self.assertIn('rel="icon" href="favicon.svg"', index)
 
     def test_30_v47_salary_certificate_serial_barcode_integrity_and_verification(self):
@@ -2920,7 +2926,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261109-production-r36", index)
+        self.assertIn("build=20261109-production-r37", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3134,7 +3140,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261109-production-r36", index)
+        self.assertIn("build=20261109-production-r37", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3239,8 +3245,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server = (root / "server.py").read_text(encoding="utf-8")
         schema = (root / "schema.sql").read_text(encoding="utf-8")
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
         for marker in ("evaluationWorkflowRibbon", "evaluationPrivacyGate", "myEvaluationHistory", "managerEvaluationForm", "hrApproveForm", "evaluationGrievanceForm"):
             self.assertIn(marker, index + app)
         for endpoint in ("manager-review", "hr-review", "/grievance", "evaluation-grievances"):
@@ -3688,8 +3694,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("@media(max-width:440px)", styles)
         self.assertIn("overflow-x:hidden", styles)
         self.assertIn("evaluation.cycle.manage", app + schema + (root / "server.py").read_text(encoding="utf-8"))
-        self.assertIn('styles.css?v=5.8.5', index)
-        self.assertIn('app.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.6', index)
+        self.assertIn('app.js?v=5.8.6', index)
 
 
     def test_57_v56_profile_fields_age_privacy_permissions_and_emergency_contacts(self):
@@ -3912,7 +3918,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server_source = (root / "server.py").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.5', index)
+            self.assertIn(f'{asset}?v=5.8.6', index)
         for marker in ("employee.profile.edit", "employee.emergency.manage", "employee_emergency_contacts", "api_attendance_range", "invalid_date_range"):
             self.assertIn(marker, server_source + app)
         for marker in ("employeeProfileForm", "emergencyContactForm", "profile-completeness", "attendanceRangeForm", "attendanceSummary", "attendance-table-wrap"):
@@ -5381,7 +5387,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261109-production-r36", index)
+        self.assertIn("build=20261109-production-r37", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -6083,7 +6089,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261109-production-r36", index)
+        self.assertIn("build=20261109-production-r37", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6526,6 +6532,140 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("'خاص · مستلمون محددون':'Private · Selected recipients'", translations)
 
 
+    def test_91_system_admin_returns_unpublished_evaluations_and_hr_owns_missing_manager(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        suffix = uuid.uuid4().hex[:8]
+        employee_email = f"evaluation-fallback-{suffix}@demo.ae"
+        employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"EVF-{suffix}", "full_name": "موظف دون مسؤول مباشر",
+            "email": employee_email, "hire_date": "2020-01-01", "salary": 6000,
+            "create_user": True, "password": "Fallback@12345", "role": "employee",
+        }, expected=201)["employee"]
+        worker = self.client(employee_email, "Fallback@12345")
+        hr_employee_id = hr.request("GET", "/api/auth/me")["user"]["employee_id"]
+        today = date.today()
+        cycle = hr.request("POST", "/api/evaluation-cycles", {
+            "year": 2192, "name": "دورة المسؤول البديل 2192",
+            "period_start": (today - timedelta(days=120)).isoformat(),
+            "period_end": (today + timedelta(days=120)).isoformat(),
+            "self_opens_on": (today - timedelta(days=5)).isoformat(),
+            "self_due_on": (today + timedelta(days=15)).isoformat(),
+            "manager_due_on": (today + timedelta(days=25)).isoformat(),
+            "hr_due_on": (today + timedelta(days=35)).isoformat(),
+            "announcement_title": "دورة المسؤول البديل",
+            "announcement_body": "أكمل التقييم ثم أرسله للمسؤول البديل.",
+        }, expected=201)["cycle"]
+        hr.request("POST", f"/api/evaluation-cycles/{cycle['id']}/announce", {})
+        evaluation = worker.request("POST", "/api/evaluations", {"cycle_id": cycle["id"]})["evaluation"]
+        evaluation_id = evaluation["id"]
+        self.assertEqual(evaluation["manager_employee_id"], hr_employee_id)
+        self.assertTrue(evaluation["manager_fallback"])
+
+        goal_payload = {
+            "description": "هدف تخصصي قابل للقياس", "weight": 50,
+            "measure": "نسبة الإنجاز", "objective_type": "specialized", "goal_type": "result",
+            "start_date": cycle["period_start"], "end_date": cycle["period_end"],
+            "progress_status": "in_progress", "achievement": 70, "evidence_note": "",
+        }
+        first_goal = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            dict(goal_payload, title="الهدف التخصصي الأول"), expected=201,
+        )["goals"][0]
+        second_goal = worker.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            dict(goal_payload, title="الهدف التخصصي الثاني"), expected=201,
+        )["goals"][1]
+        submitted = worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
+        self.assertEqual(submitted["evaluation"]["manager_employee_id"], hr_employee_id)
+        self.assertTrue(submitted["evaluation"]["manager_fallback"])
+        self.assertTrue(hr.request("GET", f"/api/evaluations/{evaluation_id}")["evaluation"]["can_manager_review"])
+        admin_view = admin.request("GET", f"/api/evaluations/{evaluation_id}")
+        self.assertTrue(admin_view["evaluation"]["can_manager_review"])
+        self.assertTrue(admin_view["evaluation"]["can_admin_return"])
+        self.assertTrue(any(
+            item["title"] == "تقييم موظف بلا مسؤول مباشر"
+            for item in hr.request("GET", "/api/notifications/inbox")["items"]
+        ))
+        self.assertTrue(any(
+            item["title"] == "تقييم موظف بلا مسؤول مباشر"
+            for item in admin.request("GET", "/api/notifications/inbox")["items"]
+        ))
+
+        reason = "إضافة تفاصيل الهدف قبل استكمال الاعتماد."
+        returned = admin.request(
+            "POST", f"/api/evaluations/{evaluation_id}/return-to-employee", {"reason": reason},
+        )
+        self.assertEqual(returned["evaluation"]["status"], "draft")
+        self.assertEqual(returned["evaluation"]["hr_comment"], reason)
+        self.assertEqual(returned["approvals"], [])
+        self.assertEqual(len(returned["goals"]), 2)
+        worker_view = worker.request("GET", f"/api/evaluations/{evaluation_id}")
+        self.assertEqual(worker_view["evaluation"]["hr_comment"], reason)
+        self.assertNotIn("awarded_points", worker_view["goals"][0])
+        hr.request(
+            "POST", f"/api/evaluations/{evaluation_id}/return-to-employee", {"reason": "غير مسموح"},
+            expected=403,
+        )
+        self.assertEqual(
+            admin.request(
+                "POST", f"/api/evaluations/{evaluation_id}/return-to-employee", {"reason": "إعادة مكررة"},
+                expected=409,
+            )["code"],
+            "evaluation_already_with_employee",
+        )
+
+        worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
+        admin.request("POST", f"/api/evaluations/{evaluation_id}/manager-review", {
+            "manager_report": "استكمل مسؤول النظام مرحلة المسؤول لعدم وجود مسؤول مباشر.",
+            "goals": [
+                {"id": first_goal["id"], "awarded_points": 42},
+                {"id": second_goal["id"], "awarded_points": 43},
+            ],
+        })
+        hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "approve", "comment": "اعتماد مجدول",
+            "disclosure_date": (today + timedelta(days=3)).isoformat(),
+        })
+        approved_unpublished = admin.request("GET", f"/api/evaluations/{evaluation_id}")
+        self.assertFalse(approved_unpublished["evaluation"]["published"])
+        self.assertTrue(approved_unpublished["evaluation"]["can_admin_return"])
+        reopened = admin.request(
+            "POST", f"/api/evaluations/{evaluation_id}/return-to-employee",
+            {"reason": "إعادة التقييم قبل موعد النشر."},
+        )
+        self.assertEqual(reopened["evaluation"]["status"], "draft")
+        self.assertTrue(all(goal.get("awarded_points") is None for goal in reopened["goals"]))
+        employee_notification_titles = {
+            item["title"] for item in worker.request("GET", "/api/notifications/inbox")["items"]
+        }
+        self.assertNotIn("نتيجة التقييم السنوي", employee_notification_titles)
+
+        worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
+        admin.request("POST", f"/api/evaluations/{evaluation_id}/manager-review", {
+            "manager_report": "التقرير النهائي بعد إعادة الموظف.",
+            "goals": [
+                {"id": first_goal["id"], "awarded_points": 44},
+                {"id": second_goal["id"], "awarded_points": 45},
+            ],
+        })
+        published = hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "approve", "comment": "اعتماد ونشر",
+            "disclosure_date": today.isoformat(),
+        })
+        self.assertTrue(published["evaluation"]["published"])
+        blocked = admin.request(
+            "POST", f"/api/evaluations/{evaluation_id}/return-to-employee",
+            {"reason": "يجب رفض إعادة المنشور."}, expected=409,
+        )
+        self.assertEqual(blocked["code"], "evaluation_already_published")
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            audit_row = db.execute(
+                "SELECT details FROM audit_log WHERE action='evaluation.admin_return_to_employee' AND entity_id=? ORDER BY id DESC LIMIT 1",
+                (str(evaluation_id),),
+            ).fetchone()
+            self.assertIn("إعادة التقييم قبل موعد النشر", audit_row["details"])
+
 class NotificationPrivacyMigrationTests(unittest.TestCase):
     def test_legacy_sensitive_broadcasts_are_retired_and_narrow_history_is_guarded(self):
         with tempfile.TemporaryDirectory(prefix="hr-notification-privacy-") as folder:
@@ -6638,7 +6778,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261109-production-r36", index)
+        self.assertIn("build=20261109-production-r37", index)
 
     def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
         with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:

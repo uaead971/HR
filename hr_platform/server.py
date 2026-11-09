@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.5"
+APP_VERSION = "5.8.6"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -2251,9 +2251,10 @@ def seed_user(db: sqlite3.Connection, email: str, password: str, name: str, role
 def migrate_nonterminal_legacy_evaluations(db: sqlite3.Connection) -> None:
     """Move actionable V1 evaluations onto the employee -> manager -> HR flow.
 
-    Terminal V1 decisions remain immutable history.  A non-terminal row is only
-    changed when its employee still has a real direct manager; otherwise it is
-    left untouched and an idempotent audit flag records the configuration gap.
+    Terminal V1 decisions remain immutable history. Employees without a real
+    reporting-line manager are assigned to the HR department head; if no HR
+    head is configured, an active system administrator can still own the
+    fallback stage without an employee approval row.
     """
     legacy_rows = db.execute(
         """SELECT e.id,e.employee_id,e.status
@@ -2264,19 +2265,11 @@ def migrate_nonterminal_legacy_evaluations(db: sqlite3.Connection) -> None:
     ).fetchall()
     stamp = now_iso()
     for evaluation in legacy_rows:
-        manager = db.execute(
-            """SELECT COALESCE(e.manager_id,d.manager_employee_id) AS manager_id
-                 FROM employees e LEFT JOIN departments d ON d.id=e.department_id
-                WHERE e.id=?""",
-            (evaluation["employee_id"],),
-        ).fetchone()
-        manager_id = int(manager["manager_id"]) if manager and manager["manager_id"] else None
-        manager_exists = bool(
-            manager_id
-            and manager_id != int(evaluation["employee_id"])
-            and db.execute("SELECT 1 FROM employees WHERE id=?", (manager_id,)).fetchone()
-        )
-        if not manager_exists:
+        manager_id, manager_fallback = database_evaluation_manager_id(db, int(evaluation["employee_id"]))
+        admin_exists = bool(db.execute(
+            "SELECT 1 FROM users WHERE active=1 AND (role='admin' OR is_super_admin=1) LIMIT 1"
+        ).fetchone())
+        if manager_id is None and not admin_exists:
             already_flagged = db.execute(
                 """SELECT 1 FROM audit_log
                     WHERE action='evaluation.workflow_migration_skipped'
@@ -2296,7 +2289,7 @@ def migrate_nonterminal_legacy_evaluations(db: sqlite3.Connection) -> None:
         migrated_status = "submitted" if waiting_for_manager else "draft"
         current_step = 1 if waiting_for_manager else 0
         db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
-        if waiting_for_manager:
+        if waiting_for_manager and manager_id is not None:
             db.execute(
                 """INSERT INTO evaluation_approvals
                    (evaluation_id,step_no,approver_employee_id,status,comment,decided_at,created_at)
@@ -2325,6 +2318,7 @@ def migrate_nonterminal_legacy_evaluations(db: sqlite3.Connection) -> None:
                     "from_status": evaluation["status"],
                     "to_status": migrated_status,
                     "manager_employee_id": manager_id,
+                    "manager_fallback": manager_fallback,
                 }),
                 stamp,
             ),
@@ -2342,6 +2336,51 @@ def database_direct_manager_id(db: sqlite3.Connection, employee_id: int) -> int 
         return None
     manager_id = int(row["manager_id"])
     return manager_id if db.execute("SELECT 1 FROM employees WHERE id=? AND active=1", (manager_id,)).fetchone() else None
+
+
+def database_hr_department_head_id(db: sqlite3.Connection, employee_id: int | None = None) -> int | None:
+    """Return the active HR department head who has an active account.
+
+    The department assignment is the source of truth; the HR role and the
+    bilingual department names are only used to identify the HR department.
+    An employee can be excluded so a department head is never assigned as
+    their own fallback reviewer.
+    """
+    rows = db.execute(
+        """SELECT d.manager_employee_id,d.name,d.name_ar,d.name_en,u.role
+             FROM departments d
+             JOIN employees e ON e.id=d.manager_employee_id AND e.active=1
+             JOIN users u ON u.employee_id=e.id AND u.active=1
+            WHERE d.active=1 AND d.manager_employee_id IS NOT NULL
+            ORDER BY CASE WHEN u.role='hr' THEN 0 ELSE 1 END,d.id"""
+    ).fetchall()
+    english_names = {"hr", "human resources", "human resources department"}
+    arabic_names = {"الموارد البشرية", "الموارد البشريه", "قسم الموارد البشرية", "قسم الموارد البشريه"}
+    for row in rows:
+        head_id = int(row["manager_employee_id"])
+        if employee_id is not None and head_id == int(employee_id):
+            continue
+        names = {str(row[key] or "").strip().casefold() for key in ("name", "name_ar", "name_en")}
+        if str(row["role"] or "") == "hr" or names & english_names or names & arabic_names:
+            return head_id
+    return None
+
+
+def database_evaluation_manager_id(db: sqlite3.Connection, employee_id: int) -> tuple[int | None, bool]:
+    """Resolve the evaluation owner and whether HR is acting as fallback.
+
+    Annual evaluations intentionally do not inherit the general-manager
+    fallback used by other HR workflows.  If the employee has no real active
+    reporting-line manager (or that manager has no active account), the HR
+    department head becomes the recorded reviewer and system administrators
+    remain authorized fallback reviewers.
+    """
+    manager_id = database_direct_manager_id(db, employee_id)
+    if manager_id is not None and db.execute(
+        "SELECT 1 FROM users WHERE employee_id=? AND active=1", (manager_id,)
+    ).fetchone():
+        return manager_id, False
+    return database_hr_department_head_id(db, employee_id), True
 
 
 def default_evaluation_cycle_dates(year: int) -> dict[str, str]:
@@ -2397,7 +2436,7 @@ def enroll_evaluation_cycle(
     recipients: list[tuple[int, int]] = []
     for employee in db.execute("SELECT id FROM employees WHERE active=1 ORDER BY id").fetchall():
         employee_id = int(employee["id"])
-        manager_id = database_direct_manager_id(db, employee_id)
+        manager_id, _ = database_evaluation_manager_id(db, employee_id)
         if manager_id is None:
             missing_manager += 1
         cursor = db.execute(
@@ -4425,6 +4464,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("POST", r"/api/evaluations/(\d+)/decision", self.api_evaluation_decision),
                     ("POST", r"/api/evaluations/(\d+)/manager-review", self.api_evaluation_manager_review),
                     ("POST", r"/api/evaluations/(\d+)/hr-review", self.api_evaluation_hr_review),
+                    ("POST", r"/api/evaluations/(\d+)/return-to-employee", self.api_evaluation_return_to_employee),
                     ("POST", r"/api/evaluations/(\d+)/grievance", self.api_evaluation_grievance_post),
                     ("POST", r"/api/evaluation-grievances/(\d+)/resolve", self.api_evaluation_grievance_resolve),
                     ("GET", r"/api/notifications/manage", self.api_notification_manage_get),
@@ -4698,6 +4738,25 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 return None
             manager_id = row["manager_id"] or row["manager_employee_id"]
             return int(manager_id) if manager_id and int(manager_id) != int(employee_id) else None
+
+        def evaluation_manager_employee_id(self, employee_id: int) -> tuple[int | None, bool]:
+            """Return the annual-evaluation reviewer and HR-fallback flag."""
+            return database_evaluation_manager_id(self.db, employee_id)
+
+        def evaluation_fallback_reviewer_user_ids(self, hr_head_employee_id: int | None) -> list[int]:
+            """Return the HR head and every active system administrator."""
+            recipient_ids: set[int] = set()
+            if hr_head_employee_id is not None:
+                account = self.db.execute(
+                    "SELECT id FROM users WHERE employee_id=? AND active=1",
+                    (hr_head_employee_id,),
+                ).fetchone()
+                if account:
+                    recipient_ids.add(int(account["id"]))
+            for account in self.db.execute("SELECT * FROM users WHERE active=1").fetchall():
+                if is_system_admin(account):
+                    recipient_ids.add(int(account["id"]))
+            return sorted(recipient_ids)
 
         def is_department_head(self, employee_id: int) -> bool:
             return bool(self.db.execute(
@@ -11463,7 +11522,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             assert user is not None
             evaluation = self.evaluation_row(evaluation_id)
             own = evaluation["employee_id"] == user.get("employee_id")
-            current_manager = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            current_manager, _ = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
             direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
             hr_reviewer = has_permission(self.db, user, "evaluation.review")
             legacy_approver = bool(
@@ -11490,11 +11549,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             published = self.evaluation_is_published(evaluation)
             hr_reviewer = has_permission(self.db, user, "evaluation.review")
             manager_override = has_permission(self.db, user, "evaluation.override_manager") and not own
-            current_manager = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            current_manager, manager_fallback = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
             direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
             if own and not published and int(evaluation["workflow_version"] or 1) >= 2:
-                for field in ("weighted_score", "rating", "manager_report", "manager_submitted_at", "hr_comment", "finalized_at"):
+                for field in ("weighted_score", "rating", "manager_report", "manager_submitted_at", "finalized_at"):
                     evaluation_data[field] = None
+                if evaluation["status"] != "draft":
+                    evaluation_data["hr_comment"] = None
                 for goal in goal_rows:
                     goal.pop("awarded_points", None)
             grievance = dict(grievance_row) if grievance_row and (own or hr_reviewer) else None
@@ -11508,7 +11569,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "can_manager_review": bool((direct_manager or manager_override) and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
                 "can_manager_override": bool(manager_override and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
                 "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
+                "can_admin_return": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
                 "can_grieve": bool(own and published and grievance_row is None),
+                "manager_fallback": bool(manager_fallback),
                 "score_total": round(score_total, 2) if score_total is not None else None,
                 "specialized_goal_count": specialized_goal_count,
                 "general_goal_count": general_goal_count,
@@ -11531,7 +11594,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "id", "cycle_id", "employee_id", "year", "cycle_name", "full_name", "employee_no", "status",
                 "workflow_version", "manager_employee_id", "manager_name", "weighted_score", "rating", "disclosure_date",
                 "published", "can_manager_review", "can_hr_review", "can_grieve", "score_total", "submitted_late",
-                "can_manager_override",
+                "can_manager_override", "can_admin_return", "manager_fallback",
                 "period_start", "period_end", "self_opens_on", "self_due_on", "manager_due_on", "hr_due_on",
                 "cycle_status", "announcement_title", "announcement_body", "announced_at",
             )} | {"grievance_status": payload["grievance"]["status"] if payload["grievance"] else None}
@@ -11547,14 +11610,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for row in rows:
                 cycle_visible = row["cycle_status"] in {"announced", "closed"}
                 own = cycle_visible and row["employee_id"] == user.get("employee_id")
-                direct = bool(cycle_visible and user.get("employee_id") and row["manager_employee_id"] == user["employee_id"] and self.direct_manager_employee_id(int(row["employee_id"])) == user["employee_id"])
+                current_manager, _ = self.evaluation_manager_employee_id(int(row["employee_id"]))
+                direct = bool(cycle_visible and user.get("employee_id") and row["manager_employee_id"] == user["employee_id"] and current_manager == user["employee_id"])
                 legacy = bool(int(row["workflow_version"] or 1) < 2 and user.get("employee_id") and self.db.execute("SELECT 1 FROM evaluation_approvals WHERE evaluation_id=? AND approver_employee_id=?", (row["id"], user["employee_id"])).fetchone())
                 if own or direct or has_permission(self.db, user, "evaluation.review") or legacy:
                     visible_ids.append(int(row["id"]))
             summaries = [self.evaluation_summary_for_user(evaluation_id) for evaluation_id in visible_ids]
             def queue_priority(item: dict[str, Any]) -> tuple[int, int, str]:
                 actionable = bool(
-                    item.get("can_manager_review") or item.get("can_hr_review")
+                    item.get("can_manager_review") or item.get("can_hr_review") or item.get("can_admin_return")
                     or (has_permission(self.db, user, "evaluation.review") and item.get("grievance_status") == "submitted")
                 )
                 if actionable:
@@ -11571,7 +11635,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             summaries.sort(key=queue_priority)
             pending = [
                 row for row in summaries
-                if row.get("can_manager_review") or row.get("can_hr_review")
+                if row.get("can_manager_review") or row.get("can_hr_review") or row.get("can_admin_return")
                 or (has_permission(self.db, user, "evaluation.review") and row.get("grievance_status") == "submitted")
             ]
             self.send_json(200, {"items": summaries, "pending_for_me": pending})
@@ -11655,26 +11719,39 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 # a self-review.  Progress status and its achievement value
                 # remain validated for consistency.
                 self.validate_evaluation_goal(evaluation, dict(goal))
-            manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            manager_id, manager_fallback = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
             manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (manager_id,)).fetchone() if manager_id else None
-            if not manager_id or manager_user is None:
-                raise APIError(409, "يجب ربط الموظف بمسؤول مباشر له حساب نشط.", "manager_missing")
+            fallback_recipients = self.evaluation_fallback_reviewer_user_ids(manager_id) if manager_fallback else []
+            recipient_ids = fallback_recipients if manager_fallback else ([int(manager_user["id"])] if manager_user else [])
+            if not recipient_ids:
+                raise APIError(409, "لا يوجد مسؤول مباشر أو رئيس موارد بشرية أو مسؤول نظام نشط لاستلام التقييم.", "manager_missing")
             stamp = now_iso()
             submitted_late = int(local_now().date() > parse_date(evaluation["self_due_on"], "self_due_on"))
             with self.db:
                 self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
-                self.db.execute("INSERT INTO evaluation_approvals(evaluation_id,step_no,approver_employee_id,created_at) VALUES(?,1,?,?)", (evaluation_id, manager_id, stamp))
+                if manager_id is not None:
+                    self.db.execute("INSERT INTO evaluation_approvals(evaluation_id,step_no,approver_employee_id,created_at) VALUES(?,1,?,?)", (evaluation_id, manager_id, stamp))
                 self.db.execute("UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?", (stamp, evaluation_id))
                 self.db.execute("UPDATE evaluations SET status='submitted',manager_employee_id=?,weighted_score=NULL,rating=NULL,current_step=1,submitted_at=?,submitted_late=?,finalized_at=NULL,manager_report='',manager_submitted_at=NULL,hr_comment='',disclosure_date=NULL,updated_at=? WHERE id=?", (manager_id, stamp, submitted_late, stamp, evaluation_id))
-                create_internal_notification(self.db, user["id"], [manager_user["id"]], "تقييم سنوي بانتظار تقييمك", "أرسل موظفك أهدافه. أدخل نقاط كل هدف وتقريرك ثم أرسلها إلى الموارد البشرية.")
-                audit(self.db, user["id"], "evaluation.employee_submit_late" if submitted_late else "evaluation.employee_submit", "evaluation", evaluation_id, {"manager_employee_id": manager_id, "submitted_late": bool(submitted_late), "self_due_on": evaluation["self_due_on"]})
+                notification_title = "تقييم موظف بلا مسؤول مباشر" if manager_fallback else "تقييم سنوي بانتظار تقييمك"
+                notification_body = (
+                    "لا يملك الموظف مسؤولاً مباشراً نشطاً؛ أصبح رئيس الموارد البشرية ومسؤولو النظام مسؤولين عن استكمال مرحلة المسؤول."
+                    if manager_fallback else
+                    "أرسل موظفك أهدافه. أدخل نقاط كل هدف وتقريرك ثم أرسلها إلى الموارد البشرية."
+                )
+                create_internal_notification(self.db, user["id"], recipient_ids, notification_title, notification_body)
+                audit(self.db, user["id"], "evaluation.employee_submit_late" if submitted_late else "evaluation.employee_submit", "evaluation", evaluation_id, {
+                    "manager_employee_id": manager_id, "manager_fallback": manager_fallback,
+                    "fallback_reviewer_user_ids": fallback_recipients, "submitted_late": bool(submitted_late),
+                    "self_due_on": evaluation["self_due_on"],
+                })
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
         def api_evaluation_manager_review(self, evaluation_id: int) -> None:
             evaluation, user = self.evaluation_access(evaluation_id)
             if int(evaluation["workflow_version"] or 1) < 2:
                 raise APIError(409, "هذا السجل يستخدم مسار الاعتماد القديم.", "legacy_workflow")
-            manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
+            manager_id, _ = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
             manager_override = bool(
                 evaluation["employee_id"] != user.get("employee_id")
                 and has_permission(self.db, user, "evaluation.override_manager")
@@ -11773,6 +11850,75 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if employee_user:
                         create_internal_notification(self.db, user["id"], [employee_user["id"]], "نتيجة التقييم السنوي", "أصبحت نتيجة تقييمك متاحة في صفحة التقييم السنوي.", available_at)
                     audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {"score": score, "disclosure_date": disclosure.isoformat()})
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_return_to_employee(self, evaluation_id: int) -> None:
+            """Let a system administrator reopen any evaluation not yet disclosed."""
+            user = self.current_user(True)
+            assert user is not None
+            if not is_system_admin(user):
+                raise APIError(403, "مسؤول النظام وحده يستطيع إعادة التقييم إلى الموظف.", "forbidden")
+            evaluation = self.evaluation_row(evaluation_id)
+            if self.evaluation_is_published(evaluation):
+                raise APIError(409, "لا يمكن إعادة تقييم نُشرت نتيجته للموظف.", "evaluation_already_published")
+            if evaluation["status"] == "draft":
+                raise APIError(409, "التقييم موجود بالفعل كمسودة لدى الموظف.", "evaluation_already_with_employee")
+            data = self.read_json()
+            reason = require_text(data, "reason", 3000)
+            stamp = now_iso()
+            manager_id, manager_fallback = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
+            employee_user = self.db.execute(
+                "SELECT id FROM users WHERE employee_id=? AND active=1",
+                (evaluation["employee_id"],),
+            ).fetchone()
+            with self.db:
+                # A future disclosure notification created during HR approval
+                # must not become visible after the evaluation is reopened.
+                if employee_user and evaluation["finalized_at"]:
+                    self.db.execute(
+                        """UPDATE notifications SET hidden_at=?,hidden_by=?
+                              WHERE id IN (
+                                SELECT n.id FROM notifications n
+                                JOIN notification_recipients r ON r.notification_id=n.id
+                               WHERE r.user_id=? AND n.title='نتيجة التقييم السنوي'
+                                 AND n.hidden_at IS NULL AND n.available_at IS NOT NULL
+                                 AND n.created_at>=?
+                              )""",
+                        (stamp, user["id"], employee_user["id"], evaluation["finalized_at"]),
+                    )
+                self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
+                self.db.execute(
+                    "UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?",
+                    (stamp, evaluation_id),
+                )
+                self.db.execute(
+                    """UPDATE evaluations
+                          SET workflow_version=2,status='draft',manager_employee_id=?,current_step=1,
+                              weighted_score=NULL,rating=NULL,submitted_at=NULL,submitted_late=0,
+                              manager_report='',manager_submitted_at=NULL,hr_reviewed_by=NULL,
+                              hr_comment=?,disclosure_date=NULL,finalized_at=NULL,updated_at=?
+                        WHERE id=?""",
+                    (manager_id, reason, stamp, evaluation_id),
+                )
+                if employee_user:
+                    create_internal_notification(
+                        self.db,
+                        user["id"],
+                        [int(employee_user["id"])],
+                        "أعيد التقييم السنوي إليك",
+                        f"أعاد مسؤول النظام التقييم إلى مسودتك لاستكماله وإرساله من جديد. السبب: {reason}",
+                    )
+                audit(
+                    self.db,
+                    user["id"],
+                    "evaluation.admin_return_to_employee",
+                    "evaluation",
+                    evaluation_id,
+                    {
+                        "from_status": evaluation["status"], "reason": reason,
+                        "manager_employee_id": manager_id, "manager_fallback": manager_fallback,
+                    },
+                )
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
         def published_evaluation_summaries(self, employee_id: int) -> list[dict[str, Any]]:
