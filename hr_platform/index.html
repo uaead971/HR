@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.4&build=20261106-production-r35">
+  <link rel="stylesheet" href="styles.css?v=5.8.5&build=20261109-production-r36">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -377,9 +377,9 @@
       </section>
 
       <section class="page" id="purchases">
-        <div class="page-head"><div><span class="eyebrow">الخدمة الذاتية والمالية</span><h1>طلبات المشتريات</h1><p>طلب موثق بفاتورة يمر على المسؤول المباشر ثم الموارد البشرية ثم مسؤول اعتماد الفواتير المحدد في إعدادات المؤسسة.</p></div><button class="primary" id="requestPurchase">+ طلب مشتريات</button></div>
+        <div class="page-head"><div><span class="eyebrow">الخدمة الذاتية والمالية</span><h1>طلبات المشتريات</h1><p>طلب موثق بفاتورة يمر على المسؤول المباشر ثم مسؤول اعتماد الفواتير. عند عدم وجود مسؤول مباشر ينتقل الطلب للاعتماد النهائي مباشرة.</p></div><button class="primary" id="requestPurchase">+ طلب مشتريات</button></div>
         <div class="metric-grid compact" id="purchaseMetrics"></div>
-        <article class="card purchase-workspace"><div class="section-head"><div><h2>سجل الطلبات ومسار الاعتماد</h2><p>تظهر لك طلباتك والطلبات الواقعة في مرحلة اعتمادك الحالية.</p></div><label>الحالة<select id="purchaseStatusFilter"><option value="">كل الحالات</option><option value="manager_pending">عند المسؤول المباشر</option><option value="hr_pending">عند الموارد البشرية</option><option value="finance_pending">عند مسؤول اعتماد الفواتير</option><option value="approved">معتمد نهائياً</option><option value="rejected">مرفوض</option></select></label></div><div id="purchaseList" class="stack loading-block">جارٍ تحميل طلبات المشتريات…</div></article>
+        <article class="card purchase-workspace"><div class="section-head"><div><h2>سجل الطلبات ومسار الاعتماد</h2><p>تظهر لك طلباتك والطلبات الواقعة في مرحلة اعتمادك الحالية.</p></div><label>الحالة<select id="purchaseStatusFilter"><option value="">كل الحالات</option><option value="manager_pending">عند المسؤول المباشر</option><option value="finance_pending">عند مسؤول اعتماد الفواتير</option><option value="approved">معتمد نهائياً</option><option value="rejected">مرفوض</option></select></label></div><div id="purchaseList" class="stack loading-block">جارٍ تحميل طلبات المشتريات…</div></article>
       </section>
 
       <section class="page" id="lifecycle">
@@ -461,7 +461,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.4&build=20261106-production-r35"></script>
-  <script src="app.js?v=5.8.4&build=20261106-production-r35"></script>
+  <script src="i18n.js?v=5.8.5&build=20261109-production-r36"></script>
+  <script src="app.js?v=5.8.5&build=20261109-production-r36"></script>
 </body>
 </html>

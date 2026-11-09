@@ -42,7 +42,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 
 APP_DIR = Path(__file__).resolve().parent
-APP_VERSION = "5.8.4"
+APP_VERSION = "5.8.5"
 DEFAULT_DB = APP_DIR / "data" / "hr.sqlite3"
 SCHEMA_FILE = APP_DIR / "schema.sql"
 UAE_TZ = ZoneInfo("Asia/Dubai")
@@ -2146,6 +2146,95 @@ def migrate_payroll_runs_active_month(db: sqlite3.Connection) -> None:
         raise RuntimeError(f"Payroll migration foreign-key check failed: {violations[:3]}")
 
 
+def migrate_purchase_requests_direct_finance(db: sqlite3.Connection) -> None:
+    """Allow requests without a manager and retire the HR approval stage.
+
+    Older databases declared ``manager_employee_id`` as NOT NULL.  The direct
+    finance fallback needs a real nullable value rather than a fake manager,
+    so rebuild the table without changing ids or historical decision fields.
+    Any request that was waiting at HR is moved forward to the configured
+    invoice approver during the same idempotent migration.
+    """
+    table = db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='purchase_requests'"
+    ).fetchone()
+    if table is None:
+        return
+    manager_column = next(
+        (row for row in db.execute("PRAGMA table_info(purchase_requests)") if row["name"] == "manager_employee_id"),
+        None,
+    )
+    if manager_column is not None and bool(manager_column["notnull"]):
+        db.commit()
+        db.execute("PRAGMA foreign_keys = OFF")
+        try:
+            db.executescript(
+                """BEGIN IMMEDIATE;
+                CREATE TABLE purchase_requests_v585 (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  employee_id INTEGER NOT NULL,
+                  purchase_name TEXT NOT NULL,
+                  amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+                  responsible_name TEXT NOT NULL,
+                  invoice_file_name TEXT NOT NULL,
+                  invoice_mime_type TEXT NOT NULL CHECK (invoice_mime_type IN ('application/pdf','image/png','image/jpeg','image/webp')),
+                  invoice_data_url TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'manager_pending' CHECK (status IN ('manager_pending','hr_pending','finance_pending','approved','rejected')),
+                  current_step TEXT NOT NULL DEFAULT 'manager' CHECK (current_step IN ('manager','hr','finance','complete')),
+                  manager_employee_id INTEGER,
+                  manager_decided_by INTEGER,
+                  manager_decided_at TEXT,
+                  manager_note TEXT NOT NULL DEFAULT '',
+                  hr_decided_by INTEGER,
+                  hr_decided_at TEXT,
+                  hr_note TEXT NOT NULL DEFAULT '',
+                  finance_decided_by INTEGER,
+                  finance_decided_at TEXT,
+                  finance_note TEXT NOT NULL DEFAULT '',
+                  rejected_step TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+                  FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE RESTRICT,
+                  FOREIGN KEY (manager_decided_by) REFERENCES users(id) ON DELETE SET NULL,
+                  FOREIGN KEY (hr_decided_by) REFERENCES users(id) ON DELETE SET NULL,
+                  FOREIGN KEY (finance_decided_by) REFERENCES users(id) ON DELETE SET NULL
+                );
+                INSERT INTO purchase_requests_v585(
+                  id,employee_id,purchase_name,amount_cents,responsible_name,invoice_file_name,
+                  invoice_mime_type,invoice_data_url,status,current_step,manager_employee_id,
+                  manager_decided_by,manager_decided_at,manager_note,hr_decided_by,hr_decided_at,
+                  hr_note,finance_decided_by,finance_decided_at,finance_note,rejected_step,created_at,updated_at
+                ) SELECT
+                  id,employee_id,purchase_name,amount_cents,responsible_name,invoice_file_name,
+                  invoice_mime_type,invoice_data_url,status,current_step,manager_employee_id,
+                  manager_decided_by,manager_decided_at,manager_note,hr_decided_by,hr_decided_at,
+                  hr_note,finance_decided_by,finance_decided_at,finance_note,rejected_step,created_at,updated_at
+                FROM purchase_requests;
+                DROP TABLE purchase_requests;
+                ALTER TABLE purchase_requests_v585 RENAME TO purchase_requests;
+                CREATE INDEX idx_purchase_requests_employee ON purchase_requests(employee_id,created_at DESC);
+                CREATE INDEX idx_purchase_requests_status ON purchase_requests(status,created_at DESC);
+                COMMIT;"""
+            )
+        except Exception:
+            if db.in_transaction:
+                db.rollback()
+            raise
+        finally:
+            db.execute("PRAGMA foreign_keys = ON")
+        violations = db.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"Purchase migration foreign-key check failed: {violations[:3]}")
+    with db:
+        db.execute(
+            """UPDATE purchase_requests
+                  SET status='finance_pending',current_step='finance',updated_at=?
+                WHERE status='hr_pending' OR current_step='hr'""",
+            (now_iso(),),
+        )
+
+
 def seed_user(db: sqlite3.Connection, email: str, password: str, name: str, role: str, employee_id: int | None) -> int:
     existing = db.execute("SELECT id FROM users WHERE email = ? COLLATE NOCASE", (email,)).fetchone()
     if existing:
@@ -2475,6 +2564,7 @@ def initialize_database(db_path: Path) -> None:
         # initialization transaction so PRAGMA foreign_keys can be toggled.
         db.executescript(schema)
         migrate_payroll_runs_active_month(db)
+        migrate_purchase_requests_direct_finance(db)
         with db:
             db.executescript(schema)
             goal_columns_before_v51 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goals)")}
@@ -4590,6 +4680,24 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 return int(manager_id)
             configured = row["general_manager_employee_id"]
             return int(configured) if configured and int(configured) != employee_id else None
+
+        def purchase_direct_manager_employee_id(self, employee_id: int) -> int | None:
+            """Return only the employee's actual reporting-line manager.
+
+            The general manager remains the safe fallback for HR workflows,
+            but purchase requests without an assigned employee/department
+            manager must go directly to the configured invoice approver.
+            """
+            row = self.db.execute(
+                """SELECT e.manager_id,d.manager_employee_id
+                     FROM employees e LEFT JOIN departments d ON d.id=e.department_id
+                    WHERE e.id=?""",
+                (employee_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            manager_id = row["manager_id"] or row["manager_employee_id"]
+            return int(manager_id) if manager_id and int(manager_id) != int(employee_id) else None
 
         def is_department_head(self, employee_id: int) -> bool:
             return bool(self.db.execute(
@@ -10842,7 +10950,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             result.update(self.parse_goal_attachment(data, partial))
             return result
 
-        def validate_evaluation_goal(self, evaluation: sqlite3.Row | dict[str, Any], goal: dict[str, Any], require_evidence: bool = False) -> None:
+        def validate_evaluation_goal(self, evaluation: sqlite3.Row | dict[str, Any], goal: dict[str, Any]) -> None:
             if str(goal.get("objective_type") or "") not in {"general", "specialized"}:
                 raise APIError(422, "تصنيف الهدف يجب أن يكون عاماً أو تخصصياً.", "invalid_objective_type")
             if str(goal.get("goal_type") or "") not in {"result", "behaviour", "development"}:
@@ -10861,11 +10969,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(422, "حالة تقدم الهدف غير صالحة.", "invalid_progress_status")
             if (progress == "completed" and abs(achievement - 100) > 0.000001) or (progress == "not_completed" and abs(achievement) > 0.000001) or (progress == "in_progress" and not 0 < achievement < 100):
                 raise APIError(422, "حالة التقدم لا تتوافق مع نسبة الإنجاز: منجز 100٪، لم يُنجز 0٪، وقيد التقدم بينهما.", "goal_progress_mismatch")
-            if require_evidence and not (
-                str(goal.get("evidence_note") or "").strip() or goal.get("evidence_file_data")
-            ):
-                raise APIError(422, "أدخل نتيجة أو أرفق ملف PDF لإثبات إنجاز كل هدف قبل الإرسال.", "goal_evidence_required", {"goal_id": goal.get("id")})
-
         def api_evaluation_goal_post(self, evaluation_id: int) -> None:
             evaluation, user = self.ensure_goal_owner(evaluation_id)
             data = self.read_json()
@@ -11449,6 +11552,23 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if own or direct or has_permission(self.db, user, "evaluation.review") or legacy:
                     visible_ids.append(int(row["id"]))
             summaries = [self.evaluation_summary_for_user(evaluation_id) for evaluation_id in visible_ids]
+            def queue_priority(item: dict[str, Any]) -> tuple[int, int, str]:
+                actionable = bool(
+                    item.get("can_manager_review") or item.get("can_hr_review")
+                    or (has_permission(self.db, user, "evaluation.review") and item.get("grievance_status") == "submitted")
+                )
+                if actionable:
+                    priority = 0
+                elif item.get("status") in {"submitted", "returned", "in_review"} or (
+                    item.get("status") == "approved" and not item.get("published")
+                ):
+                    priority = 1
+                elif item.get("status") == "approved" or item.get("published"):
+                    priority = 2
+                else:
+                    priority = 3
+                return priority, -int(item.get("year") or 0), str(item.get("full_name") or "").casefold()
+            summaries.sort(key=queue_priority)
             pending = [
                 row for row in summaries
                 if row.get("can_manager_review") or row.get("can_hr_review")
@@ -11530,7 +11650,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "missing_count": 2 - specialized_count,
                 })
             for goal in goals:
-                self.validate_evaluation_goal(evaluation, dict(goal), require_evidence=True)
+                # Evidence text and PDF attachments are useful supporting
+                # material, but they must never block an employee from sending
+                # a self-review.  Progress status and its achievement value
+                # remain validated for consistency.
+                self.validate_evaluation_goal(evaluation, dict(goal))
             manager_id = self.direct_manager_employee_id(int(evaluation["employee_id"]))
             manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (manager_id,)).fetchone() if manager_id else None
             if not manager_id or manager_user is None:
@@ -12213,7 +12337,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
             self.send_json(200, {"certificate": self.certificate_payload(saved), "print_authorized": True})
 
-        # Employee purchase requests and their three-step approval workflow
+        # Employee purchase requests: line manager -> final invoice approver.
         def finance_purchase_approver(self, user: dict[str, Any]) -> bool:
             """Authorize the configured employee for final invoice approval.
 
@@ -12266,7 +12390,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                           mu.display_name AS manager_decided_by_name,hu.display_name AS hr_decided_by_name,
                           fu.display_name AS finance_decided_by_name
                      FROM purchase_requests p JOIN employees e ON e.id=p.employee_id
-                     JOIN employees m ON m.id=p.manager_employee_id
+                     LEFT JOIN employees m ON m.id=p.manager_employee_id
                      LEFT JOIN users mu ON mu.id=p.manager_decided_by
                      LEFT JOIN users hu ON hu.id=p.hr_decided_by
                      LEFT JOIN users fu ON fu.id=p.finance_decided_by
@@ -12288,8 +12412,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 item["status"] not in {"approved", "rejected"}
                 and int(item["employee_id"]) != int(user.get("employee_id") or 0)
                 and (
-                    (step == "manager" and int(item["manager_employee_id"]) == int(user.get("employee_id") or 0))
-                    or (step == "hr" and has_permission(self.db, user, "purchase.hr_approve"))
+                    (step == "manager" and item.get("manager_employee_id") is not None and int(item["manager_employee_id"]) == int(user.get("employee_id") or 0))
                     or (step == "finance" and self.finance_purchase_approver(user))
                 )
             )
@@ -12316,11 +12439,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
             ``purchase.view`` only opens the module; it never widens the data
             scope.  A request remains visible to its requester, recorded direct
-            manager, HR approvers, the configured invoice approver and system
-            administrators (included by the HR approval permission).
+            manager, HR observers, the configured invoice approver and system
+            administrators. HR visibility does not add an approval stage.
             """
             data = dict(row)
-            employee_ids = {int(data["employee_id"]), int(data["manager_employee_id"])}
+            employee_ids = {int(data["employee_id"])}
+            if data.get("manager_employee_id") is not None:
+                employee_ids.add(int(data["manager_employee_id"]))
             placeholders = ",".join("?" for _ in employee_ids)
             recipients = {
                 int(item["id"])
@@ -12338,8 +12463,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def api_purchase_requesters_get(self) -> None:
             """Return the minimal, eligible requester directory for system admins.
 
-            A system administrator can submit a purchase on an employee's behalf,
-            but the request must still enter the employee's real reporting line.
+            A system administrator can submit a purchase on an employee's behalf.
+            The request enters the employee's reporting line when a manager has
+            an active account, otherwise it goes directly to the invoice approver.
             Keeping this as a dedicated projection avoids exposing employee salary
             or profile data in the purchase form.
             """
@@ -12351,24 +12477,20 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             for employee in self.db.execute(
                 "SELECT id,employee_no,full_name FROM employees WHERE active=1 ORDER BY full_name,id"
             ).fetchall():
-                manager_employee_id = self.direct_manager_employee_id(int(employee["id"]))
-                if not manager_employee_id:
-                    continue
+                manager_employee_id = self.purchase_direct_manager_employee_id(int(employee["id"]))
                 manager = self.db.execute(
                     """SELECT e.id,e.full_name,u.id AS user_id
                          FROM employees e JOIN users u ON u.employee_id=e.id
                         WHERE e.id=? AND e.active=1 AND u.active=1
                         ORDER BY u.is_super_admin DESC,u.id LIMIT 1""",
                     (manager_employee_id,),
-                ).fetchone()
-                if manager is None:
-                    continue
+                ).fetchone() if manager_employee_id else None
                 requesters.append({
                     "id": int(employee["id"]),
                     "employee_no": str(employee["employee_no"] or ""),
                     "full_name": str(employee["full_name"] or ""),
-                    "manager_employee_id": int(manager["id"]),
-                    "manager_name": str(manager["full_name"] or ""),
+                    "manager_employee_id": int(manager["id"]) if manager else None,
+                    "manager_name": str(manager["full_name"] or "") if manager else "",
                 })
             self.send_json(200, {"items": requesters})
 
@@ -12390,7 +12512,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                           mu.display_name AS manager_decided_by_name,hu.display_name AS hr_decided_by_name,
                           fu.display_name AS finance_decided_by_name
                      FROM purchase_requests p JOIN employees e ON e.id=p.employee_id
-                     JOIN employees m ON m.id=p.manager_employee_id
+                     LEFT JOIN employees m ON m.id=p.manager_employee_id
                      LEFT JOIN users mu ON mu.id=p.manager_decided_by
                      LEFT JOIN users hu ON hu.id=p.hr_decided_by
                      LEFT JOIN users fu ON fu.id=p.finance_decided_by""" + where + " ORDER BY p.created_at DESC,p.id DESC",
@@ -12412,15 +12534,33 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 employee_id = self.own_employee_id()
                 if data.get("employee_id") not in (None, "") and as_int(data.get("employee_id"), "employee_id", 1) != employee_id:
                     raise APIError(403, "لا يمكنك تقديم طلب مشتريات باسم موظف آخر.", "forbidden", {"field": "employee_id"})
-            manager_employee_id = self.direct_manager_employee_id(employee_id)
+            manager_employee_id = self.purchase_direct_manager_employee_id(employee_id)
             manager_user = self.db.execute(
                 """SELECT u.id FROM users u JOIN employees e ON e.id=u.employee_id
                     WHERE u.employee_id=? AND u.active=1 AND e.active=1
                     ORDER BY u.is_super_admin DESC,u.id LIMIT 1""",
                 (manager_employee_id,),
             ).fetchone() if manager_employee_id else None
-            if not manager_employee_id or manager_user is None:
-                raise APIError(409, "لا يمكن إرسال الطلب قبل تعيين مسؤول مباشر نشط للموظف.", "purchase_manager_missing")
+            if manager_user is None:
+                manager_employee_id = None
+            initial_step = "manager" if manager_employee_id else "finance"
+            initial_status = "manager_pending" if manager_employee_id else "finance_pending"
+            if initial_step == "finance":
+                requester_user_ids = {
+                    int(row["id"]) for row in self.db.execute(
+                        "SELECT id FROM users WHERE active=1 AND employee_id=?", (employee_id,)
+                    ).fetchall()
+                }
+                finance_recipients = [
+                    user_id for user_id in self.purchase_finance_recipient_ids()
+                    if user_id not in requester_user_ids
+                ]
+                if not finance_recipients:
+                    raise APIError(
+                        409,
+                        "لا يوجد مسؤول اعتماد فواتير آخر يمكنه اعتماد طلب هذا الموظف. حدده من إعدادات المؤسسة.",
+                        "purchase_finance_approver_missing",
+                    )
             amount_cents = money_cents(data.get("amount"), "amount", Decimal("0.01"))
             invoice_data_url = validate_data_url(
                 data.get("invoice_data_url"), "فاتورة الشراء",
@@ -12441,11 +12581,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 cursor = self.db.execute(
                     """INSERT INTO purchase_requests(
                            employee_id,purchase_name,amount_cents,responsible_name,invoice_file_name,invoice_mime_type,
-                           invoice_data_url,manager_employee_id,created_at,updated_at
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                           invoice_data_url,status,current_step,manager_employee_id,created_at,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (employee_id, require_text(data, "purchase_name", 240), amount_cents,
                      require_text(data, "responsible_name", 180), file_name, mime_type, invoice_data_url,
-                     manager_employee_id, stamp, stamp),
+                     initial_status, initial_step, manager_employee_id, stamp, stamp),
                 )
                 request_id = int(cursor.lastrowid)
                 request_row = self.purchase_request_row(request_id)
@@ -12456,6 +12596,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 audit(self.db, user["id"], "purchase.submit", "purchase_request", request_id, {
                     "amount_cents": amount_cents,
                     "manager_employee_id": manager_employee_id,
+                    "initial_step": initial_step,
+                    "manager_bypassed": manager_employee_id is None,
                     "invoice_mime_type": mime_type,
                     "submitted_for_employee_id": employee_id,
                     "submitted_on_behalf": submitted_on_behalf,
@@ -12480,8 +12622,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(409, "لا يجوز لمقدم الطلب اعتماد طلبه.", "purchase_self_approval_forbidden")
             step = str(row["current_step"])
             authorized = (
-                (step == "manager" and int(row["manager_employee_id"]) == int(user.get("employee_id") or 0))
-                or (step == "hr" and has_permission(self.db, user, "purchase.hr_approve"))
+                (step == "manager" and row["manager_employee_id"] is not None and int(row["manager_employee_id"]) == int(user.get("employee_id") or 0))
                 or (step == "finance" and self.finance_purchase_approver(user))
             )
             if not authorized:
@@ -12501,8 +12642,6 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if action == "reject":
                 fields.update({"status": "rejected", "current_step": "complete", "rejected_step": step})
             elif step == "manager":
-                fields.update({"status": "hr_pending", "current_step": "hr"})
-            elif step == "hr":
                 fields.update({"status": "finance_pending", "current_step": "finance"})
             else:
                 fields.update({"status": "approved", "current_step": "complete"})
@@ -12514,11 +12653,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 )
                 if updated.rowcount != 1:
                     raise APIError(409, "انتقل الطلب إلى مرحلة أخرى؛ حدّث القائمة قبل اتخاذ القرار.", "purchase_stage_changed")
-                if fields["status"] == "hr_pending":
-                    if not self.approval_recipient_ids("purchase.hr_approve", int(user["id"])):
-                        raise APIError(409, "لا يوجد مسؤول موارد بشرية مخول لمراجعة طلبات المشتريات.", "purchase_hr_approver_missing")
-                elif fields["status"] == "finance_pending":
-                    if not self.purchase_finance_recipient_ids(int(user["id"])):
+                if fields["status"] == "finance_pending":
+                    if not self.purchase_finance_recipient_ids():
                         raise APIError(409, "لا يوجد مسؤول اعتماد فواتير نشط بحساب دخول فعال. حدده من إعدادات المؤسسة.", "purchase_finance_approver_missing")
                 saved_row = self.purchase_request_row(request_id)
                 recipients = self.purchase_participant_user_ids(saved_row, int(user["id"]))

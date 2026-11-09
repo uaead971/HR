@@ -527,11 +527,9 @@
   });
 
   Object.assign(english, {
-    'طلب موثق بفاتورة يمر على المسؤول المباشر ثم الموارد البشرية ثم مسؤول اعتماد الفواتير المحدد في إعدادات المؤسسة.':'An invoice-backed request routed through the line manager, HR, and the Invoice Approver selected in organization settings.',
     'عند مسؤول اعتماد الفواتير':'With Invoice Approver',
     'مسؤول اعتماد الفواتير':'Invoice Approver',
     'الموظف المختار هو المخول وحده بالاعتماد النهائي لفواتير المشتريات، ويجب أن يكون لديه حساب دخول فعال.':'The selected employee is the sole final approver for purchase invoices and must have an active sign-in account.',
-    'بعد الإرسال: المسؤول المباشر ← الموارد البشرية ← مسؤول اعتماد الفواتير للاعتماد النهائي.':'After submission: line manager ← HR ← Invoice Approver for final approval.',
     'الدرجات الوظيفية':'Job grades',
     'الدرجة تصنيف وظيفي فقط، بينما يُدخل الراتب الأساسي يدوياً في ملف كل موظف ولا يتغير عند تعديل الدرجة أو حرفها.':'The grade is a job classification only. Basic salary is entered manually in each employee profile and does not change when the grade or level changes.',
     'الدرجة تصنيف وظيفي ولا تغيّر الراتب الأساسي اليدوي.':'The grade is a job classification and does not change the manually entered basic salary.',
@@ -604,6 +602,33 @@
     'لا يمكن تعديل تعيين منتهي.':'An ended assignment cannot be changed.',
     'تعيين المناوبة غير موجود.':'Shift assignment not found.',
     'لا يمكن إزالة تعيين منتهي من السجل التاريخي.':'An ended assignment cannot be removed from historical records.'
+  });
+
+  Object.assign(english, {
+    'اختر هدفاً واحداً على الأقل.':'Select at least one goal.',
+    'يجب أن يساوي مجموع الأوزان 100 تماماً؛ المجموع الحالي {total}.':'Goal weights must total exactly 100; the current total is {total}.',
+    'اختر هدفين تخصصيين على الأقل؛ المحدد حالياً {count}.':'Select at least two specialized goals; {count} are currently selected.',
+    'راجع حالة التقدم ونسبة الإنجاز في {count} هدف.':'Review the progress status and achievement percentage for {count} goal(s).',
+    'تعذر إرسال التقييم: {issues}':'The review cannot be submitted: {issues}',
+    'تعذر الإرسال حالياً':'Submission is currently blocked',
+    'جاهز للإرسال':'Ready to submit',
+    'يمكنك الإرسال الآن. الدليل النصي ومرفق PDF اختياريان.':'You can submit now. Evidence text and a PDF attachment are optional.',
+    'اختر حالة التقدم ونسبة الإنجاز؛ نص الدليل ومرفق PDF اختياريان.':'Select the progress status and achievement percentage. Evidence text and a PDF attachment are optional.',
+    'اختر حالة التقدم ونسبة الإنجاز. إضافة نص أو ملف PDF للدليل اختيارية.':'Select the progress status and achievement percentage. Adding evidence text or a PDF is optional.',
+    'دليل الإنجاز / النتيجة (اختياري)':'Achievement evidence / outcome (optional)',
+    'يمكن ترك النص فارغاً والإرسال دون مرفق.':'You may leave this text empty and submit without an attachment.',
+    'يجب ربط الموظف بمسؤول مباشر له حساب نشط.':'The employee must be linked to a line manager with an active account.',
+    'لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.':'You can submit only when the goal weights total exactly 100.',
+    'اختر هدفين تخصصيين على الأقل قبل إرسال التقييم.':'Select at least two specialized goals before submitting the review.',
+    'حالة التقدم لا تتوافق مع نسبة الإنجاز: منجز 100٪، لم يُنجز 0٪، وقيد التقدم بينهما.':'Progress and achievement do not match: completed is 100%, not completed is 0%, and in progress must be between them.',
+    'طلب موثق بفاتورة يمر على المسؤول المباشر ثم مسؤول اعتماد الفواتير. عند عدم وجود مسؤول مباشر ينتقل الطلب للاعتماد النهائي مباشرة.':'An invoice-backed request goes to the line manager and then the Invoice Approver. If no line manager exists, it goes directly to final approval.',
+    'بعد الإرسال: المسؤول المباشر ← مسؤول اعتماد الفواتير. عند عدم وجود مسؤول مباشر تُحال مباشرة للاعتماد النهائي.':'After submission: line manager ← Invoice Approver. If no line manager exists, the request goes directly to final approval.',
+    'لا يوجد موظفون نشطون متاحون لتسجيل الطلب.':'No active employees are available for submitting a request.',
+    'إحالة مباشرة لمسؤول اعتماد الفواتير':'Directly to the Invoice Approver',
+    'غير معين — إحالة مباشرة':'Not assigned — direct routing',
+    'تم تجاوز المرحلة والإحالة مباشرة للاعتماد النهائي':'This stage was skipped and the request was sent directly for final approval',
+    'تم إرسال الطلب مباشرة إلى مسؤول اعتماد الفواتير':'The request was sent directly to the Invoice Approver',
+    'لا يوجد مسؤول اعتماد فواتير آخر يمكنه اعتماد هذا الطلب. حدده من إعدادات المؤسسة.':'No other Invoice Approver can approve this request. Select one in organization settings.'
   });
 
   const originals = new WeakMap();

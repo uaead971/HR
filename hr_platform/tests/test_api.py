@@ -230,6 +230,29 @@ class ShiftManagementFrontendTests(unittest.TestCase):
         self.assertIn("Deactivate it instead.", translations)
 
 
+class EvaluationWorkflowFrontendTests(unittest.TestCase):
+    def test_optional_evidence_visible_validation_and_colored_priority_queue(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        server = (root / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn("function evaluationSubmissionIssues", app)
+        self.assertIn("$('#submitEvaluation').disabled=!draft", app)
+        self.assertIn("تعذر إرسال التقييم: {issues}", app)
+        self.assertIn("يمكن ترك النص فارغاً والإرسال دون مرفق.", app)
+        self.assertNotIn("require_evidence=True", server)
+        self.assertNotIn("goal_evidence_required", server)
+        self.assertIn("function evaluationQueueState", app)
+        self.assertIn("queue-${queueState.key}", app)
+        for state in ("complete", "pending", "incomplete"):
+            self.assertIn(f".evaluation-record-chip.queue-{state}", styles)
+        self.assertIn(".evaluation-submit-readiness.blocked", styles)
+        self.assertIn("'تعذر الإرسال حالياً':'Submission is currently blocked'", translations)
+        self.assertIn("'دليل الإنجاز / النتيجة (اختياري)':'Achievement evidence / outcome (optional)'", translations)
+
+
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -267,8 +290,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         public = APIClient(self.base_url)
         health = public.request("GET", "/api/health")
         self.assertTrue(health["ok"])
-        self.assertEqual(hr_server.APP_VERSION, "5.8.4")
-        self.assertEqual(health["version"], "5.8.4")
+        self.assertEqual(hr_server.APP_VERSION, "5.8.5")
+        self.assertEqual(health["version"], "5.8.5")
         org = public.request("GET", "/api/org")["organization"]
         self.assertTrue(org["display_name"])
         public.request("GET", "/api/auth/me", expected=401)
@@ -328,8 +351,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertNotIn("alertMessage('لا يملك حسابك صلاحية فتح هذه الوحدة.'", app)
         self.assertIn('integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="', index)
         self.assertNotIn('sha256-p4NxAoJBhIINfQ3ynAu/EGyWbKofNLF4MZwvMZ8CHwM=', index)
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
         self.assertIn('@media(max-width:650px){.login-visual-runtime .visual-runtime-copy{position:absolute;inset:auto 14px 64px', styles)
         self.assertIn('.visual-runtime-copy:has(h2:empty){display:none}', styles)
 
@@ -342,7 +365,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.4&build=20261106-production-r35")
+        application_script = index.index("app.js?v=5.8.5&build=20261109-production-r36")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -461,7 +484,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("استوديو العلامة المؤسسية", i18n)
         self.assertIn("Organization brand studio", i18n)
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.4', index)
+            self.assertIn(f'{asset}?v=5.8.5', index)
 
     def test_53_v54_migrates_v532_visual_identity_without_changing_tenant_data(self):
         with tempfile.TemporaryDirectory(prefix="hr-v54-migration-") as folder:
@@ -787,7 +810,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.4', index)
+            self.assertIn(f'{asset}?v=5.8.5', index)
         for token in ("--mineral-950:#071b22", "--mineral-900:#0b2530", "--emerald-700:#0e6655", "--bronze-500:#c99545", "--parchment-100:#f4f2ec"):
             self.assertIn(token, styles)
         for symbol in ("dashboard", "home", "users", "org", "map", "clock", "calendar", "shift", "overtime", "wallet", "certificate", "loan", "target", "recruitment", "onboarding", "learning", "benefits", "offboarding", "bell", "mail", "report", "shield", "settings", "search", "menu", "print", "edit", "archive", "download"):
@@ -820,7 +843,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.4', index)
+            self.assertIn(f'{asset}?v=5.8.5', index)
         self.assertIn('.sidebar-collapsed .sidebar,.sidebar-collapsed .sidebar.open{width:min(310px,88vw)}', styles)
         self.assertIn('.sidebar-collapsed .sidebar a>span,', styles)
         self.assertIn('.sidebar-collapsed .sidebar .nav-label,', styles)
@@ -852,7 +875,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
 
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.4', index)
+            self.assertIn(f'{asset}?v=5.8.5', index)
         self.assertIn("function metricValue(value)", app)
         self.assertIn("<small>${esc(tr(m[0]))}</small>", app)
         self.assertIn("<span>${esc(tr(m[2]))}</span>", app)
@@ -885,9 +908,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         app = (root / "app.js").read_text(encoding="utf-8")
         i18n = (root / "i18n.js").read_text(encoding="utf-8")
         styles = (root / "styles.css").read_text(encoding="utf-8")
-        self.assertIn('i18n.js?v=5.8.4', index)
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('i18n.js?v=5.8.5', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
         self.assertGreaterEqual(index.count('data-locale="ar"'), 2)
         self.assertGreaterEqual(index.count('data-locale="en"'), 2)
         self.assertIn("khaisha.ui.locale", index + i18n)
@@ -987,7 +1010,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("if(requested&&!requestedAllowed)history.replaceState", app)
         index = (root / "index.html").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.4', index)
+            self.assertIn(f'{asset}?v=5.8.5', index)
 
         required_performance_resources = (
             "الفترة من", "متبقٍ {days} يوم", "مسودة الموظف", "أهداف الموظف",
@@ -1064,8 +1087,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
             r"api\(`/api/evaluations/\$\{state\.evaluation\.id\}/submit`,"
             r"\{method:'POST'\}\)",
         )
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
 
     def test_42_v512_dossier_observer_and_mobile_weight_badge_contract(self):
         root = Path(__file__).parents[1]
@@ -1090,8 +1113,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("flex:0 0 auto", weight_rule.group(1))
         self.assertIn("min-width:max-content", weight_rule.group(1))
         self.assertIn("@media(max-width:440px)", styles)
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
 
     def test_keep_alive_connection_refreshes_authentication_each_request(self):
         """Anonymous -> login -> authenticated -> logout must work on one TCP connection."""
@@ -1976,8 +1999,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         root = Path(__file__).parents[1]
         sources = {name: (root / name).read_text(encoding="utf-8") for name in ("index.html", "app.js", "styles.css", "server.py", "schema.sql")}
         index, app, styles = sources["index.html"], sources["app.js"], sources["styles.css"]
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
         for template in ("portrait_orbit", "executive_horizontal", "minimal_vertical"):
             self.assertIn(f'data-card-template-choice="{template}"', index)
             self.assertIn(f"template-{template}", styles)
@@ -2218,8 +2241,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('class="org-fit-stage"', app)
         self.assertIn(".org-fit-stage.fitted{overflow:hidden}", styles)
         self.assertIn("MutationObserver", app)
-        self.assertIn("styles.css?v=5.8.4", index)
-        self.assertIn("app.js?v=5.8.4", index)
+        self.assertIn("styles.css?v=5.8.5", index)
+        self.assertIn("app.js?v=5.8.5", index)
         self.assertIn('rel="icon" href="favicon.svg"', index)
 
     def test_30_v47_salary_certificate_serial_barcode_integrity_and_verification(self):
@@ -2897,7 +2920,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261106-production-r35", index)
+        self.assertIn("build=20261109-production-r36", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3111,7 +3134,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261106-production-r35", index)
+        self.assertIn("build=20261109-production-r36", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3216,8 +3239,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server = (root / "server.py").read_text(encoding="utf-8")
         schema = (root / "schema.sql").read_text(encoding="utf-8")
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
         for marker in ("evaluationWorkflowRibbon", "evaluationPrivacyGate", "myEvaluationHistory", "managerEvaluationForm", "hrApproveForm", "evaluationGrievanceForm"):
             self.assertIn(marker, index + app)
         for endpoint in ("manager-review", "hr-review", "/grievance", "evaluation-grievances"):
@@ -3470,9 +3493,6 @@ class HRAPIEndToEndTests(unittest.TestCase):
             dict(base_goal, title="تحسين دقة المعالجة", evidence_note="تقرير تدقيق المعاملات."),
             expected=201,
         )["goals"][1]
-        self.assertEqual(worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {}, expected=422)["code"], "goal_evidence_required")
-        worker.request("PATCH", f"/api/evaluation-goals/{goal['id']}", {"evidence_note": "أظهر تقرير الجودة انخفاض إعادة العمل إلى 4%."})
-
         hr_cycle = hr.request("GET", f"/api/evaluation-cycles/{cycle['id']}")["cycle"]
         hr_employee_id = hr.request("GET", "/api/auth/me")["user"]["employee_id"]
         hr_evaluation_id = next(item["evaluation_id"] for item in hr_cycle["recipients"] if item["employee_id"] == hr_employee_id)
@@ -3483,10 +3503,11 @@ class HRAPIEndToEndTests(unittest.TestCase):
         submitted = worker.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
         self.assertEqual(submitted["evaluation"]["status"], "submitted")
         self.assertEqual(submitted["goals"][0]["achievement"], 65)
+        self.assertEqual(submitted["goals"][0]["evidence_note"], "")
         self.assertNotIn("awarded_points", submitted["goals"][0])
         worker.request("PATCH", f"/api/evaluation-goals/{goal['id']}", {"evidence_note": "بعد الإرسال"}, expected=409)
         manager_view = manager.request("GET", f"/api/evaluations/{evaluation_id}")
-        self.assertEqual(manager_view["goals"][0]["evidence_note"], "أظهر تقرير الجودة انخفاض إعادة العمل إلى 4%.")
+        self.assertEqual(manager_view["goals"][0]["evidence_note"], "")
         reviewed = manager.request(
             "POST", f"/api/evaluations/{evaluation_id}/manager-review",
             {"manager_report": "النتيجة موثقة ومتسقة مع مؤشر الجودة.", "goals": [{"id": goal["id"], "awarded_points": 41}, {"id": second_goal["id"], "awarded_points": 41}]},
@@ -3667,8 +3688,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("@media(max-width:440px)", styles)
         self.assertIn("overflow-x:hidden", styles)
         self.assertIn("evaluation.cycle.manage", app + schema + (root / "server.py").read_text(encoding="utf-8"))
-        self.assertIn('styles.css?v=5.8.4', index)
-        self.assertIn('app.js?v=5.8.4', index)
+        self.assertIn('styles.css?v=5.8.5', index)
+        self.assertIn('app.js?v=5.8.5', index)
 
 
     def test_57_v56_profile_fields_age_privacy_permissions_and_emergency_contacts(self):
@@ -3891,7 +3912,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         styles = (root / "styles.css").read_text(encoding="utf-8")
         server_source = (root / "server.py").read_text(encoding="utf-8")
         for asset in ("styles.css", "i18n.js", "app.js"):
-            self.assertIn(f'{asset}?v=5.8.4', index)
+            self.assertIn(f'{asset}?v=5.8.5', index)
         for marker in ("employee.profile.edit", "employee.emergency.manage", "employee_emergency_contacts", "api_attendance_range", "invalid_date_range"):
             self.assertIn(marker, server_source + app)
         for marker in ("employeeProfileForm", "emergencyContactForm", "profile-completeness", "attendanceRangeForm", "attendanceSummary", "attendance-table-wrap"):
@@ -5360,7 +5381,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261106-production-r35", index)
+        self.assertIn("build=20261109-production-r36", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -5573,7 +5594,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
 
         remaining_ids = {item["id"] for item in admin.request("GET", "/api/shifts")["items"]}
         self.assertTrue(protected_ids.issubset(remaining_ids))
-    def test_81_purchase_request_invoice_and_three_stage_approval(self):
+    def test_81_purchase_request_invoice_and_two_stage_approval_with_direct_finance_fallback(self):
         employee = self.client("employee@demo.ae", "Emp@12345")
         manager = self.client("manager@demo.ae", "Manager@12345")
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5616,12 +5637,12 @@ class HRAPIEndToEndTests(unittest.TestCase):
             "POST", f"/api/purchases/{request['id']}/decision",
             {"action": "approve", "note": "تمت مراجعة الحاجة"},
         )["request"]
-        self.assertEqual((first["status"], first["current_step"]), ("hr_pending", "hr"))
-        second = hr.request(
+        self.assertEqual((first["status"], first["current_step"]), ("finance_pending", "finance"))
+        denied_hr = hr.request(
             "POST", f"/api/purchases/{request['id']}/decision",
-            {"action": "approve", "note": "مطابق للسياسة"},
-        )["request"]
-        self.assertEqual((second["status"], second["current_step"]), ("finance_pending", "finance"))
+            {"action": "approve", "note": "محاولة اعتماد موارد بشرية"}, expected=403,
+        )
+        self.assertEqual(denied_hr["code"], "forbidden")
         denied_final = admin.request(
             "POST", f"/api/purchases/{request['id']}/decision",
             {"action": "approve", "note": "محاولة اعتماد إداري"}, expected=403,
@@ -5633,7 +5654,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         )["request"]
         self.assertEqual((final["status"], final["current_step"]), ("approved", "complete"))
         self.assertEqual(final["manager_note"], "تمت مراجعة الحاجة")
-        self.assertEqual(final["hr_note"], "مطابق للسياسة")
+        self.assertEqual(final["hr_note"], "")
         self.assertEqual(final["finance_note"], "اعتماد مسؤول الحسابات النهائي")
 
         employee_id = employee.request("GET", "/api/auth/me")["user"]["employee_id"]
@@ -5642,6 +5663,27 @@ class HRAPIEndToEndTests(unittest.TestCase):
         requesters = admin.request("GET", "/api/purchases/requesters")["items"]
         requester = next(item for item in requesters if item["id"] == employee_id)
         self.assertEqual(requester["manager_employee_id"], manager_id)
+
+        direct_email = f"direct-finance-{suffix}@demo.ae"
+        direct_employee = hr.request("POST", "/api/employees", {
+            "employee_no": f"DIRECT-FIN-{suffix}", "full_name": "موظف دون مسؤول مباشر",
+            "email": direct_email, "hire_date": "2024-01-01", "create_user": True,
+            "password": "Direct@12345", "role": "employee",
+        }, expected=201)["employee"]
+        direct_client = self.client(direct_email, "Direct@12345")
+        direct_request = direct_client.request(
+            "POST", "/api/purchases",
+            body | {"purchase_name": "طلب يحال مباشرة لمسؤول اعتماد الفواتير"}, expected=201,
+        )["request"]
+        self.assertIsNone(direct_request["manager_employee_id"])
+        self.assertEqual((direct_request["status"], direct_request["current_step"]), ("finance_pending", "finance"))
+        direct_final = manager.request(
+            "POST", f"/api/purchases/{direct_request['id']}/decision",
+            {"action": "approve", "note": "اعتماد مباشر"},
+        )["request"]
+        self.assertEqual((direct_final["status"], direct_final["current_step"]), ("approved", "complete"))
+        direct_requester = next(item for item in admin.request("GET", "/api/purchases/requesters")["items"] if item["id"] == direct_employee["id"])
+        self.assertIsNone(direct_requester["manager_employee_id"])
 
         admin_missing_employee = admin.request("POST", "/api/purchases", body, expected=422)
         self.assertEqual(admin_missing_employee["details"]["field"], "employee_id")
@@ -5667,6 +5709,23 @@ class HRAPIEndToEndTests(unittest.TestCase):
             audit_details = json.loads(audit_row["details"])
             self.assertTrue(audit_details["submitted_on_behalf"])
             self.assertEqual(audit_details["submitted_for_employee_id"], employee_id)
+            manager_column = next(
+                row for row in db.execute("PRAGMA table_info(purchase_requests)")
+                if row["name"] == "manager_employee_id"
+            )
+            self.assertEqual(manager_column["notnull"], 0)
+            db.execute(
+                "UPDATE purchase_requests SET status='hr_pending',current_step='hr' WHERE id=?",
+                (delegated_request["id"],),
+            )
+            db.commit()
+            hr_server.migrate_purchase_requests_direct_finance(db)
+            hr_server.migrate_purchase_requests_direct_finance(db)
+            migrated = db.execute(
+                "SELECT status,current_step FROM purchase_requests WHERE id=?",
+                (delegated_request["id"],),
+            ).fetchone()
+            self.assertEqual((migrated["status"], migrated["current_step"]), ("finance_pending", "finance"))
 
         root = Path(__file__).parents[1]
         index = (root / "index.html").read_text(encoding="utf-8")
@@ -5681,7 +5740,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("/api/purchases/requesters", app)
         self.assertIn("body.employee_id=Number(form.employee_id.value)", app)
         self.assertIn("finance_pending:'عند مسؤول اعتماد الفواتير'", app)
-        self.assertIn("مسؤول اعتماد الفواتير المحدد في إعدادات المؤسسة", index + app)
+        self.assertNotIn('<option value="hr_pending">', index)
+        self.assertIn("item.manager_decided_at?'done':!item.manager_employee_id?'skipped'", app)
+        self.assertIn("عند عدم وجود مسؤول مباشر ينتقل الطلب للاعتماد النهائي مباشرة", index + app)
         self.assertIn("'عند مسؤول اعتماد الفواتير':'With Invoice Approver'", i18n)
         self.assertIn('name="invoice_approval_employee_id"', index)
         self.assertIn("'طلب مشتريات':'Purchase request'", i18n)
@@ -6022,7 +6083,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261106-production-r35", index)
+        self.assertIn("build=20261109-production-r36", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6577,7 +6638,80 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261106-production-r35", index)
+        self.assertIn("build=20261109-production-r36", index)
+
+    def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
+        with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:
+            db_path = Path(directory) / "legacy.sqlite3"
+            with contextlib.closing(hr_server.open_db(db_path)) as db:
+                db.executescript(
+                    """
+                    CREATE TABLE employees (id INTEGER PRIMARY KEY, full_name TEXT NOT NULL);
+                    CREATE TABLE users (id INTEGER PRIMARY KEY, employee_id INTEGER);
+                    CREATE TABLE purchase_requests (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      employee_id INTEGER NOT NULL,
+                      purchase_name TEXT NOT NULL,
+                      amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
+                      responsible_name TEXT NOT NULL,
+                      invoice_file_name TEXT NOT NULL,
+                      invoice_mime_type TEXT NOT NULL CHECK (invoice_mime_type IN ('application/pdf','image/png','image/jpeg','image/webp')),
+                      invoice_data_url TEXT NOT NULL,
+                      status TEXT NOT NULL DEFAULT 'manager_pending' CHECK (status IN ('manager_pending','hr_pending','finance_pending','approved','rejected')),
+                      current_step TEXT NOT NULL DEFAULT 'manager' CHECK (current_step IN ('manager','hr','finance','complete')),
+                      manager_employee_id INTEGER NOT NULL,
+                      manager_decided_by INTEGER,
+                      manager_decided_at TEXT,
+                      manager_note TEXT NOT NULL DEFAULT '',
+                      hr_decided_by INTEGER,
+                      hr_decided_at TEXT,
+                      hr_note TEXT NOT NULL DEFAULT '',
+                      finance_decided_by INTEGER,
+                      finance_decided_at TEXT,
+                      finance_note TEXT NOT NULL DEFAULT '',
+                      rejected_step TEXT,
+                      created_at TEXT NOT NULL,
+                      updated_at TEXT NOT NULL,
+                      FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
+                      FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE RESTRICT,
+                      FOREIGN KEY (manager_decided_by) REFERENCES users(id) ON DELETE SET NULL,
+                      FOREIGN KEY (hr_decided_by) REFERENCES users(id) ON DELETE SET NULL,
+                      FOREIGN KEY (finance_decided_by) REFERENCES users(id) ON DELETE SET NULL
+                    );
+                    CREATE INDEX idx_purchase_requests_employee ON purchase_requests(employee_id,created_at DESC);
+                    CREATE INDEX idx_purchase_requests_status ON purchase_requests(status,created_at DESC);
+                    INSERT INTO employees(id,full_name) VALUES(1,'Requester'),(2,'Manager');
+                    INSERT INTO users(id,employee_id) VALUES(1,2);
+                    INSERT INTO purchase_requests(
+                      id,employee_id,purchase_name,amount_cents,responsible_name,invoice_file_name,
+                      invoice_mime_type,invoice_data_url,status,current_step,manager_employee_id,
+                      manager_decided_by,manager_decided_at,manager_note,created_at,updated_at
+                    ) VALUES(
+                      7,1,'Legacy request',10000,'Requester','invoice.pdf','application/pdf',
+                      'data:application/pdf;base64,JVBERi0xLjQ=','hr_pending','hr',2,1,
+                      '2026-11-01T08:00:00+04:00','Manager approved',
+                      '2026-11-01T07:00:00+04:00','2026-11-01T08:00:00+04:00'
+                    );
+                    """
+                )
+                db.commit()
+                hr_server.migrate_purchase_requests_direct_finance(db)
+                hr_server.migrate_purchase_requests_direct_finance(db)
+                manager_column = next(
+                    row for row in db.execute("PRAGMA table_info(purchase_requests)")
+                    if row["name"] == "manager_employee_id"
+                )
+                self.assertEqual(manager_column["notnull"], 0)
+                migrated = db.execute(
+                    "SELECT id,status,current_step,manager_employee_id,manager_note FROM purchase_requests WHERE id=7"
+                ).fetchone()
+                self.assertEqual(migrated["id"], 7)
+                self.assertEqual((migrated["status"], migrated["current_step"]), ("finance_pending", "finance"))
+                self.assertEqual(migrated["manager_employee_id"], 2)
+                self.assertEqual(migrated["manager_note"], "Manager approved")
+                self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+                index_names = {row["name"] for row in db.execute("PRAGMA index_list(purchase_requests)")}
+                self.assertTrue({"idx_purchase_requests_employee", "idx_purchase_requests_status"}.issubset(index_names))
 
     def test_english_role_source_is_replaced_between_admin_and_manager_sessions(self):
         root = Path(__file__).parents[1]

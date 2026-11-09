@@ -1102,7 +1102,7 @@ CREATE TABLE IF NOT EXISTS purchase_requests (
   invoice_data_url TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'manager_pending' CHECK (status IN ('manager_pending','hr_pending','finance_pending','approved','rejected')),
   current_step TEXT NOT NULL DEFAULT 'manager' CHECK (current_step IN ('manager','hr','finance','complete')),
-  manager_employee_id INTEGER NOT NULL,
+  manager_employee_id INTEGER,
   manager_decided_by INTEGER,
   manager_decided_at TEXT,
   manager_note TEXT NOT NULL DEFAULT '',
