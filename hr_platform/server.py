@@ -3623,10 +3623,278 @@ def is_hr_privacy_account(db: sqlite3.Connection, user: dict[str, Any] | sqlite3
     )
 
 
+AUDIT_ROLE_LABELS_AR = {
+    "admin": "مسؤول النظام",
+    "hr": "رئيس قسم الموارد البشرية",
+    "supervisor": "مشرف",
+    "manager": "مسؤول مباشر",
+    "general_manager": "المدير العام",
+    "employee": "موظف",
+}
+
+AUDIT_ENTITY_LABELS_AR = {
+    "user": "حساب مستخدم", "employee": "موظف", "department": "قسم", "branch": "فرع",
+    "organization": "المؤسسة", "shift": "مناوبة", "leave_request": "طلب إجازة",
+    "leave_sale_request": "طلب بيع إجازة", "leave_balance": "رصيد إجازة",
+    "overtime_request": "طلب عمل إضافي", "evaluation": "تقييم سنوي",
+    "evaluation_goal": "هدف تقييم", "evaluation_grievance": "تظلم تقييم",
+    "evaluation_cycle": "دورة تقييم", "purchase_request": "طلب مشتريات",
+    "payroll_run": "مسير رواتب", "payroll_adjustment": "تعديل مسير رواتب",
+    "advance": "طلب سلفة", "salary_certificate": "شهادة راتب",
+    "notification": "إشعار", "employee_document": "وثيقة موظف",
+    "document_library_document": "مستند مؤسسي", "employee_custody": "عهدة موظف",
+    "employee_action": "إجراء موظف", "lifecycle_case": "إجراء دورة الموظف",
+}
+
+AUDIT_ACTION_LABELS_AR = {
+    "security.supervisor_create": "إنشاء حساب مشرف مستقل",
+    "security.user_create": "إنشاء حساب مستخدم",
+    "security.user_update": "تعديل حساب مستخدم",
+    "security.permissions_update": "تعديل صلاحيات مستخدم",
+    "security.temporary_password_set": "تعيين كلمة مرور مؤقتة",
+    "employee.create": "إضافة موظف",
+    "employee.update": "تعديل ملف موظف",
+    "employee.terminate": "إنهاء خدمة موظف",
+    "employee.rehire": "إعادة موظف إلى العمل",
+    "employee.promotion": "ترقية موظف",
+    "department.create": "إنشاء قسم",
+    "department.update": "تعديل قسم",
+    "department.delete": "حذف قسم",
+    "branch.create": "إنشاء فرع",
+    "branch.update": "تعديل فرع",
+    "branch.delete": "حذف فرع",
+    "shift.create": "إنشاء مناوبة",
+    "shift.update": "تعديل مناوبة",
+    "shift.delete": "حذف مناوبة",
+    "shift.assign": "تعيين موظف في مناوبة",
+    "shift.unassign": "إزالة موظف من المناوبة",
+    "shift.assignment_update": "نقل موظف بين المناوبات أو تعديل تعيينه",
+    "shift.assignment_remove": "إزالة موظف من المناوبة",
+    "leave.manager_approved": "اعتماد طلب إجازة من المسؤول المباشر",
+    "leave.manager_rejected": "رفض طلب إجازة من المسؤول المباشر",
+    "leave.hr_approved": "الاعتماد النهائي لطلب إجازة",
+    "leave.hr_rejected": "رفض طلب إجازة نهائياً",
+    "leave.admin_override_approved": "اعتماد طلب إجازة بتجاوز مسؤول النظام",
+    "leave.admin_override_rejected": "رفض طلب إجازة بتجاوز مسؤول النظام",
+    "leave_balance.manual_update": "تعديل رصيد إجازة يدوياً",
+    "leave_sale.approved": "اعتماد طلب بيع رصيد إجازة",
+    "leave_sale.rejected": "رفض طلب بيع رصيد إجازة",
+    "overtime.approved": "اعتماد طلب عمل إضافي",
+    "overtime.rejected": "رفض طلب عمل إضافي",
+    "overtime.admin_override_approved": "اعتماد عمل إضافي بتجاوز مسؤول النظام",
+    "overtime.admin_override_rejected": "رفض عمل إضافي بتجاوز مسؤول النظام",
+    "evaluation.manager_submit": "اعتماد تقييم من المسؤول المباشر",
+    "evaluation.manager_resubmit": "إعادة اعتماد تقييم من المسؤول المباشر",
+    "evaluation.manager_override": "استكمال تقييم نيابةً عن المسؤول المباشر",
+    "evaluation.hr_approve": "الاعتماد النهائي للتقييم السنوي",
+    "evaluation.hr_return": "إعادة التقييم إلى المسؤول المباشر",
+    "evaluation.admin_return_to_employee": "إعادة التقييم إلى الموظف",
+    "evaluation.admin_return_to_manager": "إعادة التقييم إلى المسؤول المباشر",
+    "evaluation.grievance_amend": "اعتماد تعديل نتيجة التقييم بعد التظلم",
+    "evaluation.grievance_reject": "رفض تظلم التقييم",
+    "purchase.manager_approve": "اعتماد طلب مشتريات من المسؤول المباشر",
+    "purchase.manager_reject": "رفض طلب مشتريات من المسؤول المباشر",
+    "purchase.finance_approve": "الاعتماد النهائي لطلب المشتريات",
+    "purchase.finance_reject": "رفض طلب المشتريات نهائياً",
+    "payroll.approved": "اعتماد مسير الرواتب",
+    "payroll.paid": "إثبات دفع مسير الرواتب",
+    "payroll.returned": "إعادة مسير الرواتب للتعديل",
+    "payroll.cancelled": "إلغاء مسير الرواتب",
+    "advance.approved": "اعتماد طلب سلفة",
+    "advance.rejected": "رفض طلب سلفة",
+    "salary_certificate.approve": "اعتماد شهادة راتب",
+    "salary_certificate.reject": "رفض شهادة راتب",
+    "notification.send": "إرسال إشعار داخلي",
+    "notification.update": "تعديل إشعار داخلي",
+    "notification.hide": "إخفاء إشعار داخلي",
+    "notification.unhide": "إظهار إشعار داخلي",
+}
+
+AUDIT_DETAIL_LABELS_AR = {
+    "before": "قبل التغيير", "after": "بعد التغيير", "fields": "الحقول المعدلة",
+    "reason": "السبب", "note": "الملاحظة", "comment": "التعليق",
+    "decision_note": "ملاحظة القرار", "from_status": "الحالة السابقة",
+    "to_status": "الحالة الجديدة", "from_stage": "المرحلة السابقة",
+    "to_stage": "المرحلة الجديدة", "status": "الحالة", "score": "النتيجة",
+    "employee_id": "معرّف الموظف", "employee_no": "الرقم الوظيفي",
+    "manager_employee_id": "معرّف المسؤول المباشر", "approval_employee_id": "معرّف مسؤول الاعتماد",
+    "role": "الدور", "permission": "الصلاحية", "override": "تجاوز إداري",
+    "recipient_count": "عدد المستلمين", "month": "الشهر", "year": "السنة",
+}
+
+AUDIT_NOTICE_IGNORED_ACTIONS = {
+    "smtp.test", "attendance.check_in", "attendance.check_out", "attendance.range_export",
+    "attendance.lateness_warning", "document_library.search", "document_library.document_view",
+    "employee_document.view", "employee_card.print", "employee_custody.print",
+    "employee_report.generate", "employee_report.export", "salary_certificate.verify",
+    "salary_certificate.print", "report.department_generate", "report.department_export",
+    "evaluation.submit", "evaluation.employee_submit", "evaluation.employee_submit_late",
+    "evaluation.grievance_submit", "leave.submit", "leave_sale.submit", "overtime.submit",
+    "advance.submit", "purchase.submit", "salary_certificate.request",
+}
+
+
+def audit_action_label_ar(action: str) -> str:
+    if action in AUDIT_ACTION_LABELS_AR:
+        return AUDIT_ACTION_LABELS_AR[action]
+    module_labels = {
+        "employee": "الموظفين", "department": "الأقسام", "branch": "الفروع", "organization": "المؤسسة",
+        "shift": "المناوبات", "leave": "الإجازات", "leave_type": "أنواع الإجازات",
+        "leave_holiday": "العطلات الرسمية", "leave_sale": "بيع الإجازات", "overtime": "العمل الإضافي",
+        "evaluation": "التقييم", "evaluation_goal_catalog": "مكتبة الأهداف",
+        "evaluation_goal_template": "أهداف الوظائف", "purchase": "المشتريات", "payroll": "الرواتب",
+        "advance": "السلف", "salary_certificate": "شهادات الراتب", "security": "المستخدمون والصلاحيات",
+        "notification": "الإشعارات", "communications": "التواصل", "document_library": "مكتبة الوثائق",
+        "employee_document": "وثائق الموظفين", "employee_custody": "العهد", "employee_action": "إجراءات الموظفين",
+        "lifecycle": "دورة الموظف", "visual_identity": "الهوية البصرية", "smtp": "إعدادات البريد",
+    }
+    verb_labels = (
+        ("approve", "اعتماد"), ("approved", "اعتماد"), ("reject", "رفض"), ("rejected", "رفض"),
+        ("return", "إعادة"), ("returned", "إعادة"), ("update", "تعديل"), ("create", "إنشاء"),
+        ("delete", "حذف"), ("archive", "أرشفة"), ("deactivate", "تعطيل"), ("assign", "تعيين"),
+        ("remove", "إزالة"), ("sync", "مزامنة"), ("upload", "رفع"), ("replace", "استبدال"),
+        ("close", "إغلاق"), ("cancel", "إلغاء"), ("issue", "إصدار"), ("send", "إرسال"),
+        ("retry", "إعادة محاولة"), ("announce", "إعلان"), ("remind", "إرسال تذكير"),
+    )
+    module, _, operation = action.partition(".")
+    module_label = module_labels.get(module, module.replace("_", " "))
+    operation_lower = operation.lower()
+    verb = next((label for token, label in verb_labels if token in operation_lower), "إجراء")
+    return f"{verb} في {module_label}"
+
+
+def audit_action_is_material_change(action: str) -> bool:
+    if action in AUDIT_NOTICE_IGNORED_ACTIONS or action.startswith("auth."):
+        return False
+    if action.startswith("notification.") and action not in {
+        "notification.send", "notification.update", "notification.hide", "notification.unhide"
+    }:
+        return False
+    read_only_tokens = (".view", ".search", ".export", ".print", ".verify", ".generate", ".test")
+    return not any(token in action for token in read_only_tokens)
+
+
+def audit_actor_is_responsible(
+    db: sqlite3.Connection,
+    actor: sqlite3.Row | dict[str, Any] | None,
+    action: str,
+) -> bool:
+    if actor is None:
+        return False
+    candidate = dict(actor)
+    if not bool(candidate.get("active", True)):
+        return False
+    role = str(candidate.get("role") or "").lower()
+    if role in {"admin", "hr", "supervisor", "manager", "general_manager"} or is_configured_general_manager(db, candidate):
+        return True
+    # A direct manager or a specifically configured financial approver may
+    # intentionally keep an employee-level login.  Their decision is still an
+    # administrative act and must be visible to the system administrator.
+    decision_tokens = ("approve", "approved", "reject", "rejected", "return", "returned", "decision", "manager_submit")
+    return any(token in action.lower() for token in decision_tokens)
+
+
+def sanitized_audit_value(key: str, value: Any) -> Any:
+    lowered = key.lower()
+    if any(token in lowered for token in ("password", "secret", "token", "hash", "salt", "data_url", "logo_data", "stamp_data", "photo_data", "file_data", "invoice_data")):
+        return "[محجوب أمنياً]"
+    if isinstance(value, dict):
+        return {str(item_key): sanitized_audit_value(str(item_key), item_value) for item_key, item_value in value.items()}
+    if isinstance(value, list):
+        return [sanitized_audit_value(key, item) for item in value[:50]]
+    return value
+
+
+def audit_details_summary(details: Any, max_chars: int = 3200) -> str:
+    if not isinstance(details, dict) or not details:
+        return "لا توجد تفاصيل إضافية."
+    lines: list[str] = []
+    for key, raw_value in details.items():
+        if key == "_actor":
+            continue
+        label = AUDIT_DETAIL_LABELS_AR.get(str(key), str(key).replace("_", " "))
+        value = sanitized_audit_value(str(key), raw_value)
+        if isinstance(value, bool):
+            rendered = "نعم" if value else "لا"
+        elif value is None:
+            rendered = "غير محدد"
+        elif isinstance(value, (dict, list)):
+            rendered = json_text(value)
+        elif str(key).endswith("_cents") and isinstance(value, (int, float)):
+            rendered = f"{float(value) / 100:,.2f} درهم"
+        else:
+            rendered = str(value)
+        rendered = rendered if len(rendered) <= 900 else rendered[:897] + "..."
+        lines.append(f"{label}: {rendered}")
+        if len("\n".join(lines)) >= max_chars:
+            break
+    summary = "\n".join(lines) or "لا توجد تفاصيل إضافية."
+    return summary if len(summary) <= max_chars else summary[: max_chars - 3] + "..."
+
+
+def create_admin_audit_notification(
+    db: sqlite3.Connection,
+    actor: sqlite3.Row | dict[str, Any] | None,
+    audit_id: int,
+    action: str,
+    entity_type: str,
+    entity_id: Any,
+    details: dict[str, Any],
+    stamp: str,
+) -> None:
+    if not audit_actor_is_responsible(db, actor, action) or not audit_action_is_material_change(action):
+        return
+    candidate = dict(actor or {})
+    recipients = [
+        int(row["id"])
+        for row in db.execute("SELECT id FROM users WHERE active=1 AND (role='admin' OR is_super_admin=1)").fetchall()
+    ]
+    if not recipients:
+        return
+    actor_name = str(candidate.get("display_name") or "مستخدم غير معروف")
+    role_label = AUDIT_ROLE_LABELS_AR.get(str(candidate.get("role") or ""), str(candidate.get("role") or "غير محدد"))
+    entity_label = AUDIT_ENTITY_LABELS_AR.get(entity_type, entity_type.replace("_", " "))
+    local_stamp = datetime.fromisoformat(stamp).astimezone(UAE_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    body = "\n".join((
+        f"المنفذ: {actor_name}",
+        f"الصفة: {role_label}",
+        f"نوع الإجراء: {audit_action_label_ar(action)} ({action})",
+        f"السجل المتأثر: {entity_label}" + (f" — المرجع {entity_id}" if entity_id is not None else ""),
+        "تفاصيل التغيير:",
+        audit_details_summary(details),
+        f"التاريخ والوقت: {local_stamp} — توقيت الإمارات",
+        f"رقم سجل التدقيق: {audit_id}",
+    ))
+    create_internal_notification(
+        db,
+        int(candidate["id"]),
+        recipients,
+        f"سجل إداري: {audit_action_label_ar(action)}",
+        body,
+        notification_scope="personal",
+    )
+
+
 def audit(db: sqlite3.Connection, actor_id: int | None, action: str, entity_type: str, entity_id: Any, details: Any = None) -> None:
-    db.execute(
+    actor = db.execute(
+        "SELECT id,email,display_name,role,employee_id,active,is_super_admin FROM users WHERE id=?",
+        (actor_id,),
+    ).fetchone() if actor_id is not None else None
+    payload = dict(details) if isinstance(details, dict) else ({"value": details} if details is not None else {})
+    if actor is not None:
+        payload["_actor"] = {
+            "user_id": int(actor["id"]),
+            "display_name": str(actor["display_name"]),
+            "role": str(actor["role"]),
+            "employee_id": int(actor["employee_id"]) if actor["employee_id"] is not None else None,
+        }
+    stamp = now_iso()
+    cursor = db.execute(
         "INSERT INTO audit_log(actor_user_id,action,entity_type,entity_id,details,created_at) VALUES(?,?,?,?,?,?)",
-        (actor_id, action, entity_type, str(entity_id) if entity_id is not None else None, json_text(details or {}), now_iso()),
+        (actor_id, action, entity_type, str(entity_id) if entity_id is not None else None, json_text(payload), stamp),
+    )
+    create_admin_audit_notification(
+        db, actor, int(cursor.lastrowid), action, entity_type, entity_id, payload, stamp
     )
 
 
@@ -5746,20 +6014,33 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             departments = [dict(r) for r in self.db.execute("SELECT COALESCE(d.name,'دون قسم') label,COUNT(*) value FROM employees e LEFT JOIN departments d ON d.id=e.department_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.department_id,d.name ORDER BY value DESC", params)]
             branches = [dict(r) for r in self.db.execute("SELECT COALESCE(b.name,'دون فرع') label,COUNT(*) value FROM employees e LEFT JOIN branches b ON b.id=e.branch_id"+where+(" AND " if where else " WHERE ")+"e.active=1 GROUP BY e.branch_id,b.name ORDER BY value DESC", params)]
             activity = []
-            for row in self.db.execute("SELECT a.action,a.entity_type,a.entity_id,a.details,a.created_at,COALESCE(u.display_name,'النظام') actor_name,COALESCE(u.is_super_admin,0) actor_is_super_admin FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id ORDER BY a.id DESC LIMIT 12"):
+            for row in self.db.execute("SELECT a.id audit_id,a.action,a.entity_type,a.entity_id,a.details,a.created_at,COALESCE(u.display_name,'النظام') actor_name,COALESCE(u.role,'system') actor_role,COALESCE(u.is_super_admin,0) actor_is_super_admin FROM audit_log a LEFT JOIN users u ON u.id=a.actor_user_id WHERE a.action NOT LIKE 'auth.%' ORDER BY a.id DESC LIMIT 100"):
                 item = dict(row)
+                if not audit_action_is_material_change(str(item.get("action") or "")):
+                    continue
                 item["actor_is_super_admin"] = bool(item.get("actor_is_super_admin"))
                 try:
                     details = json.loads(item.pop("details") or "{}")
                 except (TypeError, ValueError):
                     details = {}
                 if isinstance(details, dict):
-                    item["detail"] = str(details.get("reason") or details.get("decision_note") or details.get("comment") or "")
+                    actor_snapshot = details.get("_actor")
+                    if isinstance(actor_snapshot, dict):
+                        item["actor_name"] = str(actor_snapshot.get("display_name") or item["actor_name"])
+                        item["actor_role"] = str(actor_snapshot.get("role") or item["actor_role"])
+                    item["detail"] = audit_details_summary(details, 480).replace("\n", " · ")
                     item["override"] = bool(details.get("override"))
                 else:
                     item["detail"] = ""
                     item["override"] = False
+                item["action_label"] = audit_action_label_ar(str(item.get("action") or ""))
+                item["entity_label"] = AUDIT_ENTITY_LABELS_AR.get(
+                    str(item.get("entity_type") or ""),
+                    str(item.get("entity_type") or "").replace("_", " "),
+                )
                 activity.append(item)
+                if len(activity) >= 12:
+                    break
             eligible_to_attend = attendance_context["eligible_to_attend"]
             absence_penalty = round((absent/eligible_to_attend)*35) if eligible_to_attend else 0
             health_score = max(0, min(100, 100-absence_penalty-min(expiring_docs*3,25)-min((leave_pending+overtime_pending)*2,20)))
@@ -5879,7 +6160,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             int(values["manager_employee_id"]) if values["manager_employee_id"] else None,
                             int(user["id"]),
                         )
-                    audit(self.db, user["id"], "department.update", "department", department_id, values)
+                    changed = {key: value for key, value in values.items() if key != "updated_at"}
+                    audit(self.db, user["id"], "department.update", "department", department_id, {
+                        "fields": sorted(changed),
+                        "before": {key: existing[key] for key in changed if key in existing.keys()},
+                        "after": changed,
+                    })
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "تعذر تحديث القسم بسبب تعارض البيانات.", "department_conflict") from exc
             self.send_json(200, {"department": dict(self.db.execute("SELECT * FROM departments WHERE id=?", (department_id,)).fetchone())})
@@ -6446,7 +6732,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
 
         def api_branch_patch(self, branch_id: int) -> None:
             user = self.require_permission("branch.manage")
-            self.branch_row(branch_id)
+            existing = self.branch_row(branch_id)
             values = self.parse_branch(self.read_json(), partial=True)
             if not values:
                 raise APIError(422, "لا توجد تغييرات للحفظ.", "validation_error")
@@ -6454,7 +6740,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             try:
                 with self.db:
                     self.db.execute("UPDATE branches SET " + ",".join(f"{key}=?" for key in values) + " WHERE id=?", (*values.values(), branch_id))
-                    audit(self.db, user["id"], "branch.update", "branch", branch_id, values)
+                    changed = {key: value for key, value in values.items() if key != "updated_at"}
+                    audit(self.db, user["id"], "branch.update", "branch", branch_id, {
+                        "fields": sorted(changed),
+                        "before": {key: existing[key] for key in changed if key in existing.keys()},
+                        "after": changed,
+                    })
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "يوجد فرع بالاسم نفسه أو أن البيانات غير صحيحة.", "conflict") from exc
             self.send_json(200, {"branch": self.serialize_branch(self.branch_row(branch_id))})
@@ -7862,7 +8153,18 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                                 f"نبارك لك ترقيتك من الدرجة {previous_grade} إلى الدرجة {next_grade}. نتمنى لك المزيد من التقدم والنجاح في مهام عملك، وأن تكون هذه الترقية حافزاً لك لمزيد من العطاء والتميز.",
                             )
                         audit(self.db, user["id"], "employee.promotion", "employee", employee_id, {"from_grade": previous_grade, "to_grade": next_grade})
-                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {"fields": [key for key in values if key != "updated_at"] + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []) + (["department_head_department_id"] if department_head_requested else []), "language_codes": [row["code"] for row in languages] if languages is not None else None, "approval_employee_id": values.get("approval_employee_id") if approval_assignment_changed else None})
+                    changed_fields = [key for key in values if key != "updated_at"]
+                    safe_value_fields = [
+                        key for key in changed_fields
+                        if not any(token in key.lower() for token in ("photo_data", "signature_data", "document_data"))
+                    ]
+                    audit(self.db, user["id"], "employee.update", "employee", employee_id, {
+                        "fields": changed_fields + (["languages"] if languages is not None else []) + (["contract_dates"] if contract_dates else []) + (["institution_role"] if institution_role is not None else []) + (["department_head_department_id"] if department_head_requested else []),
+                        "before": {key: existing_employee[key] for key in safe_value_fields if key in existing_employee.keys()},
+                        "after": {key: values.get(key) for key in safe_value_fields},
+                        "language_codes": [row["code"] for row in languages] if languages is not None else None,
+                        "approval_employee_id": values.get("approval_employee_id") if approval_assignment_changed else None,
+                    })
             except sqlite3.IntegrityError as exc:
                 raise APIError(409, "رقم الموظف أو البريد مستخدم بالفعل.", "duplicate_employee") from exc
             if leadership_changed:
@@ -9601,7 +9903,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         f"{('اعتمد' if action == 'approve' else 'رفض')} {'مدير النظام' if is_system_admin else 'مسؤول الاعتماد'} طلب العمل الإضافي للموظف {request_employee['full_name'] if request_employee else 'صاحب الطلب'}."
                         + (f" السبب: {reason}" if action == "reject" else ""),
                     )
-                audit(self.db, user["id"], f"overtime.{'admin_override_' if is_system_admin else ''}{status}", "overtime_request", request_id, {"reason": reason, "override": is_system_admin})
+                audit(self.db, user["id"], f"overtime.{'admin_override_' if is_system_admin else ''}{status}", "overtime_request", request_id, {"from_status": "submitted", "to_status": status, "reason": reason, "override": is_system_admin})
             saved = self.db.execute("SELECT * FROM overtime_requests WHERE id=?", (request_id,)).fetchone()
             self.send_json(200, {"request": dict(saved)})
 
@@ -10298,7 +10600,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                             "وافق مسؤولك المباشر على الطلب وأرسله للاعتماد النهائي لدى الموارد البشرية."
                             if action == "approve" else f"رفض مسؤولك المباشر طلب الإجازة. السبب: {reason}",
                         )
-                    audit(self.db, user["id"], f"leave.manager_{manager_decision}", "leave_request", request_id, {"reason": reason, "hr_recipient_count": len(hr_recipients)})
+                    audit(self.db, user["id"], f"leave.manager_{manager_decision}", "leave_request", request_id, {"from_stage": "pending_manager", "to_stage": "pending_hr" if manager_decision == "approved" else "manager_rejected", "reason": reason, "hr_recipient_count": len(hr_recipients)})
                 else:
                     if request_row["manager_decision"] != "approved" and not is_system_admin:
                         raise APIError(409, "رفض المسؤول المباشر هذا الطلب ولا يمكن اعتماده نهائياً.", "manager_rejected")
@@ -10334,7 +10636,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         f"{('اعتمد' if is_system_admin else 'اعتمدت') if action == 'approve' else ('رفض' if is_system_admin else 'رفضت')} {'مدير النظام' if is_system_admin else 'مسؤول الاعتماد'} نهائياً طلب {request_row['leave_type_name']} للموظف {request_row['full_name']}."
                         + (f" السبب: {reason}" if action == "reject" else ""),
                     )
-                    audit(self.db, user["id"], f"leave.{'admin_override' if is_system_admin else 'hr'}_{status}", "leave_request", request_id, {"reason": reason, "override": is_system_admin})
+                    audit(self.db, user["id"], f"leave.{'admin_override' if is_system_admin else 'hr'}_{status}", "leave_request", request_id, {"from_stage": "pending_hr", "to_status": status, "reason": reason, "override": is_system_admin})
             saved = self.db.execute("SELECT lr.*,lt.code AS leave_type_code,lt.name AS leave_type_name,e.employee_no,e.full_name,a.full_name AS approval_employee_name FROM leave_requests lr JOIN leave_types lt ON lt.id=lr.leave_type_id JOIN employees e ON e.id=lr.employee_id LEFT JOIN employees a ON a.id=lr.approval_employee_id WHERE lr.id=?", (request_id,)).fetchone()
             self.send_json(200, {"request": self.leave_request_payload(saved, user)})
 
@@ -11931,7 +12233,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "evaluation.manager_override" if manager_override else ("evaluation.manager_resubmit" if resubmission else "evaluation.manager_submit"),
                     "evaluation",
                     evaluation_id,
-                    {"score": score, "manager_override": manager_override, "former_manager_employee_id": evaluation["manager_employee_id"]},
+                    {"from_status": evaluation["status"], "to_status": "in_review", "score": score, "manager_override": manager_override, "former_manager_employee_id": evaluation["manager_employee_id"]},
                 )
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
@@ -11957,7 +12259,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     self.db.execute("UPDATE evaluations SET status='returned',hr_reviewed_by=?,hr_comment=?,updated_at=? WHERE id=?", (user["id"], comment, stamp, evaluation_id))
                     if manager_user:
                         create_internal_notification(self.db, user["id"], [manager_user["id"]], "أعيد التقييم من HR", comment)
-                    audit(self.db, user["id"], "evaluation.hr_return", "evaluation", evaluation_id, {"comment": comment})
+                    audit(self.db, user["id"], "evaluation.hr_return", "evaluation", evaluation_id, {"from_status": "in_review", "to_status": "returned", "comment": comment})
                 else:
                     disclosure = parse_date(data.get("disclosure_date"), "disclosure_date")
                     if disclosure < local_now().date():
@@ -11970,7 +12272,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     available_at = datetime.combine(disclosure, time.min, UAE_TZ).astimezone(timezone.utc).isoformat(timespec="seconds")
                     if employee_user:
                         create_internal_notification(self.db, user["id"], [employee_user["id"]], "نتيجة التقييم السنوي", "أصبحت نتيجة تقييمك متاحة في صفحة التقييم السنوي.", available_at)
-                    audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {"score": score, "disclosure_date": disclosure.isoformat()})
+                    audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {"from_status": "in_review", "to_status": "approved", "score": score, "disclosure_date": disclosure.isoformat(), "comment": comment})
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
         def api_evaluation_return(self, evaluation_id: int, forced_target: str | None = None) -> None:
@@ -12501,7 +12803,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 with self.db:
                     self.db.execute("UPDATE salary_certificates SET request_status='rejected',approved_by=?,approved_at=?,decision_note=? WHERE id=?", (user["id"], stamp, note, certificate_id))
                     if requester: create_internal_notification(self.db, user["id"], [requester["id"]], "تم رفض طلب شهادة الراتب", note or "تم رفض الطلب من الموارد البشرية.")
-                    audit(self.db, user["id"], "salary_certificate.reject", "salary_certificate", certificate_id, {"note": note})
+                    audit(self.db, user["id"], "salary_certificate.reject", "salary_certificate", certificate_id, {"from_status": "requested", "to_status": "rejected", "note": note})
             else:
                 employee = self.db.execute(employee_query(True) + " WHERE e.id=? AND e.active=1", (row["employee_id"],)).fetchone()
                 if employee is None: raise APIError(404, "ملف الموظف غير موجود أو غير نشط.", "not_found")
@@ -12529,7 +12831,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     if requester:
                         notice = "تم اعتماد الطلب وإرسال الشهادة إلى بريدك المؤسسي." if email_status in {"sent", "queued"} else "تم اعتماد الطلب. راجع بريدك المؤسسي عند تفعيل SMTP أو تحديث بريد ملفك الوظيفي."
                         create_internal_notification(self.db, user["id"], [requester["id"]], "تم اعتماد شهادة الراتب", notice)
-                    audit(self.db, user["id"], "salary_certificate.approve", "salary_certificate", certificate_id, {"certificate_no": certificate_no, "email_to": employee_email or None, "email_status": email_status or "no_email"})
+                    audit(self.db, user["id"], "salary_certificate.approve", "salary_certificate", certificate_id, {"from_status": "requested", "to_status": "approved", "certificate_no": certificate_no, "email_to": employee_email or None, "email_status": email_status or "no_email", "note": note})
             saved = self.db.execute("SELECT * FROM salary_certificates WHERE id=?", (certificate_id,)).fetchone()
             response = self._certificate_safe_request(saved, True)
             response["email_status"] = email_status
@@ -12974,7 +13276,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         "تحديث طلب المشتريات",
                         f"طلب «{row['purchase_name']}» أصبح في حالة {fields['status']}." + (f" السبب: {note}" if action == "reject" else ""),
                     )
-                audit(self.db, user["id"], f"purchase.{step}_{action}", "purchase_request", request_id, {"to_status": fields["status"], "note": note})
+                audit(self.db, user["id"], f"purchase.{step}_{action}", "purchase_request", request_id, {"from_status": row["status"], "to_status": fields["status"], "from_stage": step, "to_stage": fields["current_step"], "note": note})
             self.send_json(200, {"request": self.purchase_payload(self.purchase_request_row(request_id), user)})
 
         # Payroll runs, employee payslips and advances
@@ -14483,7 +14785,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                         f"{'تم اعتماد' if action == 'approve' else 'تم رفض'} طلب السلفة."
                         + (f" السبب: {reason}" if action == "reject" else ""),
                     )
-                audit(self.db,user["id"],f"advance.{status}","advance",advance_id,{"reason":reason})
+                audit(self.db,user["id"],f"advance.{status}","advance",advance_id,{"from_status":"submitted","to_status":status,"reason":reason})
             self.send_json(200,{"advance":self.advance_payload(advance_id)})
 
         # Operational employee lifecycle and live reports

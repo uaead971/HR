@@ -376,7 +376,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.8&build=20261109-production-r40")
+        application_script = index.index("app.js?v=5.8.8&build=20261109-production-r41")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -2931,7 +2931,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261109-production-r40", index)
+        self.assertIn("build=20261109-production-r41", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3145,7 +3145,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261109-production-r40", index)
+        self.assertIn("build=20261109-production-r41", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5392,7 +5392,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261109-production-r40", index)
+        self.assertIn("build=20261109-production-r41", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -6094,7 +6094,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261109-production-r40", index)
+        self.assertIn("build=20261109-production-r41", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6776,6 +6776,77 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn('id="createSupervisorAccount"', index)
         self.assertIn("'مشرف':'Supervisor'", translations)
 
+    def test_system_admin_receives_detailed_actor_audit_notifications(self):
+        admin = self.client("admin@demo.ae", "Admin@123")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        hr_identity = hr.request("GET", "/api/auth/me")["user"]
+        suffix = uuid.uuid4().hex[:8]
+        original_ar = f"قسم تدقيق {suffix}"
+        original_en = f"Audit Department {suffix}"
+        department = hr.request("POST", "/api/departments", {
+            "name_ar": original_ar, "name_en": original_en, "active": True,
+        }, expected=201)["department"]
+        updated_ar = f"قسم تدقيق معدل {suffix}"
+        updated_en = f"Updated Audit Department {suffix}"
+        hr.request("PATCH", f"/api/departments/{department['id']}", {
+            "name_ar": updated_ar, "name_en": updated_en,
+        })
+
+        inbox = admin.request("GET", "/api/notifications/inbox")["items"]
+        notice = next(
+            item for item in inbox
+            if item["title"] == "سجل إداري: تعديل قسم"
+            and f"المرجع {department['id']}" in item["body"]
+        )
+        self.assertEqual(notice["notification_scope"], "personal")
+        self.assertIn(f"المنفذ: {hr_identity['name']}", notice["body"])
+        self.assertIn("الصفة: رئيس قسم الموارد البشرية", notice["body"])
+        self.assertIn("نوع الإجراء: تعديل قسم (department.update)", notice["body"])
+        self.assertIn("السجل المتأثر: قسم", notice["body"])
+        self.assertIn("تفاصيل التغيير:", notice["body"])
+        self.assertIn(original_ar, notice["body"])
+        self.assertIn(updated_ar, notice["body"])
+        self.assertIn("التاريخ والوقت:", notice["body"])
+        self.assertIn("توقيت الإمارات", notice["body"])
+        self.assertRegex(notice["body"], r"رقم سجل التدقيق: \d+")
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            audit_row = db.execute(
+                "SELECT id,actor_user_id,details FROM audit_log WHERE action='department.update' AND entity_id=? ORDER BY id DESC LIMIT 1",
+                (str(department["id"]),),
+            ).fetchone()
+            details = json.loads(audit_row["details"])
+            self.assertEqual(details["_actor"]["display_name"], hr_identity["name"])
+            self.assertEqual(details["_actor"]["role"], "hr")
+            self.assertEqual(details["before"]["name_ar"], original_ar)
+            self.assertEqual(details["after"]["name_ar"], updated_ar)
+            recipient_ids = {
+                int(row["user_id"]) for row in db.execute(
+                    "SELECT user_id FROM notification_recipients WHERE notification_id=?", (notice["id"],)
+                )
+            }
+            administrator_ids = {
+                int(row["id"]) for row in db.execute(
+                    "SELECT id FROM users WHERE active=1 AND (role='admin' OR is_super_admin=1)"
+                )
+            }
+            self.assertEqual(recipient_ids, administrator_ids)
+
+        activity = admin.request("GET", "/api/dashboard")["activity"]
+        event = next(
+            item for item in activity
+            if item["action"] == "department.update" and item["entity_id"] == str(department["id"])
+        )
+        self.assertEqual(event["actor_name"], hr_identity["name"])
+        self.assertEqual(event["actor_role"], "hr")
+        self.assertEqual(event["action_label"], "تعديل قسم")
+        self.assertIn(updated_ar, event["detail"])
+
+        app = (Path(__file__).parents[1] / "app.js").read_text(encoding="utf-8")
+        self.assertIn("white-space:pre-line", app)
+        self.assertIn("dateTimeText(n.created_at)", app)
+        self.assertIn("x.action_label||auditLabel(x.action)", app)
+
 class NotificationPrivacyMigrationTests(unittest.TestCase):
     def test_legacy_sensitive_broadcasts_are_retired_and_narrow_history_is_guarded(self):
         with tempfile.TemporaryDirectory(prefix="hr-notification-privacy-") as folder:
@@ -6888,7 +6959,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261109-production-r40", index)
+        self.assertIn("build=20261109-production-r41", index)
 
     def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
         with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:
