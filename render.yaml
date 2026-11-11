@@ -22,4 +22,4 @@ services:
     disk:
       name: khaisha-hr-data
       mountPath: /var/data
-      sizeGB: 1
+      sizeGB: 5
