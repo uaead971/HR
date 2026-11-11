@@ -321,6 +321,24 @@ class EvaluationWorkflowFrontendTests(unittest.TestCase):
         self.assertIn("'حفظ بدون اعتماد':'Save without approval'", translations)
         self.assertIn("'غير منشور — قابل للتعديل حتى الإفصاح':'Unpublished — editable until disclosure'", translations)
 
+    def test_evaluation_general_attachment_is_bilingual_and_limited_to_twenty_megabytes(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        server = (root / "server.py").read_text(encoding="utf-8")
+        schema = (root / "schema.sql").read_text(encoding="utf-8")
+
+        self.assertIn("MAX_EVALUATION_ATTACHMENT_BYTES = 20 * 1024 * 1024", server)
+        self.assertIn('id="evaluationAttachmentForm"', app)
+        self.assertIn("20*1024*1024", app)
+        self.assertIn("/attachment`,{method:'POST'", app)
+        self.assertIn("data-remove-evaluation-attachment", app)
+        self.assertIn("attachment_data BLOB", schema)
+        self.assertIn(".evaluation-attachment-card", styles)
+        self.assertIn("'مرفق التقييم':'Evaluation attachment'", translations)
+        self.assertIn("'حتى 20 MB':'Up to 20 MB'", translations)
+
 
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
@@ -434,7 +452,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.8&build=20261111-production-r43")
+        application_script = index.index("app.js?v=5.8.8&build=20261111-production-r44")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3026,7 +3044,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261111-production-r43", index)
+        self.assertIn("build=20261111-production-r44", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3240,7 +3258,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261111-production-r43", index)
+        self.assertIn("build=20261111-production-r44", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5490,7 +5508,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261111-production-r43", index)
+        self.assertIn("build=20261111-production-r44", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -6192,7 +6210,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261111-production-r43", index)
+        self.assertIn("build=20261111-production-r44", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6964,6 +6982,57 @@ class HRAPIEndToEndTests(unittest.TestCase):
             )}
             self.assertTrue({"evaluation.hr_score_save", "evaluation.hr_approve", "evaluation.admin_prepublication_score_edit"}.issubset(actions))
 
+    def test_93_evaluation_general_attachment_upload_download_permissions_and_delete(self):
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        today = date.today()
+        cycle = hr.request("POST", "/api/evaluation-cycles", {
+            "year": 2194, "name": "دورة مرفق التقييم 2194",
+            "period_start": (today - timedelta(days=120)).isoformat(),
+            "period_end": (today + timedelta(days=120)).isoformat(),
+            "self_opens_on": (today - timedelta(days=5)).isoformat(),
+            "self_due_on": (today + timedelta(days=10)).isoformat(),
+            "manager_due_on": (today + timedelta(days=20)).isoformat(),
+            "hr_due_on": (today + timedelta(days=30)).isoformat(),
+            "announcement_title": "دورة المرفق العام",
+            "announcement_body": "أرفق الملف الداعم العام ثم أكمل التقييم.",
+        }, expected=201)["cycle"]
+        hr.request("POST", f"/api/evaluation-cycles/{cycle['id']}/announce", {})
+        evaluation = employee.request("POST", "/api/evaluations", {"cycle_id": cycle["id"]})["evaluation"]
+        evaluation_id = evaluation["id"]
+        pdf = b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n%%EOF\n"
+        data_url = "data:application/pdf;base64," + base64.b64encode(pdf).decode("ascii")
+
+        uploaded = employee.request("POST", f"/api/evaluations/{evaluation_id}/attachment", {
+            "file_name": "annual-review-evidence.pdf", "data_url": data_url,
+        })
+        metadata = uploaded["evaluation"]
+        self.assertTrue(metadata["has_attachment"])
+        self.assertEqual(metadata["attachment_name"], "annual-review-evidence.pdf")
+        self.assertEqual(metadata["attachment_content_type"], "application/pdf")
+        self.assertEqual(metadata["attachment_size_bytes"], len(pdf))
+        self.assertNotIn("attachment_data", metadata)
+
+        employee_headers, employee_download = employee.raw_request(f"/api/evaluations/{evaluation_id}/attachment")
+        self.assertEqual(employee_headers.get_content_type(), "application/pdf")
+        self.assertEqual(employee_download, pdf)
+        _, manager_download = manager.raw_request(f"/api/evaluations/{evaluation_id}/attachment")
+        self.assertEqual(manager_download, pdf)
+        forbidden = hr.request("DELETE", f"/api/evaluations/{evaluation_id}/attachment", {}, expected=403)
+        self.assertEqual(forbidden["code"], "forbidden")
+
+        removed = employee.request("DELETE", f"/api/evaluations/{evaluation_id}/attachment", {})
+        self.assertFalse(removed["evaluation"]["has_attachment"])
+        self.assertEqual(removed["evaluation"]["attachment_size_bytes"], 0)
+        employee.request("GET", f"/api/evaluations/{evaluation_id}/attachment", expected=404)
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            actions = {row[0] for row in db.execute(
+                "SELECT action FROM audit_log WHERE entity_type='evaluation' AND entity_id=?",
+                (str(evaluation_id),),
+            )}
+            self.assertTrue({"evaluation.attachment_upload", "evaluation.attachment_delete"}.issubset(actions))
+
     def test_standalone_supervisor_accounts_are_hr_operational_and_customizable(self):
         admin = self.client("admin@demo.ae", "Admin@123")
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -7211,7 +7280,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261111-production-r43", index)
+        self.assertIn("build=20261111-production-r44", index)
 
     def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
         with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:

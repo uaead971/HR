@@ -836,7 +836,18 @@
     'ملاحظات الموارد البشرية':'HR review notes','أضف ملاحظات التدقيق أو سبب تعديل النقاط…':'Add audit notes or explain score changes…',
     'تاريخ الإفصاح عن النتائج':'Results disclosure date','حفظ بدون اعتماد':'Save without approval','إعادة للمشرف':'Return to supervisor',
     'اعتماد وجدولة الإفصاح':'Approve and schedule disclosure','تم حفظ نقاط الموارد البشرية بدون اعتماد':'HR scores saved without approval',
-    'اعتمدت النتيجة وجُدول الإفصاح':'The result was approved and disclosure was scheduled'
+    'اعتمدت النتيجة وجُدول الإفصاح':'The result was approved and disclosure was scheduled',
+    'مرفق التقييم':'Evaluation attachment','ملف داعم عام':'General supporting file','حتى 20 MB':'Up to 20 MB',
+    'إضافة مرفق للتقييم':'Add evaluation attachment','استبدال مرفق التقييم':'Replace evaluation attachment',
+    'PDF أو صورة أو Word أو Excel حتى 20 MB.':'PDF, image, Word, or Excel up to 20 MB.',
+    'رفع المرفق':'Upload attachment','رفع الملف البديل':'Upload replacement','تنزيل مرفق التقييم':'Download evaluation attachment',
+    'حذف المرفق':'Delete attachment','لم يُرفق ملف عام بالتقييم بعد.':'No general file has been attached to this evaluation yet.',
+    'اختر ملفاً أولاً.':'Choose a file first.','جارٍ رفع مرفق التقييم…':'Uploading evaluation attachment…','تم حفظ مرفق التقييم':'Evaluation attachment saved',
+    'حذف مرفق التقييم الحالي؟':'Delete the current evaluation attachment?','تم حذف مرفق التقييم':'Evaluation attachment deleted',
+    'لا يوجد مرفق عام لهذا التقييم.':'This evaluation has no general attachment.',
+    'حجم الملف يتجاوز الحد المسموح.':'The file exceeds the allowed size.',
+    'الملف غير صالح أو لا يطابق امتداده.':'The file is invalid or its extension does not match its content.',
+    'يمكنك الإرسال الآن. الدليل النصي والمرفقات اختيارية.':'You can submit now. Written evidence and attachments are optional.'
   });
 
   window.HR_I18N = { t: translate, translate, setLocale, apply, get locale() { return locale; }, formatDate, formatNumber, formatCurrency, storageKey: STORAGE_KEY, resources: { ar: {}, en: english } };

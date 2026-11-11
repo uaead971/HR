@@ -554,13 +554,19 @@ CREATE TABLE IF NOT EXISTS evaluations (
   hr_comment TEXT NOT NULL DEFAULT '',
   disclosure_date TEXT,
   submitted_late INTEGER NOT NULL DEFAULT 0 CHECK (submitted_late IN (0,1)),
+  attachment_name TEXT NOT NULL DEFAULT '',
+  attachment_content_type TEXT NOT NULL DEFAULT '',
+  attachment_data BLOB,
+  attachment_uploaded_by INTEGER,
+  attachment_uploaded_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(cycle_id, employee_id),
   FOREIGN KEY (cycle_id) REFERENCES evaluation_cycles(id) ON DELETE RESTRICT,
   FOREIGN KEY (employee_id) REFERENCES employees(id) ON DELETE CASCADE,
   FOREIGN KEY (manager_employee_id) REFERENCES employees(id) ON DELETE SET NULL,
-  FOREIGN KEY (hr_reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+  FOREIGN KEY (hr_reviewed_by) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (attachment_uploaded_by) REFERENCES users(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS evaluation_goal_catalog_categories (

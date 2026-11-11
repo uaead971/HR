@@ -52,6 +52,8 @@ MAX_JSON_BYTES = 3_200_000
 MAX_IMAGE_BYTES = 1_500_000
 MAX_VISUAL_IDENTITY_IMAGE_BYTES = 1_350_000
 MAX_PAYROLL_XLSX_BYTES = 1_500_000
+MAX_EVALUATION_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_EVALUATION_ATTACHMENT_JSON_BYTES = 28_500_000
 PBKDF2_ROUNDS = 310_000
 PASSWORD_RESET_MINUTES = 30
 WORK_PERMISSION_MAX_REQUESTS = 2
@@ -2807,6 +2809,11 @@ def initialize_database(db_path: Path) -> None:
                     "hr_comment": "TEXT NOT NULL DEFAULT ''",
                     "disclosure_date": "TEXT",
                     "submitted_late": "INTEGER NOT NULL DEFAULT 0",
+                    "attachment_name": "TEXT NOT NULL DEFAULT ''",
+                    "attachment_content_type": "TEXT NOT NULL DEFAULT ''",
+                    "attachment_data": "BLOB",
+                    "attachment_uploaded_by": "INTEGER",
+                    "attachment_uploaded_at": "TEXT",
                 },
                 "evaluation_goal_templates": {
                     "source_catalog_goal_id": "INTEGER",
@@ -4821,6 +4828,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("PATCH", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_patch),
                     ("DELETE", r"/api/evaluation-goal-templates/(\d+)", self.api_evaluation_goal_template_delete),
                     ("GET", r"/api/evaluations/(\d+)", self.api_evaluation_get),
+                    ("GET", r"/api/evaluations/(\d+)/attachment", self.api_evaluation_attachment_get),
+                    ("POST", r"/api/evaluations/(\d+)/attachment", self.api_evaluation_attachment_post),
+                    ("DELETE", r"/api/evaluations/(\d+)/attachment", self.api_evaluation_attachment_delete),
                     ("POST", r"/api/evaluations/(\d+)/goals", self.api_evaluation_goal_post),
                     ("POST", r"/api/evaluations/(\d+)/goals/from-templates", self.api_evaluation_goals_from_templates),
                     ("GET", r"/api/evaluation-goals/(\d+)/evidence", self.api_evaluation_goal_evidence_get),
@@ -4895,7 +4905,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 self.log_error("Unhandled API error: %r", exc)
                 self.send_api_error(APIError(500, "حدث خطأ داخلي غير متوقع.", "internal_error"))
 
-        def read_json(self) -> dict[str, Any]:
+        def read_json(self, max_bytes: int = MAX_JSON_BYTES) -> dict[str, Any]:
             content_type = self.headers.get_content_type()
             if content_type != "application/json":
                 raise APIError(415, "أرسل البيانات بصيغة application/json.", "unsupported_media_type")
@@ -4903,8 +4913,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 length = int(self.headers.get("Content-Length", "0"))
             except ValueError:
                 raise APIError(400, "طول الطلب غير صالح.", "invalid_request")
-            if length <= 0 or length > MAX_JSON_BYTES:
-                raise APIError(413 if length > MAX_JSON_BYTES else 400, "حجم الطلب غير صالح.", "payload_too_large" if length > MAX_JSON_BYTES else "invalid_request")
+            if length <= 0 or length > max_bytes:
+                raise APIError(413 if length > max_bytes else 400, "حجم الطلب غير صالح.", "payload_too_large" if length > max_bytes else "invalid_request")
             try:
                 data = json.loads(self.rfile.read(length))
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -12393,6 +12403,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def evaluation_payload(self, evaluation_id: int) -> dict[str, Any]:
             evaluation, user = self.evaluation_access(evaluation_id)
             evaluation_data = dict(evaluation)
+            attachment_data = evaluation_data.pop("attachment_data", None)
+            evaluation_data["has_attachment"] = bool(attachment_data)
+            evaluation_data["attachment_size_bytes"] = len(attachment_data) if attachment_data else 0
+            if not attachment_data:
+                evaluation_data["attachment_name"] = ""
+                evaluation_data["attachment_content_type"] = ""
+                evaluation_data["attachment_uploaded_at"] = None
             if evaluation_data.get("weighted_score") is not None:
                 evaluation_data["rating"] = self.evaluation_rating(float(evaluation_data["weighted_score"]))
             goal_rows = [self.evaluation_goal_payload(row) for row in self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,))]
@@ -12569,6 +12586,88 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             self.send_json(200, self.evaluation_payload(int(existing["id"])))
 
         def api_evaluation_get(self, evaluation_id: int) -> None:
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        @staticmethod
+        def evaluation_attachment_types() -> dict[str, set[str]]:
+            return {
+                "application/pdf": {".pdf"},
+                "image/png": {".png"},
+                "image/jpeg": {".jpg", ".jpeg"},
+                "image/webp": {".webp"},
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {".docx"},
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {".xlsx"},
+            }
+
+        def api_evaluation_attachment_get(self, evaluation_id: int) -> None:
+            evaluation, _ = self.evaluation_access(evaluation_id)
+            raw = evaluation["attachment_data"]
+            if not raw:
+                raise APIError(404, "لا يوجد مرفق عام لهذا التقييم.", "evaluation_attachment_missing")
+            mime_type = str(evaluation["attachment_content_type"] or "application/octet-stream")
+            suffix = Path(str(evaluation["attachment_name"] or "")).suffix.lower()
+            safe_name = f"evaluation-attachment-{evaluation_id}{suffix}"
+            self.send_download(safe_name, mime_type, bytes(raw))
+
+        def api_evaluation_attachment_post(self, evaluation_id: int) -> None:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if evaluation["employee_id"] != user.get("employee_id"):
+                raise APIError(403, "الموظف وحده يضيف مرفق تقييمه.", "forbidden")
+            if evaluation["status"] != "draft":
+                raise APIError(409, "لا يمكن تغيير مرفق التقييم بعد إرساله.", "invalid_status")
+            data = self.read_json(MAX_EVALUATION_ATTACHMENT_JSON_BYTES)
+            file_name = Path(str(data.get("file_name") or "").replace("\\", "/")).name.strip()
+            if not file_name or len(file_name) > 255:
+                raise APIError(422, "اسم مرفق التقييم غير صالح.", "invalid_upload", {"field": "attachment"})
+            allowed = self.evaluation_attachment_types()
+            data_url = validate_data_url(
+                data.get("data_url"), "مرفق التقييم", allowed, MAX_EVALUATION_ATTACHMENT_BYTES,
+            )
+            assert data_url is not None
+            mime_type = data_url[5:data_url.index(";")].lower()
+            if Path(file_name).suffix.lower() not in allowed[mime_type]:
+                raise APIError(422, "امتداد مرفق التقييم لا يطابق نوع محتواه.", "invalid_upload", {"field": "attachment"})
+            encoded = data_url.split(",", 1)[1]
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except ValueError as exc:
+                raise APIError(422, "تعذر قراءة مرفق التقييم.", "invalid_upload", {"field": "attachment"}) from exc
+            stamp = now_iso()
+            with self.db:
+                self.db.execute(
+                    """UPDATE evaluations
+                          SET attachment_name=?,attachment_content_type=?,attachment_data=?,
+                              attachment_uploaded_by=?,attachment_uploaded_at=?,updated_at=?
+                        WHERE id=?""",
+                    (file_name, mime_type, sqlite3.Binary(raw), user["id"], stamp, stamp, evaluation_id),
+                )
+                audit(self.db, user["id"], "evaluation.attachment_upload", "evaluation", evaluation_id, {
+                    "file_name": file_name, "content_type": mime_type, "size_bytes": len(raw),
+                })
+            self.send_json(200, self.evaluation_payload(evaluation_id))
+
+        def api_evaluation_attachment_delete(self, evaluation_id: int) -> None:
+            evaluation, user = self.evaluation_access(evaluation_id)
+            if evaluation["employee_id"] != user.get("employee_id"):
+                raise APIError(403, "الموظف وحده يحذف مرفق تقييمه.", "forbidden")
+            if evaluation["status"] != "draft":
+                raise APIError(409, "لا يمكن تغيير مرفق التقييم بعد إرساله.", "invalid_status")
+            if not evaluation["attachment_data"]:
+                raise APIError(404, "لا يوجد مرفق عام لهذا التقييم.", "evaluation_attachment_missing")
+            previous = {
+                "file_name": evaluation["attachment_name"],
+                "content_type": evaluation["attachment_content_type"],
+                "size_bytes": len(evaluation["attachment_data"]),
+            }
+            with self.db:
+                self.db.execute(
+                    """UPDATE evaluations
+                          SET attachment_name='',attachment_content_type='',attachment_data=NULL,
+                              attachment_uploaded_by=NULL,attachment_uploaded_at=NULL,updated_at=?
+                        WHERE id=?""",
+                    (now_iso(), evaluation_id),
+                )
+                audit(self.db, user["id"], "evaluation.attachment_delete", "evaluation", evaluation_id, previous)
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
         def ensure_goal_owner(self, evaluation_id: int) -> tuple[sqlite3.Row, dict[str, Any]]:
