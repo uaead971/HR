@@ -4774,6 +4774,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     ("GET", r"/api/evaluation-cycles", self.api_evaluation_cycles_get),
                     ("POST", r"/api/evaluation-cycles", self.api_evaluation_cycle_post),
                     ("GET", r"/api/evaluation-cycles/(\d+)", self.api_evaluation_cycle_get),
+                    ("GET", r"/api/evaluation-cycles/(\d+)/indicators", self.api_evaluation_cycle_indicators),
+                    ("GET", r"/api/evaluation-cycles/(\d+)/results\.xlsx", self.api_evaluation_cycle_results_xlsx),
                     ("PATCH", r"/api/evaluation-cycles/(\d+)", self.api_evaluation_cycle_patch),
                     ("POST", r"/api/evaluation-cycles/(\d+)/announce", self.api_evaluation_cycle_announce),
                     ("POST", r"/api/evaluation-cycles/(\d+)/reminders", self.api_evaluation_cycle_reminders),
@@ -11615,7 +11617,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             if not goals or abs(total - 100.0) > 0.000001:
                 raise APIError(422, "لا يمكن الإرسال إلا عندما يساوي مجموع الأوزان 100 تماماً.", "invalid_weight_total", {"weight_total": total})
             score = sum(float(g["weight"]) * float(g["achievement"]) / 100.0 for g in goals)
-            rating = "ممتاز" if score >= 90 else "جيد جداً" if score >= 80 else "جيد" if score >= 70 else "مقبول" if score >= 60 else "ضعيف / لم يستوف المتطلبات"
+            rating = "امتياز" if score >= 95 else "جيد جداً" if score >= 85 else "جيد" if score >= 75 else "مقبول" if score >= 65 else "ضعيف"
             chain = self.build_approval_chain(evaluation["employee_id"])
             stamp = now_iso()
             with self.db:
@@ -11777,6 +11779,403 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 raise APIError(403, "لا تملك صلاحية عرض إدارة دورات التقييم.", "forbidden")
             return user
 
+        @staticmethod
+        def evaluation_rating_specs() -> list[dict[str, Any]]:
+            return [
+                {"key": "excellent", "label_ar": "امتياز", "label_en": "Excellent", "minimum": 95.0, "maximum": 100.0, "benchmark_min": 5.0, "benchmark_max": 10.0, "color": "#F28C28"},
+                {"key": "very_good", "label_ar": "جيد جداً", "label_en": "Very Good", "minimum": 85.0, "maximum": 95.0, "benchmark_min": 20.0, "benchmark_max": 30.0, "color": "#2E8B57"},
+                {"key": "good", "label_ar": "جيد", "label_en": "Good", "minimum": 75.0, "maximum": 85.0, "benchmark_min": 50.0, "benchmark_max": 60.0, "color": "#2F6FED"},
+                {"key": "acceptable", "label_ar": "مقبول", "label_en": "Acceptable", "minimum": 65.0, "maximum": 75.0, "benchmark_min": 10.0, "benchmark_max": 15.0, "color": "#E0B323"},
+                {"key": "weak", "label_ar": "ضعيف", "label_en": "Weak", "minimum": 0.0, "maximum": 65.0, "benchmark_min": 2.0, "benchmark_max": 5.0, "color": "#C44336"},
+            ]
+
+        @classmethod
+        def evaluation_rating_info(cls, score: float) -> dict[str, Any]:
+            value = max(0.0, min(100.0, float(score)))
+            for spec in cls.evaluation_rating_specs():
+                if value >= float(spec["minimum"]):
+                    return dict(spec)
+            return dict(cls.evaluation_rating_specs()[-1])
+
+        def evaluation_analysis_rows(self, cycle_id: int) -> list[dict[str, Any]]:
+            rows = self.db.execute(
+                """SELECT ev.id,ev.employee_id,ev.status,ev.weighted_score,ev.rating,
+                          ev.manager_submitted_at,ev.finalized_at,ev.manager_report,ev.hr_comment,
+                          emp.employee_no,emp.full_name,emp.hire_date,
+                          COALESCE(dep.name,'غير معين') AS department_name,
+                          COALESCE(dep.name_ar,dep.name,'غير معين') AS department_name_ar,
+                          COALESCE(dep.name_en,dep.name,'Unassigned') AS department_name_en,
+                          COALESCE(jt.name,emp.job_title,'غير معين') AS job_title_name,
+                          COALESCE(jt.name_ar,jt.name,emp.job_title,'غير معين') AS job_title_name_ar,
+                          COALESCE(jt.name_en,jt.name,emp.job_title,'Unassigned') AS job_title_name_en,
+                          COALESCE(jg.name,emp.job_grade,'غير معين') AS grade_name,
+                          COALESCE(mgr.full_name,'غير معين') AS manager_name,
+                          gr.status AS grievance_status,gr.resolution_note,gr.score_before,gr.score_after,
+                          COALESCE((SELECT ROUND(SUM(g.weight*g.achievement/100.0),2)
+                                      FROM evaluation_goals g WHERE g.evaluation_id=ev.id),0) AS self_score,
+                          (SELECT ROUND(SUM(g.awarded_points),2)
+                             FROM evaluation_goals g WHERE g.evaluation_id=ev.id) AS awarded_score,
+                          COALESCE((SELECT COUNT(*) FROM evaluation_goals g WHERE g.evaluation_id=ev.id),0) AS goal_count,
+                          COALESCE((SELECT COUNT(*) FROM evaluation_goals g
+                                     WHERE g.evaluation_id=ev.id
+                                       AND (TRIM(COALESCE(g.evidence_note,''))<>'' OR g.evidence_file_data IS NOT NULL)),0) AS evidence_goal_count,
+                          COALESCE((SELECT COUNT(*) FROM employee_actions a
+                                     JOIN evaluation_cycles ac ON ac.id=ev.cycle_id
+                                    WHERE a.employee_id=ev.employee_id AND a.action_type='violation'
+                                      AND a.status<>'cancelled' AND a.action_date BETWEEN ac.period_start AND ac.period_end),0) AS violation_count
+                     FROM evaluations ev
+                     JOIN employees emp ON emp.id=ev.employee_id
+                     LEFT JOIN departments dep ON dep.id=emp.department_id
+                     LEFT JOIN job_titles jt ON jt.id=emp.job_title_id
+                     LEFT JOIN job_grades jg ON jg.id=emp.job_grade_id
+                     LEFT JOIN employees mgr ON mgr.id=ev.manager_employee_id
+                     LEFT JOIN evaluation_grievances gr ON gr.evaluation_id=ev.id
+                    WHERE ev.cycle_id=? ORDER BY emp.full_name COLLATE NOCASE,emp.id""",
+                (cycle_id,),
+            ).fetchall()
+            cycle = self.evaluation_cycle_row(cycle_id)
+            period_end = parse_date(cycle["period_end"], "period_end")
+            result: list[dict[str, Any]] = []
+            for source in rows:
+                row = dict(source)
+                manager_score: float | None = None
+                if row["manager_submitted_at"]:
+                    if row["grievance_status"] == "amended" and row["score_before"] is not None:
+                        manager_score = float(row["score_before"])
+                    elif row["awarded_score"] is not None:
+                        manager_score = float(row["awarded_score"])
+                    elif row["weighted_score"] is not None:
+                        manager_score = float(row["weighted_score"])
+                hr_score: float | None = None
+                final_score: float | None = None
+                if row["status"] == "approved" and row["weighted_score"] is not None:
+                    final_score = float(row["weighted_score"])
+                    hr_score = float(row["score_before"]) if row["grievance_status"] == "amended" and row["score_before"] is not None else final_score
+                current_score = final_score if final_score is not None else manager_score
+                goal_count = int(row["goal_count"] or 0)
+                evidence_complete = bool(
+                    goal_count
+                    and int(row["evidence_goal_count"] or 0) == goal_count
+                    and str(row["manager_report"] or "").strip()
+                )
+                service_years: float | None = None
+                if row["hire_date"]:
+                    hired = parse_date(row["hire_date"], "hire_date")
+                    service_years = max(0.0, (period_end - hired).days / 365.2425)
+                row.update({
+                    "self_score": round(float(row["self_score"] or 0), 2),
+                    "manager_score": round(manager_score, 2) if manager_score is not None else None,
+                    "hr_score": round(hr_score, 2) if hr_score is not None else None,
+                    "final_score": round(final_score, 2) if final_score is not None else None,
+                    "analysis_score": round(current_score, 2) if current_score is not None else None,
+                    "rating": self.evaluation_rating_info(current_score) if current_score is not None else None,
+                    "evidence_complete": evidence_complete,
+                    "service_years": round(service_years, 1) if service_years is not None else None,
+                    "service_band": "under_1" if service_years is not None and service_years < 1 else "1_3" if service_years is not None and service_years < 3 else "3_5" if service_years is not None and service_years < 5 else "5_plus" if service_years is not None else "unknown",
+                })
+                result.append(row)
+            return result
+
+        @staticmethod
+        def evaluation_percentage(numerator: int | float, denominator: int | float) -> float:
+            return round((float(numerator) / float(denominator) * 100.0), 1) if denominator else 0.0
+
+        def evaluation_cycle_indicators_payload(self, cycle_id: int) -> dict[str, Any]:
+            cycle = self.evaluation_cycle_row(cycle_id)
+            rows = self.evaluation_analysis_rows(cycle_id)
+            scored = [row for row in rows if row["analysis_score"] is not None]
+            total = len(rows)
+            evaluated = len(scored)
+            scores = [float(row["analysis_score"]) for row in scored]
+            average = round(sum(scores) / evaluated, 2) if evaluated else None
+            perfect_scores = sum(score >= 99.999 for score in scores)
+            distribution: list[dict[str, Any]] = []
+            for spec in self.evaluation_rating_specs():
+                count = sum(row["rating"] and row["rating"]["key"] == spec["key"] for row in scored)
+                distribution.append(dict(spec) | {
+                    "count": count,
+                    "percentage": self.evaluation_percentage(count, evaluated),
+                    "percentage_of_employees": self.evaluation_percentage(count, total),
+                })
+            dist = {item["key"]: item for item in distribution}
+            high_performer_count = int(dist["excellent"]["count"] + dist["very_good"]["count"])
+            improvement_count = int(dist["acceptable"]["count"] + dist["weak"]["count"])
+            hr_approved = sum(row["status"] == "approved" for row in rows)
+            grievances = sum(bool(row["grievance_status"]) for row in rows)
+            complete_evidence = sum(bool(row["evidence_complete"]) for row in scored)
+            excellent_rows = [row for row in scored if float(row["analysis_score"]) >= 95]
+            documented_excellent = sum(bool(row["evidence_complete"]) for row in excellent_rows)
+            high_with_violations = sum(float(row["analysis_score"]) >= 95 and int(row["violation_count"] or 0) > 0 for row in scored)
+            score_range = round(max(scores) - min(scores), 2) if scores else None
+
+            def breakdown(key: str, ar_key: str | None = None, en_key: str | None = None) -> list[dict[str, Any]]:
+                groups: dict[str, list[dict[str, Any]]] = {}
+                for row in scored:
+                    groups.setdefault(str(row.get(key) or "غير معين"), []).append(row)
+                result = []
+                for name, members in groups.items():
+                    member_average = round(sum(float(member["analysis_score"]) for member in members) / len(members), 2)
+                    first = members[0]
+                    result.append({
+                        "name": name,
+                        "name_ar": str(first.get(ar_key) or name) if ar_key else name,
+                        "name_en": str(first.get(en_key) or name) if en_key else name,
+                        "evaluated": len(members),
+                        "average_score": member_average,
+                        "variance_from_company": round(member_average - average, 2) if average is not None else 0.0,
+                    })
+                return sorted(result, key=lambda item: (-item["evaluated"], item["name"].casefold()))
+
+            departments = breakdown("department_name", "department_name_ar", "department_name_en")
+            supervisors = breakdown("manager_name")
+            job_titles = breakdown("job_title_name", "job_title_name_ar", "job_title_name_en")
+            grades = breakdown("grade_name")
+            service_bands = breakdown("service_band")
+            lenient_supervisors = [item for item in supervisors if item["evaluated"] >= 2 and item["variance_from_company"] > 5]
+            narrow_scores = bool(evaluated >= 5 and score_range is not None and score_range <= 5)
+            high_percentage = self.evaluation_percentage(high_performer_count, evaluated)
+            improvement_percentage = self.evaluation_percentage(improvement_count, evaluated)
+            evidence_coverage = self.evaluation_percentage(complete_evidence, evaluated)
+            excellent_evidence_coverage = self.evaluation_percentage(documented_excellent, len(excellent_rows))
+
+            average_health = "review"
+            if average is not None:
+                average_health = "healthy" if 80 <= average <= 83 else "risk" if average > 88 or average < 75 else "review"
+            distribution_health = "review"
+            if evaluated:
+                balanced = all(float(item["benchmark_min"]) <= float(item["percentage"]) <= float(item["benchmark_max"]) for item in distribution)
+                distribution_health = "healthy" if balanced else "risk" if high_percentage > 40 or narrow_scores else "review"
+            documentation_health = "review" if not evaluated else "healthy" if evidence_coverage == 100 and excellent_evidence_coverage == 100 else "risk" if excellent_evidence_coverage < 100 or evidence_coverage < 70 else "review"
+            calibration_health = "review" if not evaluated else "risk" if perfect_scores or lenient_supervisors or narrow_scores else "healthy"
+            health_values = [average_health, distribution_health, documentation_health, calibration_health]
+            overall_health = "risk" if "risk" in health_values else "review" if "review" in health_values else "healthy"
+
+            insights: list[dict[str, str]] = []
+            recommendations: list[dict[str, str]] = []
+            def insight(severity: str, title_ar: str, title_en: str, detail_ar: str, detail_en: str) -> None:
+                insights.append({"severity": severity, "title_ar": title_ar, "title_en": title_en, "detail_ar": detail_ar, "detail_en": detail_en})
+            def recommendation(priority: str, title_ar: str, title_en: str, detail_ar: str, detail_en: str) -> None:
+                recommendations.append({"priority": priority, "title_ar": title_ar, "title_en": title_en, "detail_ar": detail_ar, "detail_en": detail_en})
+
+            if not evaluated:
+                insight("review", "لا توجد نتائج محللة بعد", "No results are ready for analysis", "يبدأ التقرير بعد اعتماد المشرف نتيجة موظف واحد على الأقل.", "The report starts after a supervisor approves at least one employee result.")
+            else:
+                completion = self.evaluation_percentage(evaluated, total)
+                insight("healthy" if completion == 100 else "review", "اكتمال التقييمات", "Evaluation completion", f"اعتمد المشرفون {evaluated} من أصل {total} تقييماً ({completion:.1f}%).", f"Supervisors approved {evaluated} of {total} reviews ({completion:.1f}%).")
+                if average is not None:
+                    if average > 88:
+                        insight("risk", "متوسط مرتفع يحتاج معايرة", "High average requires calibration", f"متوسط الدورة {average:.2f}، وهو أعلى من عتبة المراجعة الاسترشادية 88.", f"The cycle average is {average:.2f}, above the indicative review threshold of 88.")
+                    elif average < 75:
+                        insight("risk", "متوسط منخفض يحتاج تشخيصاً", "Low average needs diagnosis", f"متوسط الدورة {average:.2f}. راجع واقعية الأهداف والإشراف وتوزيع العمل.", f"The cycle average is {average:.2f}. Review goal realism, supervision, and workload allocation.")
+                    else:
+                        insight("healthy" if 80 <= average <= 83 else "review", "متوسط الدرجات", "Average score", f"متوسط الدورة {average:.2f}. النطاق الصحي الاسترشادي للمؤسسة مستقرة الأداء هو 80–83.", f"The cycle average is {average:.2f}. The indicative healthy range for a stable organization is 80–83.")
+                if high_percentage > 40:
+                    insight("risk", "تركيز مرتفع في الأداء العالي", "High-rating concentration", f"يمثل امتياز وجيد جداً {high_percentage:.1f}% من النتائج، متجاوزاً النطاق الاسترشادي 25%–40%.", f"Excellent and Very Good represent {high_percentage:.1f}% of results, above the 25%–40% indicative range.")
+                elif high_percentage < 25:
+                    insight("review", "الأداء العالي دون النطاق الاسترشادي", "High ratings below the indicative range", f"يمثل امتياز وجيد جداً {high_percentage:.1f}% من النتائج.", f"Excellent and Very Good represent {high_percentage:.1f}% of results.")
+                excellent_percentage = float(dist["excellent"]["percentage"])
+                very_good_percentage = float(dist["very_good"]["percentage"])
+                good_percentage = float(dist["good"]["percentage"])
+                acceptable_percentage = float(dist["acceptable"]["percentage"])
+                weak_percentage = float(dist["weak"]["percentage"])
+                if excellent_percentage > 10:
+                    insight("risk", "نسبة امتياز أعلى من النطاق", "Excellent ratings exceed the range", f"بلغت نسبة امتياز {excellent_percentage:.1f}% مقابل نطاق استرشادي 5%–10%؛ افحص الأدلة على مستوى الشركة.", f"Excellent ratings reached {excellent_percentage:.1f}% versus the 5%–10% indicative range; review evidence at company level.")
+                elif 0 < excellent_percentage < 2:
+                    insight("review", "نسبة امتياز منخفضة جداً", "Excellent ratings are very low", f"بلغت نسبة امتياز {excellent_percentage:.1f}%؛ راجع شدة المعايير وآلية الاعتراف بالإنجاز الاستثنائي.", f"Excellent ratings reached {excellent_percentage:.1f}%; review rating severity and recognition of exceptional achievement.")
+                if very_good_percentage > 30:
+                    insight("review", "نسبة جيد جداً مرتفعة", "Very Good ratings are high", f"بلغت نسبة جيد جداً {very_good_percentage:.1f}%، وقد تحتاج إلى توضيح الفرق بين تحقيق الهدف وتجاوزه.", f"Very Good ratings reached {very_good_percentage:.1f}%; clarify the difference between meeting and exceeding goals.")
+                if 50 <= good_percentage <= 60:
+                    insight("healthy", "المنتصف ضمن النطاق الاسترشادي", "Middle rating is within range", f"يمثل تصنيف جيد {good_percentage:.1f}% من النتائج، ضمن نطاق 50%–60% لمؤسسة مستقرة الأداء.", f"Good represents {good_percentage:.1f}% of results, within the 50%–60% range for a stable organization.")
+                if acceptable_percentage > 15:
+                    insight("review", "نسبة مقبول مرتفعة", "Acceptable ratings are high", f"بلغت نسبة مقبول {acceptable_percentage:.1f}%؛ راجع التدريب والإشراف وواقعية الأهداف.", f"Acceptable ratings reached {acceptable_percentage:.1f}%; review training, supervision, and goal realism.")
+                if weak_percentage > 10:
+                    insight("risk", "نسبة ضعيف مرتفعة", "Weak ratings are high", f"بلغت نسبة ضعيف {weak_percentage:.1f}%؛ افحص التوظيف والقيادة وتوزيع العمل وخطط التحسين.", f"Weak ratings reached {weak_percentage:.1f}%; review hiring, leadership, workload allocation, and improvement plans.")
+                elif weak_percentage > 5:
+                    insight("review", "نسبة ضعيف فوق النطاق", "Weak ratings exceed the range", f"بلغت نسبة ضعيف {weak_percentage:.1f}% مقابل نطاق استرشادي 2%–5%.", f"Weak ratings reached {weak_percentage:.1f}% versus the 2%–5% indicative range.")
+                if narrow_scores:
+                    insight("risk", "الدرجات متقاربة جداً", "Scores are too tightly clustered", f"الفرق بين أعلى وأدنى نتيجة {score_range:.2f} نقاط فقط، وقد لا يميز الأداء فعلياً.", f"The difference between the highest and lowest result is only {score_range:.2f} points, which may not meaningfully distinguish performance.")
+                if perfect_scores:
+                    insight("risk", "نتائج كاملة تحتاج اعتماداً استثنائياً", "Perfect scores need exceptional approval", f"توجد {perfect_scores} نتيجة بدرجة 100 وتتطلب مبرراً واعتماداً استثنائياً موثقاً.", f"There are {perfect_scores} perfect scores; each needs documented exceptional approval.")
+                if excellent_evidence_coverage < 100 and excellent_rows:
+                    insight("risk", "أدلة امتياز غير مكتملة", "Excellent-rating evidence is incomplete", f"تغطية الأدلة للدرجات 95 فأعلى هي {excellent_evidence_coverage:.1f}%، والمطلوب رقابياً 100%.", f"Evidence coverage for scores of 95 or higher is {excellent_evidence_coverage:.1f}%; the control target is 100%.")
+                else:
+                    insight("healthy" if evidence_coverage == 100 else "review", "تغطية الأدلة", "Evidence coverage", f"التغطية الكاملة للأهداف وتقرير المشرف بلغت {evidence_coverage:.1f}%.", f"Complete goal evidence and supervisor-report coverage reached {evidence_coverage:.1f}%.")
+                if lenient_supervisors:
+                    names = "، ".join(item["name"] for item in lenient_supervisors[:4])
+                    insight("risk", "فروق بين المشرفين", "Supervisor variance", f"يتجاوز متوسط المشرفين التاليين متوسط الشركة بأكثر من 5 نقاط: {names}.", f"The following supervisors average more than 5 points above the company: {names}.")
+                if len(departments) >= 2:
+                    department_spread = round(max(item["average_score"] for item in departments) - min(item["average_score"] for item in departments), 2)
+                    if department_spread > 10:
+                        insight("review", "تفاوت بين الأقسام", "Department variance", f"يبلغ الفرق بين أعلى وأدنى متوسط قسم {department_spread:.2f} نقاط؛ أثبت إن كان الفرق تشغيلياً حقيقياً أو ناتجاً عن تفاوت المعايير.", f"The gap between the highest and lowest department averages is {department_spread:.2f} points; confirm whether it reflects performance or inconsistent standards.")
+                if high_with_violations:
+                    insight("review", "نتائج مرتفعة مع مخالفات موثقة", "High scores with documented violations", f"توجد {high_with_violations} نتيجة من 95 فأعلى لموظفين لديهم مخالفات غير ملغاة خلال فترة الدورة؛ راجع اتساق بند الانضباط دون خصم مزدوج.", f"{high_with_violations} scores of 95 or higher belong to employees with non-cancelled violations during the cycle; review discipline alignment without double deduction.")
+                if grievances:
+                    grievance_rate = self.evaluation_percentage(grievances, hr_approved)
+                    insight("risk" if grievance_rate > 20 else "review", "معدل التظلمات", "Grievance rate", f"سُجل {grievances} تظلم، بما يعادل {grievance_rate:.1f}% من النتائج المعتمدة من الموارد البشرية.", f"{grievances} grievances were filed, equal to {grievance_rate:.1f}% of HR-approved results.")
+
+            pending = max(0, total - evaluated)
+            if pending:
+                recommendation("high", "استكمال النتائج المعلقة", "Complete pending reviews", f"تابع {pending} تقييماً لم يعتمدها المشرف بعد قبل إغلاق الدورة.", f"Follow up on {pending} reviews that supervisors have not approved before closing the cycle.")
+            if perfect_scores:
+                recommendation("high", "توثيق اعتماد الدرجات الكاملة", "Document perfect-score approval", "لا تعتمد درجة 100 دون أثر قابل للقياس وقرار استثنائي من الإدارة العليا.", "Do not approve a score of 100 without measurable impact and exceptional senior-management approval.")
+            if excellent_evidence_coverage < 100 and excellent_rows:
+                recommendation("high", "استكمال أدلة الدرجات العليا", "Complete evidence for top scores", "استكمل دليلاً ومبرراً وأثراً قابلاً للقياس لكل نتيجة 95 فأعلى.", "Complete evidence, rationale, and measurable impact for every score of 95 or higher.")
+            if improvement_count:
+                recommendation("medium", "خطط تطوير وتحسين", "Development and improvement plans", f"أعد خطة تطوير للحاصلين على مقبول وخطة تحسين رسمية للحاصلين على ضعيف وعددهم {improvement_count}.", f"Create development plans for Acceptable ratings and formal improvement plans for Weak ratings ({improvement_count} employees).")
+            recommendation("medium", "جلسة معايرة مؤسسية", "Company calibration session", "قارن الأقسام والمشرفين وافحص حالات امتياز وجيد جداً والحالات الشاذة قبل الاعتماد النهائي.", "Compare departments and supervisors, then review Excellent, Very Good, and outlier cases before final approval.")
+            recommendation("normal", "ربط النتائج بأداء الشركة", "Link results to company performance", "أدخل تحقيق الإيرادات والربحية والإنتاجية والجودة ورضا العملاء في جلسة المعايرة؛ هذه المؤشرات غير مخزنة حالياً في نظام التقييم.", "Bring revenue, profitability, productivity, quality, and customer-satisfaction results into calibration; these metrics are not currently stored in the evaluation module.")
+
+            previous = self.db.execute(
+                "SELECT id,name,year FROM evaluation_cycles WHERE year<? ORDER BY year DESC,id DESC LIMIT 1",
+                (cycle["year"],),
+            ).fetchone()
+            comparison: dict[str, Any] | None = None
+            if previous is not None:
+                previous_rows = [row for row in self.evaluation_analysis_rows(int(previous["id"])) if row["analysis_score"] is not None]
+                previous_average = round(sum(float(row["analysis_score"]) for row in previous_rows) / len(previous_rows), 2) if previous_rows else None
+                comparison = {
+                    "cycle_id": int(previous["id"]), "cycle_name": previous["name"], "year": previous["year"],
+                    "evaluated": len(previous_rows), "average_score": previous_average,
+                    "average_delta": round(average - previous_average, 2) if average is not None and previous_average is not None else None,
+                }
+                if comparison["average_delta"] is not None:
+                    delta = float(comparison["average_delta"])
+                    insight(
+                        "review" if abs(delta) >= 5 else "healthy",
+                        "مقارنة بالدورة السابقة",
+                        "Comparison with the previous cycle",
+                        f"تغير متوسط التقييم بمقدار {delta:+.2f} نقطة مقارنة بدورة {previous['year']}.",
+                        f"The average score changed by {delta:+.2f} points versus the {previous['year']} cycle.",
+                    )
+
+            summary = {
+                "total": total,
+                "evaluated": evaluated,
+                "not_evaluated": max(0, total - evaluated),
+                "evaluated_percentage": self.evaluation_percentage(evaluated, total),
+                "manager_approved": evaluated,
+                "hr_approved": hr_approved,
+                "average_score": average,
+                "score_range": score_range,
+                "high_performer_count": high_performer_count,
+                "high_performer_percentage": high_percentage,
+                "improvement_count": improvement_count,
+                "improvement_percentage": improvement_percentage,
+                "perfect_scores": perfect_scores,
+                "grievance_count": grievances,
+                "grievance_rate": self.evaluation_percentage(grievances, hr_approved),
+                "evidence_coverage": evidence_coverage,
+                "excellent_evidence_coverage": excellent_evidence_coverage,
+                "export_ready_count": evaluated,
+                "documented_high_scores": documented_excellent,
+                "high_scores_with_violations": high_with_violations,
+            }
+            return {
+                "cycle": {key: cycle[key] for key in ("id", "year", "name", "period_start", "period_end", "status")},
+                "summary": summary,
+                "distribution": distribution,
+                "health": {"overall": overall_health, "average": average_health, "distribution": distribution_health, "documentation": documentation_health, "calibration": calibration_health},
+                "insights": insights,
+                "recommendations": recommendations,
+                "breakdowns": {"departments": departments, "supervisors": supervisors, "job_titles": job_titles, "grades": grades, "service_bands": service_bands},
+                "comparison": comparison,
+            }
+
+        def api_evaluation_cycle_indicators(self, cycle_id: int) -> None:
+            self.require_cycle_console()
+            self.send_json(200, self.evaluation_cycle_indicators_payload(cycle_id))
+
+        @staticmethod
+        def evaluation_xlsx_date_cell(ref: str, value: Any, style: int = 3) -> str:
+            if not value:
+                return f'<c r="{ref}" s="{style}" t="inlineStr"><is><t></t></is></c>'
+            parsed = parse_date(str(value), "date")
+            serial = (parsed - date(1899, 12, 30)).days
+            return f'<c r="{ref}" s="{style}"><v>{serial}</v></c>'
+
+        def build_evaluation_results_xlsx(self, cycle: sqlite3.Row, rows: list[dict[str, Any]]) -> bytes:
+            headers = [
+                "Employee Name / اسم الموظف",
+                "Employee No / الرقم الوظيفي",
+                "Hire Date / تاريخ التعيين",
+                "Evaluation Period / فترة التقييم",
+                "Self Score / تقييم الموظف لنفسه",
+                "Supervisor Score / تقييم المشرف",
+                "HR Score / تقييم الموارد البشرية",
+                "Approved Result / النتيجة المعتمدة",
+                "Rating / التقييم",
+                "Grievance Decision / قرار التظلم",
+            ]
+            period = f"{cycle['period_start']} — {cycle['period_end']}"
+            title = f"{cycle['name']} · Evaluation Results / نتائج التقييم"
+            note = "Supervisor-approved records only. HR and approved results remain blank until their approval stage. / يتضمن الملف النتائج التي اعتمدها المشرف فقط، وتبقى نتيجة الموارد البشرية والنتيجة المعتمدة فارغتين حتى اكتمال مرحلتهما."
+            sheet_rows = [
+                f'<row r="1" ht="30" customHeight="1">{self.xlsx_text_cell("A1", title, 10)}</row>',
+                f'<row r="2" ht="34" customHeight="1">{self.xlsx_text_cell("A2", note, 11)}</row>',
+                f'<row r="3" ht="38" customHeight="1">{"".join(self.xlsx_text_cell(f"{self.xlsx_column(index)}3", header, 4) for index, header in enumerate(headers, 1))}</row>',
+            ]
+            rating_styles = {"excellent": 5, "very_good": 6, "good": 7, "acceptable": 8, "weak": 9}
+            for row_index, item in enumerate(rows, 4):
+                grievance_status = str(item.get("grievance_status") or "")
+                resolution = str(item.get("resolution_note") or "").strip()
+                grievance = {
+                    "": "No grievance / لا يوجد تظلم",
+                    "submitted": "Pending review / قيد المراجعة",
+                    "rejected": "Rejected / مرفوض",
+                    "amended": "Accepted and amended / مقبول وعُدلت النتيجة",
+                }.get(grievance_status, grievance_status)
+                if resolution:
+                    grievance = f"{grievance}: {resolution}"
+                rating = item.get("rating") or {}
+                rating_label = f"{rating.get('label_en','')} / {rating.get('label_ar','')}".strip(" / ")
+                cells = [
+                    self.xlsx_text_cell(f"A{row_index}", item.get("full_name"), 1),
+                    self.xlsx_text_cell(f"B{row_index}", item.get("employee_no"), 1),
+                    self.evaluation_xlsx_date_cell(f"C{row_index}", item.get("hire_date"), 3),
+                    self.xlsx_text_cell(f"D{row_index}", period, 1),
+                    self.xlsx_number_cell(f"E{row_index}", item.get("self_score"), 2),
+                    self.xlsx_number_cell(f"F{row_index}", item.get("manager_score"), 2),
+                    self.xlsx_number_cell(f"G{row_index}", item.get("hr_score"), 2) if item.get("hr_score") is not None else self.xlsx_text_cell(f"G{row_index}", "", 1),
+                    self.xlsx_number_cell(f"H{row_index}", item.get("final_score"), 2) if item.get("final_score") is not None else self.xlsx_text_cell(f"H{row_index}", "", 1),
+                    self.xlsx_text_cell(f"I{row_index}", rating_label, rating_styles.get(str(rating.get("key") or ""), 1)),
+                    self.xlsx_text_cell(f"J{row_index}", grievance, 1),
+                ]
+                sheet_rows.append(f'<row r="{row_index}" ht="24" customHeight="1">{"".join(cells)}</row>')
+            widths = [30, 20, 16, 25, 18, 20, 20, 20, 22, 42]
+            columns = "".join(f'<col min="{index}" max="{index}" width="{width}" customWidth="1"/>' for index, width in enumerate(widths, 1))
+            last_row = max(3, len(rows) + 3)
+            sheet = f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0" rightToLeft="1"><pane ySplit="3" xSplit="2" topLeftCell="C4" activePane="bottomRight" state="frozen"/></sheetView></sheetViews><cols>{columns}</cols><sheetData>{''.join(sheet_rows)}</sheetData><mergeCells count="2"><mergeCell ref="A1:J1"/><mergeCell ref="A2:J2"/></mergeCells><autoFilter ref="A3:J{last_row}"/><pageMargins left="0.25" right="0.25" top="0.5" bottom="0.5" header="0.2" footer="0.2"/></worksheet>'''
+            styles = '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><fonts count="3"><font><sz val="10"/><name val="Arial"/><color rgb="FF18332D"/></font><font><b/><sz val="10"/><name val="Arial"/><color rgb="FFFFFFFF"/></font><font><b/><sz val="10"/><name val="Arial"/><color rgb="FF18332D"/></font></fonts><fills count="9"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF7F9F7"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF123D34"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFF28C28"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF2E8B57"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FF2F6FED"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFE0B323"/></patternFill></fill><fill><patternFill patternType="solid"><fgColor rgb="FFC44336"/></patternFill></fill></fills><borders count="2"><border/><border><left style="thin"><color rgb="FFD9E1DE"/></left><right style="thin"><color rgb="FFD9E1DE"/></right><top style="thin"><color rgb="FFD9E1DE"/></top><bottom style="thin"><color rgb="FFD9E1DE"/></bottom></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="12"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="0" fillId="2" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment vertical="center"/></xf><xf numFmtId="4" fontId="0" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="164" fontId="0" fillId="2" borderId="1" xfId="0" applyNumberFormat="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment wrapText="1" horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="2" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="5" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="6" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="2" fillId="7" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="8" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="1" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"><alignment horizontal="center" vertical="center"/></xf><xf numFmtId="0" fontId="0" fillId="2" borderId="1" xfId="0" applyFill="1" applyBorder="1"><alignment wrapText="1" vertical="center"/></xf></cellXfs></styleSheet>'''
+            safe_sheet_name = xml_escape(f"Evaluation {cycle['year']}")
+            parts = {
+                "[Content_Types].xml": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>''',
+                "_rels/.rels": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>''',
+                "xl/workbook.xml": f'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{safe_sheet_name}" sheetId="1" r:id="rId1"/></sheets></workbook>''',
+                "xl/_rels/workbook.xml.rels": '''<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>''',
+                "xl/styles.xml": styles,
+                "xl/worksheets/sheet1.xml": sheet,
+            }
+            buffer = io.BytesIO()
+            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name, content in parts.items():
+                    archive.writestr(name, content.encode("utf-8"))
+            return buffer.getvalue()
+
+        def api_evaluation_cycle_results_xlsx(self, cycle_id: int) -> None:
+            self.require_cycle_console()
+            cycle = self.evaluation_cycle_row(cycle_id)
+            rows = [row for row in self.evaluation_analysis_rows(cycle_id) if row["manager_submitted_at"]]
+            if not rows:
+                raise APIError(409, "يصبح تصدير Excel متاحاً بعد اعتماد المشرف نتيجة موظف واحد على الأقل.", "evaluation_export_not_ready")
+            raw = self.build_evaluation_results_xlsx(cycle, rows)
+            self.send_download(
+                f"evaluation-results-{cycle['year']}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                raw,
+            )
+
         def api_evaluation_cycles_get(self) -> None:
             self.require_cycle_console()
             rows = self.db.execute("SELECT id FROM evaluation_cycles ORDER BY year DESC,id DESC").fetchall()
@@ -11909,7 +12308,7 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         # with a server-side disclosure gate.
         @staticmethod
         def evaluation_rating(score: float) -> str:
-            return "ممتاز" if score >= 90 else "جيد جداً" if score >= 80 else "جيد" if score >= 70 else "مقبول" if score >= 60 else "ضعيف / لم يستوف المتطلبات"
+            return "امتياز" if score >= 95 else "جيد جداً" if score >= 85 else "جيد" if score >= 75 else "مقبول" if score >= 65 else "ضعيف"
 
         def evaluation_row(self, evaluation_id: int) -> sqlite3.Row:
             row = self.db.execute(
@@ -11957,6 +12356,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
         def evaluation_payload(self, evaluation_id: int) -> dict[str, Any]:
             evaluation, user = self.evaluation_access(evaluation_id)
             evaluation_data = dict(evaluation)
+            if evaluation_data.get("weighted_score") is not None:
+                evaluation_data["rating"] = self.evaluation_rating(float(evaluation_data["weighted_score"]))
             goal_rows = [self.evaluation_goal_payload(row) for row in self.db.execute("SELECT * FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,))]
             approvals = [dict(row) for row in self.db.execute(
                 """SELECT a.*,e.full_name AS approver_name,u.role AS approver_role
@@ -11984,6 +12385,15 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             general_goal_count = sum(goal.get("objective_type") == "general" for goal in goal_rows)
             score_visible = published or (not own and (direct_manager or hr_reviewer))
             score_total = sum(float(goal.get("awarded_points") or 0) for goal in goal_rows) if score_visible else None
+            self_score = round(sum(float(goal["weight"]) * float(goal.get("achievement") or 0) / 100.0 for goal in goal_rows), 2)
+            manager_score = score_total
+            if score_visible and grievance_row and grievance_row["status"] == "amended" and grievance_row["score_before"] is not None:
+                manager_score = float(grievance_row["score_before"])
+            hr_score = None
+            final_score = None
+            if score_visible and evaluation["status"] == "approved" and evaluation["weighted_score"] is not None:
+                final_score = float(evaluation["weighted_score"])
+                hr_score = float(grievance_row["score_before"]) if grievance_row and grievance_row["status"] == "amended" and grievance_row["score_before"] is not None else final_score
             evaluation_data.update({
                 "published": published,
                 "can_manager_review": bool((direct_manager or manager_override) and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
@@ -11995,6 +12405,13 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "can_grieve": bool(own and published and grievance_row is None),
                 "manager_fallback": bool(manager_fallback),
                 "score_total": round(score_total, 2) if score_total is not None else None,
+                "self_score": self_score,
+                "self_rating": self.evaluation_rating(self_score),
+                "self_rating_info": self.evaluation_rating_info(self_score),
+                "manager_score": round(manager_score, 2) if manager_score is not None else None,
+                "hr_score": round(hr_score, 2) if hr_score is not None else None,
+                "final_score": round(final_score, 2) if final_score is not None else None,
+                "rating_info": self.evaluation_rating_info(float(evaluation["weighted_score"])) if score_visible and evaluation["weighted_score"] is not None else None,
                 "specialized_goal_count": specialized_goal_count,
                 "general_goal_count": general_goal_count,
                 "required_specialized_goal_count": 2,

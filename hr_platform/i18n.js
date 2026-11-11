@@ -799,6 +799,33 @@
     'مسؤول النظام هو السلطة العليا وحسابه محمي. مسؤول الموارد البشرية يملك جميع الصلاحيات تلقائياً. المشرف حساب مستقل يبدأ بصلاحيات الموارد البشرية التشغيلية ويمكن تخصيصها، ولا يظهر في الهيكل الوظيفي. ويمكن منح المدير العام أو المسؤول المباشر صلاحيات إضافية حسب الحاجة.':'The system administrator is the protected highest authority. HR has all permissions automatically. A supervisor is a standalone account with customizable operational HR permissions and does not appear in the organization structure. The general manager and line managers may receive additional permissions as needed.'
   });
 
+  Object.assign(english, {
+    'المؤشرات':'Indicators','طريقة عرض التقييم':'Evaluation view','دورة التقييم':'Evaluation cycle',
+    'جارٍ تحميل مؤشرات التقييم…':'Loading evaluation indicators…','تقرير دورة التقييم':'Evaluation cycle report',
+    'تصدير النتائج إلى Excel':'Export results to Excel','يشمل النتائج التي اعتمدها المشرف.':'Includes results approved by the supervisor.',
+    'يتاح التصدير بعد اعتماد نتيجة واحدة على الأقل من المشرف.':'Export becomes available after the supervisor approves at least one result.',
+    'الموظفون المقيّمون':'Evaluated employees','{percentage} من {total}':'{percentage} of {total}','متوسط التقييم':'Average score',
+    'من 100 نقطة':'Out of 100 points','اعتماد المشرف':'Supervisor-approved','نتيجة معتمدة من المشرف':'Supervisor-approved result',
+    'اعتماد الموارد البشرية':'HR-approved','نتيجة نهائية':'Final result','نسبة التظلمات':'Grievance rate','{count} تظلم':'{count} grievances',
+    'تغطية الأدلة':'Evidence coverage','توثيق التقييمات':'Evaluation documentation','النتيجة الحالية':'Current result',
+    'توزيع تقديرات الموظفين':'Employee rating distribution','تعتمد النسب على أحدث نتيجة معتمدة في مسار كل موظف.':'Percentages use the latest approved result in each employee’s workflow.',
+    'التوزيع الرئيسي بين النتائج المعتمدة من المشرف، وتظهر أيضاً نسبة كل تقدير من جميع موظفي الدورة.':'The primary distribution covers supervisor-approved results; each rating also shows its percentage of all employees in the cycle.',
+    '{percentage} من جميع موظفي الدورة':'{percentage} of all cycle employees','امتياز':'Excellent','ضعيف':'Weak',
+    'موظف مقيّم':'evaluated employees','لا توجد نتائج معتمدة بعد':'No approved results yet',
+    'ستظهر الرسوم والتقرير الذكي بعد اعتماد المشرف لأول تقييم في الدورة.':'Charts and the smart report will appear after the supervisor approves the first evaluation in the cycle.',
+    'صحة دورة التقييم':'Evaluation cycle health','تنبيه مبكر للمتوسط والتوزيع والتوثيق والمعايرة.':'Early warning for averages, distribution, documentation and calibration.',
+    'متوسط النتائج':'Score average','توزيع التقديرات':'Rating distribution','توثيق الأدلة':'Evidence documentation','المعايرة':'Calibration',
+    'سليم':'Healthy','يحتاج مراجعة':'Needs review','مخاطرة':'Risk','قراءة إدارية':'Management reading','التقرير الذكي':'Smart report',
+    'استنتاجات مبنية على نتائج الدورة وتوثيقها وتظلماتها.':'Findings based on cycle results, documentation and grievances.',
+    'الملاحظات':'Insights','التوصيات':'Recommendations','لا توجد ملاحظات تحليلية لهذه الدورة.':'No analytical insights for this cycle.',
+    'لا توجد توصيات إضافية حالياً.':'No additional recommendations at present.','المقارنة حسب الأقسام':'Comparison by department',
+    'المقارنة حسب المشرفين':'Comparison by supervisor','مقارنة النتيجة بمتوسط المؤسسة':'Compared with the organization average',
+    'الاسم':'Name','المقيّمون':'Evaluated','المتوسط':'Average','الفرق':'Variance','غير محدد':'Not specified','سجل':'records',
+    'لا توجد بيانات مقارنة بعد.':'No comparison data is available yet.','لا توجد دورة محددة':'No cycle selected',
+    'أنشئ دورة تقييم أولاً لعرض المؤشرات.':'Create an evaluation cycle first to view indicators.',
+    'تعذر تحميل مؤشرات التقييم':'Evaluation indicators could not be loaded','إعادة المحاولة':'Try again'
+  });
+
   window.HR_I18N = { t: translate, translate, setLocale, apply, get locale() { return locale; }, formatDate, formatNumber, formatCurrency, storageKey: STORAGE_KEY, resources: { ar: {}, en: english } };
   document.addEventListener('click', event => { const button = event.target.closest('[data-locale]'); if (button) setLocale(button.dataset.locale); });
   document.addEventListener('DOMContentLoaded', () => {

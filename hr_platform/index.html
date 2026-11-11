@@ -10,7 +10,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
   <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
-  <link rel="stylesheet" href="styles.css?v=5.8.8&build=20261109-production-r41">
+  <link rel="stylesheet" href="styles.css?v=5.8.8&build=20261111-production-r42">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true" focusable="false">
@@ -103,7 +103,8 @@
         <a href="#certificate-verification" data-page="certificate-verification" data-permission="salary_certificate.verify"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-certificate"></use></svg></i><span>التحقق من الشهادات</span></a>
         <a href="#advances" data-page="advances"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-loan"></use></svg></i><span>السلف والأقساط</span></a>
         <span class="nav-label">الأداء والتطوير</span>
-        <a href="#evaluations" data-page="evaluations"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-target"></use></svg></i><span>التقييم السنوي</span></a>
+        <a href="#evaluations" data-page="evaluations" data-evaluation-view="cycle"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-target"></use></svg></i><span>التقييم السنوي</span></a>
+        <a href="#evaluations" data-page="evaluations" data-evaluation-view="indicators" data-permission-any="evaluation.cycle.manage,evaluation.review"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-report"></use></svg></i><span>المؤشرات</span></a>
         <a href="#goals-library" data-page="goals-library" data-permission="evaluation.goals.manage"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-target"></use></svg></i><span>الأهداف</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="recruitment" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-recruitment"></use></svg></i><span>التوظيف</span></a>
         <a href="#lifecycle" data-page="lifecycle" data-lifecycle-module="onboarding" data-permission="lifecycle.view"><i><svg class="ui-icon" aria-hidden="true"><use href="#icon-onboarding"></use></svg></i><span>التهيئة والعقود</span></a>
@@ -264,9 +265,18 @@
         <div class="page-head"><div><span class="eyebrow">الأداء</span><h1>التقييم السنوي</h1><p>دورة مؤرخة تبدأ بالتقييم الذاتي، ثم نقاط المسؤول المباشر، ثم قرار الموارد البشرية والإفصاح.</p></div><button class="primary" id="openEvaluation">فتح تقييمي المسند</button></div>
         <section class="cycle-console card" id="evaluationCycleConsole" data-permission-any="evaluation.cycle.manage,evaluation.review" hidden>
           <div class="section-head cycle-command-head"><div><span class="eyebrow">برج التحكم بالأداء</span><h2>إدارة دورات التقييم</h2><p>النطاق والمواعيد وحالة كل موظف في مسار واحد.</p></div><div class="button-row"><button class="secondary" id="editEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">تعديل الدورة</button><button class="primary" id="createEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">+ دورة جديدة</button></div></div>
+          <div class="evaluation-management-switch" role="group" aria-label="طريقة عرض التقييم">
+            <button class="active" id="evaluationCycleViewButton" type="button" data-evaluation-management-view="cycle" aria-pressed="true">دورة التقييم</button>
+            <button id="evaluationIndicatorsViewButton" type="button" data-evaluation-management-view="indicators" aria-pressed="false">المؤشرات</button>
+          </div>
           <div class="cycle-selector-row"><label>الدورة<select id="evaluationCycleSelect" aria-label="اختيار دورة التقييم"></select></label><div class="button-row"><button class="secondary" id="remindEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">تذكير غير المرسلين</button><button class="primary" id="announceEvaluationCycle" type="button" data-permission="evaluation.cycle.manage">إعلان الدورة</button></div></div>
-          <div id="evaluationCycleTower" class="cycle-control-tower loading-block">جارٍ تحميل الدورة…</div>
-          <div id="evaluationCyclePopulation" class="cycle-population"></div>
+          <div id="evaluationCycleView">
+            <div id="evaluationCycleTower" class="cycle-control-tower loading-block">جارٍ تحميل الدورة…</div>
+            <div id="evaluationCyclePopulation" class="cycle-population"></div>
+          </div>
+          <div id="evaluationIndicatorsView" class="evaluation-indicators" hidden>
+            <div id="evaluationIndicatorsContent" class="evaluation-indicators-content" aria-live="polite"><div class="loading-block">جارٍ تحميل مؤشرات التقييم…</div></div>
+          </div>
         </section>
         <section class="evaluation-announcement" id="evaluationAnnouncement" aria-live="polite" hidden></section>
         <div class="evaluation-workflow" id="evaluationWorkflowRibbon" aria-label="مراحل التقييم"></div>
@@ -461,7 +471,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
   <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
   <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
-  <script src="i18n.js?v=5.8.8&build=20261109-production-r41"></script>
-  <script src="app.js?v=5.8.8&build=20261109-production-r41"></script>
+  <script src="i18n.js?v=5.8.8&build=20261111-production-r42"></script>
+  <script src="app.js?v=5.8.8&build=20261111-production-r42"></script>
 </body>
 </html>

@@ -146,6 +146,20 @@ class ServiceDurationTests(unittest.TestCase):
         )
 
 
+class EvaluationScoringRuleTests(unittest.TestCase):
+    def test_rating_boundaries_match_the_approved_hundred_point_scale(self):
+        handler = hr_server.make_handler(Path("/tmp/evaluation-rating-rules.sqlite3"))
+        expected = {
+            100: "امتياز", 95: "امتياز", 94.99: "جيد جداً", 85: "جيد جداً",
+            84.99: "جيد", 75: "جيد", 74.99: "مقبول", 65: "مقبول",
+            64.99: "ضعيف", 55: "ضعيف", 0: "ضعيف",
+        }
+        for score, rating in expected.items():
+            with self.subTest(score=score):
+                self.assertEqual(handler.evaluation_rating(score), rating)
+                self.assertEqual(handler.evaluation_rating_info(score)["label_ar"], rating)
+
+
 class EmployeeProfileServiceDurationFrontendTests(unittest.TestCase):
     def test_employee_dossier_renders_structured_service_duration_counter(self):
         root = Path(__file__).parents[1]
@@ -263,6 +277,27 @@ class EvaluationWorkflowFrontendTests(unittest.TestCase):
         self.assertIn("'إعادة التقييم حسب التسلسل':'Return review by workflow stage'", translations)
         self.assertIn("'مسؤولية بديلة لموظف بلا مسؤول مباشر':'Fallback responsibility for an employee without a line manager'", translations)
 
+    def test_indicators_dashboard_and_excel_export_contract(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        index = (root / "index.html").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+
+        self.assertIn('data-evaluation-view="indicators"', index)
+        self.assertIn('id="evaluationIndicatorsView"', index)
+        self.assertIn("/indicators`", app)
+        self.assertIn("/results.xlsx`", app)
+        self.assertIn("percentage_of_employees", app)
+        self.assertIn("Number(score)>=95?'امتياز'", app)
+        self.assertIn("Number(score)>=85?'جيد جداً'", app)
+        self.assertIn("Number(score)>=75?'جيد'", app)
+        self.assertIn("Number(score)>=65?'مقبول':'ضعيف'", app)
+        self.assertIn("conic-gradient", app)
+        self.assertIn(".evaluation-donut", styles)
+        self.assertIn("'امتياز':'Excellent'", translations)
+        self.assertIn("'تصدير النتائج إلى Excel':'Export results to Excel'", translations)
+
 
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
@@ -376,7 +411,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.8&build=20261109-production-r41")
+        application_script = index.index("app.js?v=5.8.8&build=20261111-production-r42")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -1317,6 +1352,8 @@ class HRAPIEndToEndTests(unittest.TestCase):
         submitted = employee.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
         self.assertEqual(submitted["evaluation"]["status"], "submitted")
         self.assertEqual(submitted["weight_total"], 100)
+        self.assertEqual(submitted["evaluation"]["self_score"], 93.5)
+        self.assertEqual(submitted["evaluation"]["self_rating"], "جيد جداً")
         hidden = employee.request("GET", f"/api/evaluations/{evaluation_id}")
         self.assertIsNone(hidden["evaluation"]["weighted_score"])
         self.assertNotIn("awarded_points", hidden["goals"][0])
@@ -1329,16 +1366,37 @@ class HRAPIEndToEndTests(unittest.TestCase):
             ]},
         )
         self.assertEqual(step_one["evaluation"]["status"], "in_review")
+        self.assertEqual(step_one["evaluation"]["manager_score"], 93)
         gm = self.client("gm@demo.ae", "GM@12345")
         gm.request("GET", f"/api/evaluations/{evaluation_id}", expected=403)
         gm.request("GET", f"/api/evaluation-goals/{first_goal['id']}/evidence", expected=403)
         hr = self.client("hr@demo.ae", "HR@12345")
+        cycle_id = step_one["evaluation"]["cycle_id"]
+        employee.request("GET", f"/api/evaluation-cycles/{cycle_id}/indicators", expected=403)
+        indicators = hr.request("GET", f"/api/evaluation-cycles/{cycle_id}/indicators")
+        self.assertGreaterEqual(indicators["summary"]["total"], 1)
+        self.assertGreaterEqual(indicators["summary"]["evaluated"], 1)
+        self.assertEqual(indicators["summary"]["export_ready_count"], indicators["summary"]["evaluated"])
+        self.assertEqual(next(item for item in indicators["distribution"] if item["key"] == "very_good")["count"], 1)
+        export_headers, export_body = hr.raw_request(f"/api/evaluation-cycles/{cycle_id}/results.xlsx")
+        self.assertEqual(export_headers.get_content_type(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.assertTrue(zipfile.is_zipfile(io.BytesIO(export_body)))
+        with zipfile.ZipFile(io.BytesIO(export_body)) as workbook:
+            sheet_xml = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            style_xml = workbook.read("xl/styles.xml").decode("utf-8")
+        self.assertIn("Employee Name / اسم الموظف", sheet_xml)
+        self.assertIn("Very Good / جيد جداً", sheet_xml)
+        self.assertIn("93.50", sheet_xml)
+        for color in ("FFF28C28", "FF2E8B57", "FF2F6FED", "FFE0B323", "FFC44336"):
+            self.assertIn(color, style_xml)
         final = hr.request(
             "POST", f"/api/evaluations/{evaluation_id}/hr-review",
             {"action": "approve", "comment": "اكتملت المراجعة", "disclosure_date": date.today().isoformat()},
         )
         self.assertEqual(final["evaluation"]["status"], "approved")
-        self.assertEqual(final["evaluation"]["rating"], "ممتاز")
+        self.assertEqual(final["evaluation"]["rating"], "جيد جداً")
+        self.assertEqual(final["evaluation"]["hr_score"], 93)
+        self.assertEqual(final["evaluation"]["final_score"], 93)
         published = employee.request("GET", f"/api/evaluations/{evaluation_id}")
         self.assertTrue(published["evaluation"]["published"])
         self.assertEqual(published["evaluation"]["weighted_score"], 93)
@@ -1360,7 +1418,21 @@ class HRAPIEndToEndTests(unittest.TestCase):
             ]},
         )
         self.assertEqual(resolved["evaluation"]["weighted_score"], 97)
+        self.assertEqual(resolved["evaluation"]["rating"], "امتياز")
+        self.assertEqual(resolved["evaluation"]["manager_score"], 93)
+        self.assertEqual(resolved["evaluation"]["hr_score"], 93)
+        self.assertEqual(resolved["evaluation"]["final_score"], 97)
         self.assertEqual(resolved["grievance"]["status"], "amended")
+        amended_indicators = hr.request("GET", f"/api/evaluation-cycles/{cycle_id}/indicators")
+        self.assertEqual(next(item for item in amended_indicators["distribution"] if item["key"] == "excellent")["count"], 1)
+        self.assertEqual(amended_indicators["summary"]["grievance_count"], 1)
+        amended_headers, amended_body = hr.raw_request(f"/api/evaluation-cycles/{cycle_id}/results.xlsx")
+        self.assertEqual(amended_headers.get_content_type(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with zipfile.ZipFile(io.BytesIO(amended_body)) as workbook:
+            amended_sheet = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        self.assertIn("Excellent / امتياز", amended_sheet)
+        self.assertIn("Accepted and amended / مقبول وعُدلت النتيجة", amended_sheet)
+        self.assertIn("97.00", amended_sheet)
         with contextlib.closing(sqlite3.connect(self.db_path)) as audit_db:
             actions = {row[0] for row in audit_db.execute(
                 "SELECT action FROM audit_log WHERE entity_type IN ('evaluation','evaluation_grievance')"
@@ -2931,7 +3003,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261109-production-r41", index)
+        self.assertIn("build=20261111-production-r42", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3145,7 +3217,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261109-production-r41", index)
+        self.assertIn("build=20261111-production-r42", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -5392,7 +5464,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261109-production-r41", index)
+        self.assertIn("build=20261111-production-r42", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -6094,7 +6166,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261109-production-r41", index)
+        self.assertIn("build=20261111-production-r42", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6959,7 +7031,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261109-production-r41", index)
+        self.assertIn("build=20261111-production-r42", index)
 
     def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
         with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:
