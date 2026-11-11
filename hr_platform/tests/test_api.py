@@ -298,6 +298,29 @@ class EvaluationWorkflowFrontendTests(unittest.TestCase):
         self.assertIn("'امتياز':'Excellent'", translations)
         self.assertIn("'تصدير النتائج إلى Excel':'Export results to Excel'", translations)
 
+    def test_three_stage_score_sheet_and_prepublication_controls_contract(self):
+        root = Path(__file__).parents[1]
+        app = (root / "app.js").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        translations = (root / "i18n.js").read_text(encoding="utf-8")
+        server = (root / "server.py").read_text(encoding="utf-8")
+        schema = (root / "schema.sql").read_text(encoding="utf-8")
+
+        for field in ("self_awarded_points", "manager_awarded_points", "hr_awarded_points"):
+            self.assertIn(field, app + server + schema)
+        self.assertIn('id="hrScoreForm"', app)
+        self.assertIn('data-hr-action="save"', app)
+        self.assertIn('data-hr-action="approve"', app)
+        self.assertIn("function updateHrScore", app)
+        self.assertIn("can_admin_prepublication_edit", app + server)
+        self.assertIn("evaluation.admin_prepublication_score_edit", server)
+        self.assertIn("evaluation.hr_score_save", server)
+        self.assertIn(".score-comparison-row", styles)
+        self.assertIn(".pre-disclosure-badge", styles)
+        self.assertIn("'نقاط تقييمي الذاتي':'My self-score'", translations)
+        self.assertIn("'حفظ بدون اعتماد':'Save without approval'", translations)
+        self.assertIn("'غير منشور — قابل للتعديل حتى الإفصاح':'Unpublished — editable until disclosure'", translations)
+
 
 class HRAPIEndToEndTests(unittest.TestCase):
     @classmethod
@@ -411,7 +434,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         leaflet_script = index.index("leaflet@1.9.4/dist/leaflet.js")
         maplibre_script = index.index("maplibre-gl@5.24.0/dist/maplibre-gl.js")
         bridge_script = index.index("@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js")
-        application_script = index.index("app.js?v=5.8.8&build=20261111-production-r42")
+        application_script = index.index("app.js?v=5.8.8&build=20261111-production-r43")
         self.assertLess(leaflet_script, maplibre_script)
         self.assertLess(maplibre_script, bridge_script)
         self.assertLess(bridge_script, application_script)
@@ -3003,7 +3026,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn(".catalog-selection-meter.over-limit", styles)
         self.assertIn("'مكتبة الأهداف':'Goals library'", translations)
         self.assertIn("'اختر الأهداف لمراجعة مجموع الوزن.':'Select goals to review the total weight.'", translations)
-        self.assertIn("build=20261111-production-r42", index)
+        self.assertIn("build=20261111-production-r43", index)
 
     def test_32d_v62_specialized_minimum_classification_migration_and_live_sync(self):
         # Legacy databases gain a separate classification dimension without
@@ -3217,7 +3240,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("objective_type:formControl(form,'objective_type').value", app)
         self.assertIn(".specialized-rule", styles)
         self.assertIn("'الأهداف التخصصية':'Specialized goals'", translations)
-        self.assertIn("build=20261111-production-r42", index)
+        self.assertIn("build=20261111-production-r43", index)
 
     def test_33_v50_return_scheduled_disclosure_and_rejected_grievance(self):
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -3745,6 +3768,9 @@ class HRAPIEndToEndTests(unittest.TestCase):
                 self.assertEqual(goal["goal_type"], "result")
                 self.assertEqual(goal["progress_status"], "in_progress")
                 self.assertEqual(goal["evidence_note"], "دليل الترحيل الأصلي")
+                self.assertEqual(goal["manager_awarded_points"], 38)
+                self.assertIsNone(goal["hr_awarded_points"])
+                self.assertEqual(goal["awarded_points"], 38)
                 announcement_count = migrated.execute("SELECT COUNT(*) FROM evaluation_cycle_notifications WHERE cycle_id=?", (cycle_id,)).fetchone()[0]
                 self.assertGreater(announcement_count, 0)
             hr_server.initialize_database(legacy_path)
@@ -5464,7 +5490,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
         self.assertIn("#userName,#userRole", i18n)
         self.assertIn("updateUserRole(user)", app)
         self.assertIn("جميع صلاحيات النظام في القائمة", index)
-        self.assertIn("build=20261111-production-r42", index)
+        self.assertIn("build=20261111-production-r43", index)
 
         with contextlib.closing(hr_server.open_db(self.db_path)) as db, db:
             db.execute(
@@ -6166,7 +6192,7 @@ class HRAPIEndToEndTests(unittest.TestCase):
             self.assertIn(f"'{arabic}':'{english}'", translations)
             self.assertIn(f"tr('{arabic}')", app)
         self.assertIn("'حفظ المسودة':'Save draft'", translations)
-        self.assertIn("build=20261111-production-r42", index)
+        self.assertIn("build=20261111-production-r43", index)
 
     def test_87_payroll_active_month_replacement_coverage_sync_and_advance_integrity(self):
         admin = self.client("admin@demo.ae", "Admin@123")
@@ -6784,6 +6810,160 @@ class HRAPIEndToEndTests(unittest.TestCase):
             ).fetchone()
             self.assertIn("إعادة التقييم قبل موعد النشر", audit_row["details"])
 
+    def test_92_evaluation_stage_scores_hr_draft_admin_prepublication_and_privacy(self):
+        employee = self.client("employee@demo.ae", "Emp@12345")
+        manager = self.client("manager@demo.ae", "Manager@12345")
+        hr = self.client("hr@demo.ae", "HR@12345")
+        admin = self.client("admin@demo.ae", "Admin@123")
+        today = date.today()
+        disclosure = today + timedelta(days=4)
+        cycle = hr.request("POST", "/api/evaluation-cycles", {
+            "year": 2193, "name": "دورة حفظ مراحل النقاط 2193",
+            "period_start": (today - timedelta(days=120)).isoformat(),
+            "period_end": (today + timedelta(days=120)).isoformat(),
+            "self_opens_on": (today - timedelta(days=5)).isoformat(),
+            "self_due_on": (today + timedelta(days=10)).isoformat(),
+            "manager_due_on": (today + timedelta(days=20)).isoformat(),
+            "hr_due_on": (today + timedelta(days=30)).isoformat(),
+            "announcement_title": "دورة حفظ مراحل النقاط",
+            "announcement_body": "اختبار مراحل نقاط الموظف والمشرف والموارد البشرية.",
+        }, expected=201)["cycle"]
+        hr.request("POST", f"/api/evaluation-cycles/{cycle['id']}/announce", {})
+        evaluation = employee.request("POST", "/api/evaluations", {"cycle_id": cycle["id"]})["evaluation"]
+        evaluation_id = evaluation["id"]
+        common = {
+            "description": "هدف تخصصي قابل للقياس", "weight": 50, "measure": "نسبة الإنجاز",
+            "objective_type": "specialized", "goal_type": "result",
+            "start_date": cycle["period_start"], "end_date": cycle["period_end"],
+            "progress_status": "in_progress", "evidence_note": "",
+        }
+        first_goal = employee.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            dict(common, title="هدف النقاط الأول", achievement=80), expected=201,
+        )["goals"][0]
+        second_goal = employee.request(
+            "POST", f"/api/evaluations/{evaluation_id}/goals",
+            dict(common, title="هدف النقاط الثاني", achievement=60), expected=201,
+        )["goals"][1]
+        submitted = employee.request("POST", f"/api/evaluations/{evaluation_id}/submit", {})
+        self.assertEqual([goal["self_awarded_points"] for goal in submitted["goals"]], [40, 30])
+        for field in ("manager_awarded_points", "hr_awarded_points", "awarded_points"):
+            self.assertNotIn(field, submitted["goals"][0])
+
+        manager_result = manager.request("POST", f"/api/evaluations/{evaluation_id}/manager-review", {
+            "manager_report": "تمت مراجعة نقاط الموظف ودليل الإنجاز.",
+            "goals": [
+                {"id": first_goal["id"], "manager_awarded_points": 45},
+                {"id": second_goal["id"], "manager_awarded_points": 40},
+            ],
+        })
+        self.assertEqual(manager_result["evaluation"]["manager_score"], 85)
+        self.assertEqual([goal["manager_awarded_points"] for goal in manager_result["goals"]], [45, 40])
+        self.assertNotIn("hr_awarded_points", manager_result["goals"][0])
+        self.assertNotIn("awarded_points", manager_result["goals"][0])
+
+        employee_hidden = employee.request("GET", f"/api/evaluations/{evaluation_id}")
+        self.assertIsNone(employee_hidden["evaluation"]["manager_score"])
+        self.assertIsNone(employee_hidden["evaluation"]["hr_score"])
+        self.assertIsNone(employee_hidden["evaluation"]["final_score"])
+        self.assertIsNone(employee_hidden["evaluation"]["disclosure_date"])
+        for field in ("manager_awarded_points", "hr_awarded_points", "awarded_points"):
+            self.assertNotIn(field, employee_hidden["goals"][0])
+
+        hr_view = hr.request("GET", f"/api/evaluations/{evaluation_id}")
+        self.assertTrue(hr_view["evaluation"]["can_hr_edit_scores"])
+        self.assertEqual([goal["hr_awarded_points"] for goal in hr_view["goals"]], [45, 40])
+        incomplete = hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "save", "goals": [{"id": first_goal["id"], "hr_awarded_points": 44}],
+        }, expected=422)
+        self.assertEqual(incomplete["code"], "goal_scores_required")
+        duplicate = hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "save", "goals": [
+                {"id": first_goal["id"], "hr_awarded_points": 44},
+                {"id": first_goal["id"], "hr_awarded_points": 39},
+            ],
+        }, expected=422)
+        self.assertEqual(duplicate["code"], "duplicate_goal")
+        out_of_range = hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "save", "goals": [
+                {"id": first_goal["id"], "hr_awarded_points": 51},
+                {"id": second_goal["id"], "hr_awarded_points": 39},
+            ],
+        }, expected=422)
+        self.assertEqual(out_of_range["code"], "points_exceed_weight")
+        saved = hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "save", "comment": "مسودة تدقيق قبل الاعتماد",
+            "goals": [
+                {"id": first_goal["id"], "hr_awarded_points": 44},
+                {"id": second_goal["id"], "hr_awarded_points": 39},
+            ],
+        })
+        self.assertEqual(saved["evaluation"]["status"], "in_review")
+        self.assertEqual(saved["evaluation"]["manager_score"], 85)
+        self.assertEqual(saved["evaluation"]["hr_score"], 83)
+        self.assertEqual([goal["manager_awarded_points"] for goal in saved["goals"]], [45, 40])
+        self.assertEqual([goal["hr_awarded_points"] for goal in saved["goals"]], [44, 39])
+
+        approved = hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "approve", "comment": "اعتماد المراجعة النهائية",
+            "disclosure_date": disclosure.isoformat(),
+            "goals": [
+                {"id": first_goal["id"], "hr_awarded_points": 43},
+                {"id": second_goal["id"], "hr_awarded_points": 38},
+            ],
+        })
+        self.assertEqual(approved["evaluation"]["final_score"], 81)
+        self.assertEqual(approved["evaluation"]["manager_score"], 85)
+        self.assertEqual(approved["evaluation"]["hr_score"], 81)
+        self.assertFalse(approved["evaluation"]["published"])
+        hr.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "save", "comment": "غير مسموح بعد الاعتماد",
+            "goals": [
+                {"id": first_goal["id"], "hr_awarded_points": 42},
+                {"id": second_goal["id"], "hr_awarded_points": 37},
+            ],
+        }, expected=409)
+
+        admin_view = admin.request("GET", f"/api/evaluations/{evaluation_id}")
+        self.assertTrue(admin_view["evaluation"]["can_admin_prepublication_edit"])
+        amended = admin.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+            "action": "save", "comment": "تدقيق مسؤول النظام قبل الإفصاح",
+            "goals": [
+                {"id": first_goal["id"], "hr_awarded_points": 42},
+                {"id": second_goal["id"], "hr_awarded_points": 37},
+            ],
+        })
+        self.assertEqual(amended["evaluation"]["final_score"], 79)
+        self.assertEqual(amended["evaluation"]["manager_score"], 85)
+        self.assertEqual(amended["evaluation"]["hr_score"], 79)
+        self.assertEqual(amended["evaluation"]["disclosure_date"], disclosure.isoformat())
+
+        disclosed_now = datetime(disclosure.year, disclosure.month, disclosure.day, 9, 0, tzinfo=ZoneInfo("Asia/Dubai"))
+        disclosed_utc = disclosed_now.astimezone(ZoneInfo("UTC")).isoformat(timespec="seconds")
+        with mock.patch.object(hr_server, "local_now", return_value=disclosed_now), mock.patch.object(hr_server, "now_iso", return_value=disclosed_utc):
+            published = employee.request("GET", f"/api/evaluations/{evaluation_id}")
+            self.assertTrue(published["evaluation"]["published"])
+            blocked = admin.request("POST", f"/api/evaluations/{evaluation_id}/hr-review", {
+                "action": "save", "comment": "يجب رفض التعديل بعد الإفصاح",
+                "goals": [
+                    {"id": first_goal["id"], "hr_awarded_points": 41},
+                    {"id": second_goal["id"], "hr_awarded_points": 36},
+                ],
+            }, expected=409)
+            self.assertEqual(blocked["code"], "evaluation_already_published")
+
+        with contextlib.closing(hr_server.open_db(self.db_path)) as db:
+            rows = db.execute(
+                "SELECT manager_awarded_points,hr_awarded_points,awarded_points FROM evaluation_goals WHERE evaluation_id=? ORDER BY id",
+                (evaluation_id,),
+            ).fetchall()
+            self.assertEqual([tuple(row) for row in rows], [(45, 42, 42), (40, 37, 37)])
+            actions = {row[0] for row in db.execute(
+                "SELECT action FROM audit_log WHERE entity_type='evaluation' AND entity_id=?",
+                (str(evaluation_id),),
+            )}
+            self.assertTrue({"evaluation.hr_score_save", "evaluation.hr_approve", "evaluation.admin_prepublication_score_edit"}.issubset(actions))
+
     def test_standalone_supervisor_accounts_are_hr_operational_and_customizable(self):
         admin = self.client("admin@demo.ae", "Admin@123")
         hr = self.client("hr@demo.ae", "HR@12345")
@@ -7031,7 +7211,7 @@ class PayrollMigrationAndLocaleRegressionTests(unittest.TestCase):
         self.assertIn("name_ar TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("name_en TEXT NOT NULL DEFAULT ''", schema)
         self.assertIn("migrate_bilingual_reference_names(db)", server)
-        self.assertIn("build=20261111-production-r42", index)
+        self.assertIn("build=20261111-production-r43", index)
 
     def test_legacy_purchase_table_migrates_to_nullable_manager_and_direct_finance(self):
         with tempfile.TemporaryDirectory(prefix="purchase-migration-") as directory:

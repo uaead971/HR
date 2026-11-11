@@ -2302,7 +2302,9 @@ def migrate_nonterminal_legacy_evaluations(db: sqlite3.Connection) -> None:
                 (evaluation_id, manager_id, stamp),
             )
         db.execute(
-            "UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?",
+            """UPDATE evaluation_goals
+                  SET manager_awarded_points=NULL,hr_awarded_points=NULL,awarded_points=NULL,updated_at=?
+                WHERE evaluation_id=?""",
             (stamp, evaluation_id),
         )
         db.execute(
@@ -2664,6 +2666,7 @@ def initialize_database(db_path: Path) -> None:
             db.executescript(schema)
             goal_columns_before_v51 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goals)")}
             backfill_v50_goals = "progress_status" not in goal_columns_before_v51
+            stage_score_columns_missing = not {"manager_awarded_points", "hr_awarded_points"}.issubset(goal_columns_before_v51)
             template_columns_before_v62 = {row["name"] for row in db.execute("PRAGMA table_info(evaluation_goal_templates)")}
             template_objective_type_missing = "objective_type" not in template_columns_before_v62
             goal_objective_type_missing = "objective_type" not in goal_columns_before_v51
@@ -2818,6 +2821,8 @@ def initialize_database(db_path: Path) -> None:
                     "title_ar": "TEXT NOT NULL DEFAULT ''", "title_en": "TEXT NOT NULL DEFAULT ''",
                     "description_ar": "TEXT NOT NULL DEFAULT ''", "description_en": "TEXT NOT NULL DEFAULT ''",
                     "measure_ar": "TEXT NOT NULL DEFAULT ''", "measure_en": "TEXT NOT NULL DEFAULT ''",
+                    "manager_awarded_points": "REAL",
+                    "hr_awarded_points": "REAL",
                     "awarded_points": "REAL",
                     "goal_type": "TEXT NOT NULL DEFAULT 'result'",
                     "start_date": "TEXT",
@@ -2912,6 +2917,28 @@ def initialize_database(db_path: Path) -> None:
                 for column, definition in columns.items():
                     if column not in existing_columns:
                         db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+            if stage_score_columns_missing:
+                # Preserve the provenance of scores created before stage-specific
+                # columns existed.  In-review values were supplied by the manager;
+                # approved values also represent the original HR-approved result.
+                db.execute(
+                    """UPDATE evaluation_goals
+                          SET manager_awarded_points=awarded_points
+                        WHERE manager_awarded_points IS NULL
+                          AND awarded_points IS NOT NULL
+                          AND evaluation_id IN (
+                              SELECT id FROM evaluations WHERE manager_submitted_at IS NOT NULL
+                          )"""
+                )
+                db.execute(
+                    """UPDATE evaluation_goals
+                          SET hr_awarded_points=awarded_points
+                        WHERE hr_awarded_points IS NULL
+                          AND awarded_points IS NOT NULL
+                          AND evaluation_id IN (
+                              SELECT id FROM evaluations WHERE status='approved'
+                          )"""
+                )
             migrate_bilingual_reference_names(db)
             # V6.2 gives the catalogue classification its own immutable snapshot
             # dimension.  The existing evaluation ``goal_type`` remains the
@@ -11371,6 +11398,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             payload["has_evidence_attachment"] = attachment
             if not attachment:
                 payload["evidence_file_name"] = ""
+            payload["self_awarded_points"] = round(
+                float(payload.get("weight") or 0) * float(payload.get("achievement") or 0) / 100.0,
+                2,
+            )
             return payload
 
         def parse_goal_attachment(self, data: dict[str, Any], partial: bool) -> dict[str, Any]:
@@ -11813,6 +11844,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                           gr.status AS grievance_status,gr.resolution_note,gr.score_before,gr.score_after,
                           COALESCE((SELECT ROUND(SUM(g.weight*g.achievement/100.0),2)
                                       FROM evaluation_goals g WHERE g.evaluation_id=ev.id),0) AS self_score,
+                          (SELECT ROUND(SUM(g.manager_awarded_points),2)
+                             FROM evaluation_goals g WHERE g.evaluation_id=ev.id) AS manager_stage_score,
+                          (SELECT ROUND(SUM(g.hr_awarded_points),2)
+                             FROM evaluation_goals g WHERE g.evaluation_id=ev.id) AS hr_stage_score,
                           (SELECT ROUND(SUM(g.awarded_points),2)
                              FROM evaluation_goals g WHERE g.evaluation_id=ev.id) AS awarded_score,
                           COALESCE((SELECT COUNT(*) FROM evaluation_goals g WHERE g.evaluation_id=ev.id),0) AS goal_count,
@@ -11840,8 +11875,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 row = dict(source)
                 manager_score: float | None = None
                 if row["manager_submitted_at"]:
-                    if row["grievance_status"] == "amended" and row["score_before"] is not None:
-                        manager_score = float(row["score_before"])
+                    if row["manager_stage_score"] is not None:
+                        manager_score = float(row["manager_stage_score"])
                     elif row["awarded_score"] is not None:
                         manager_score = float(row["awarded_score"])
                     elif row["weighted_score"] is not None:
@@ -11850,7 +11885,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 final_score: float | None = None
                 if row["status"] == "approved" and row["weighted_score"] is not None:
                     final_score = float(row["weighted_score"])
-                    hr_score = float(row["score_before"]) if row["grievance_status"] == "amended" and row["score_before"] is not None else final_score
+                    hr_score = float(row["hr_stage_score"]) if row["hr_stage_score"] is not None else (
+                        float(row["score_before"]) if row["grievance_status"] == "amended" and row["score_before"] is not None else final_score
+                    )
                 current_score = final_score if final_score is not None else manager_score
                 goal_count = int(row["goal_count"] or 0)
                 evidence_complete = bool(
@@ -12369,49 +12406,77 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             own = evaluation["employee_id"] == user.get("employee_id")
             published = self.evaluation_is_published(evaluation)
             hr_reviewer = has_permission(self.db, user, "evaluation.review")
+            system_admin = is_system_admin(user)
             manager_override = has_permission(self.db, user, "evaluation.override_manager") and not own
             current_manager, manager_fallback = self.evaluation_manager_employee_id(int(evaluation["employee_id"]))
             direct_manager = bool(user.get("employee_id") and current_manager == user["employee_id"] and evaluation["manager_employee_id"] == user["employee_id"])
+            if hr_reviewer and not own and evaluation["status"] == "in_review":
+                for goal in goal_rows:
+                    if goal.get("hr_awarded_points") is None:
+                        goal["hr_awarded_points"] = goal.get("manager_awarded_points", goal.get("awarded_points"))
             if own and not published and int(evaluation["workflow_version"] or 1) >= 2:
-                for field in ("weighted_score", "rating", "manager_report", "manager_submitted_at", "finalized_at"):
+                for field in (
+                    "weighted_score", "rating", "manager_report", "manager_submitted_at", "finalized_at",
+                    "hr_reviewed_by", "hr_reviewer_name", "disclosure_date",
+                ):
                     evaluation_data[field] = None
                 if evaluation["status"] != "draft":
                     evaluation_data["hr_comment"] = None
                 for goal in goal_rows:
+                    for field in ("manager_awarded_points", "hr_awarded_points", "awarded_points"):
+                        goal.pop(field, None)
+            elif direct_manager and not hr_reviewer and not published:
+                for field in ("weighted_score", "rating", "hr_reviewed_by", "hr_reviewer_name", "finalized_at", "disclosure_date"):
+                    evaluation_data[field] = None
+                for goal in goal_rows:
+                    goal.pop("hr_awarded_points", None)
                     goal.pop("awarded_points", None)
             grievance = dict(grievance_row) if grievance_row and (own or hr_reviewer) else None
             weight_total = sum(float(goal["weight"]) for goal in goal_rows)
             specialized_goal_count = sum(goal.get("objective_type") == "specialized" for goal in goal_rows)
             general_goal_count = sum(goal.get("objective_type") == "general" for goal in goal_rows)
-            score_visible = published or (not own and (direct_manager or hr_reviewer))
-            score_total = sum(float(goal.get("awarded_points") or 0) for goal in goal_rows) if score_visible else None
             self_score = round(sum(float(goal["weight"]) * float(goal.get("achievement") or 0) / 100.0 for goal in goal_rows), 2)
-            manager_score = score_total
-            if score_visible and grievance_row and grievance_row["status"] == "amended" and grievance_row["score_before"] is not None:
-                manager_score = float(grievance_row["score_before"])
-            hr_score = None
-            final_score = None
-            if score_visible and evaluation["status"] == "approved" and evaluation["weighted_score"] is not None:
-                final_score = float(evaluation["weighted_score"])
-                hr_score = float(grievance_row["score_before"]) if grievance_row and grievance_row["status"] == "amended" and grievance_row["score_before"] is not None else final_score
+            manager_values = [goal.get("manager_awarded_points") for goal in goal_rows]
+            manager_complete = bool(goal_rows) and all(value is not None for value in manager_values)
+            manager_score = round(sum(float(value) for value in manager_values), 2) if manager_complete else None
+            hr_values = [goal.get("hr_awarded_points") for goal in goal_rows]
+            hr_complete = bool(goal_rows) and all(value is not None for value in hr_values)
+            hr_score = round(sum(float(value) for value in hr_values), 2) if hr_complete else None
+            final_score = float(evaluation["weighted_score"]) if evaluation["status"] == "approved" and evaluation["weighted_score"] is not None else None
+            if own and not published:
+                manager_score = hr_score = final_score = None
+            elif direct_manager and not hr_reviewer and not published:
+                hr_score = final_score = None
+            can_hr_edit = bool(
+                hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2
+                and evaluation["status"] == "in_review"
+            )
+            can_admin_prepublication_edit = bool(
+                system_admin and not own and int(evaluation["workflow_version"] or 1) >= 2
+                and evaluation["status"] == "approved" and not published
+            )
+            score_total = final_score if final_score is not None else hr_score if hr_score is not None else manager_score
             evaluation_data.update({
                 "published": published,
                 "can_manager_review": bool((direct_manager or manager_override) and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
                 "can_manager_override": bool(manager_override and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] in {"submitted", "returned"}),
-                "can_hr_review": bool(hr_reviewer and not own and int(evaluation["workflow_version"] or 1) >= 2 and evaluation["status"] == "in_review"),
-                "can_admin_return": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
-                "can_admin_return_to_employee": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
-                "can_admin_return_to_manager": bool(is_system_admin(user) and not published and evaluation["status"] != "draft"),
+                "can_hr_review": can_hr_edit,
+                "can_hr_edit_scores": can_hr_edit,
+                "can_admin_prepublication_edit": can_admin_prepublication_edit,
+                "can_edit_hr_scores": bool(can_hr_edit or can_admin_prepublication_edit),
+                "can_admin_return": bool(system_admin and not published and evaluation["status"] != "draft"),
+                "can_admin_return_to_employee": bool(system_admin and not published and evaluation["status"] != "draft"),
+                "can_admin_return_to_manager": bool(system_admin and not published and evaluation["status"] != "draft"),
                 "can_grieve": bool(own and published and grievance_row is None),
                 "manager_fallback": bool(manager_fallback),
                 "score_total": round(score_total, 2) if score_total is not None else None,
                 "self_score": self_score,
                 "self_rating": self.evaluation_rating(self_score),
                 "self_rating_info": self.evaluation_rating_info(self_score),
-                "manager_score": round(manager_score, 2) if manager_score is not None else None,
-                "hr_score": round(hr_score, 2) if hr_score is not None else None,
+                "manager_score": manager_score,
+                "hr_score": hr_score,
                 "final_score": round(final_score, 2) if final_score is not None else None,
-                "rating_info": self.evaluation_rating_info(float(evaluation["weighted_score"])) if score_visible and evaluation["weighted_score"] is not None else None,
+                "rating_info": self.evaluation_rating_info(float(score_total)) if score_total is not None else None,
                 "specialized_goal_count": specialized_goal_count,
                 "general_goal_count": general_goal_count,
                 "required_specialized_goal_count": 2,
@@ -12434,7 +12499,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 "workflow_version", "manager_employee_id", "manager_name", "weighted_score", "rating", "disclosure_date",
                 "published", "can_manager_review", "can_hr_review", "can_grieve", "score_total", "submitted_late",
                 "can_manager_override", "can_admin_return", "can_admin_return_to_employee",
-                "can_admin_return_to_manager", "manager_fallback",
+                "can_admin_return_to_manager", "can_hr_edit_scores", "can_admin_prepublication_edit",
+                "can_edit_hr_scores", "manager_fallback", "self_score", "manager_score", "hr_score", "final_score",
                 "period_start", "period_end", "self_opens_on", "self_due_on", "manager_due_on", "hr_due_on",
                 "cycle_status", "announcement_title", "announcement_body", "announced_at",
             )} | {"grievance_status": payload["grievance"]["status"] if payload["grievance"] else None}
@@ -12571,7 +12637,12 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
                 if manager_id is not None:
                     self.db.execute("INSERT INTO evaluation_approvals(evaluation_id,step_no,approver_employee_id,created_at) VALUES(?,1,?,?)", (evaluation_id, manager_id, stamp))
-                self.db.execute("UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?", (stamp, evaluation_id))
+                self.db.execute(
+                    """UPDATE evaluation_goals
+                          SET manager_awarded_points=NULL,hr_awarded_points=NULL,awarded_points=NULL,updated_at=?
+                        WHERE evaluation_id=?""",
+                    (stamp, evaluation_id),
+                )
                 self.db.execute("UPDATE evaluations SET status='submitted',manager_employee_id=?,weighted_score=NULL,rating=NULL,current_step=1,submitted_at=?,submitted_late=?,finalized_at=NULL,manager_report='',manager_submitted_at=NULL,hr_comment='',disclosure_date=NULL,updated_at=? WHERE id=?", (manager_id, stamp, submitted_late, stamp, evaluation_id))
                 notification_title = "تقييم موظف بلا مسؤول مباشر" if manager_fallback else "تقييم سنوي بانتظار تقييمك"
                 notification_body = (
@@ -12608,7 +12679,10 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             data = self.read_json()
             report = require_text(data, "manager_report", 5000)
             submitted_goals = data.get("goals")
-            goals = self.db.execute("SELECT id,weight FROM evaluation_goals WHERE evaluation_id=? ORDER BY id", (evaluation_id,)).fetchall()
+            goals = self.db.execute(
+                "SELECT id,weight,manager_awarded_points FROM evaluation_goals WHERE evaluation_id=? ORDER BY id",
+                (evaluation_id,),
+            ).fetchall()
             if not isinstance(submitted_goals, list) or len(submitted_goals) != len(goals):
                 raise APIError(422, "أدخل نقاط كل هدف.", "goal_scores_required")
             submitted_map: dict[int, float] = {}
@@ -12618,7 +12692,8 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 goal_id = as_int(item.get("id"), "goal_id", 1)
                 if goal_id in submitted_map:
                     raise APIError(422, "تكرر الهدف في كشف النقاط.", "duplicate_goal")
-                submitted_map[goal_id] = as_float(item.get("awarded_points"), "awarded_points", 0, 100)
+                raw_points = item.get("manager_awarded_points", item.get("awarded_points"))
+                submitted_map[goal_id] = as_float(raw_points, "manager_awarded_points", 0, 100)
             expected_ids = {int(goal["id"]) for goal in goals}
             if set(submitted_map) != expected_ids:
                 raise APIError(422, "كشف النقاط لا يطابق أهداف التقييم.", "goal_mismatch")
@@ -12626,13 +12701,22 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 if submitted_map[int(goal["id"])] > float(goal["weight"]) + 0.000001:
                     raise APIError(422, "نقاط الهدف لا يمكن أن تتجاوز وزنه.", "points_exceed_weight", {"goal_id": goal["id"], "weight": goal["weight"]})
             score = round(sum(submitted_map.values()), 2)
+            previous_map = {
+                int(goal["id"]): (float(goal["manager_awarded_points"]) if goal["manager_awarded_points"] is not None else None)
+                for goal in goals
+            }
             stamp = now_iso()
             resubmission = evaluation["status"] == "returned"
             reviewers = [int(row["id"]) for row in self.db.execute("SELECT * FROM users WHERE active=1") if has_permission(self.db, dict(row), "evaluation.review") and row["id"] != user["id"]]
             old_manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["manager_employee_id"],)).fetchone()
             with self.db:
                 for goal_id, points in submitted_map.items():
-                    self.db.execute("UPDATE evaluation_goals SET awarded_points=?,updated_at=? WHERE id=? AND evaluation_id=?", (points, stamp, goal_id, evaluation_id))
+                    self.db.execute(
+                        """UPDATE evaluation_goals
+                              SET manager_awarded_points=?,awarded_points=?,updated_at=?
+                            WHERE id=? AND evaluation_id=?""",
+                        (points, points, stamp, goal_id, evaluation_id),
+                    )
                 self.db.execute("UPDATE evaluation_approvals SET status='approved',comment=?,decided_at=? WHERE evaluation_id=? AND step_no=1", (report, stamp, evaluation_id))
                 self.db.execute("UPDATE evaluations SET status='in_review',manager_report=?,manager_submitted_at=?,weighted_score=?,rating=?,hr_comment='',updated_at=? WHERE id=?", (report, stamp, score, self.evaluation_rating(score), stamp, evaluation_id))
                 create_internal_notification(self.db, user["id"], reviewers, "تقييم سنوي بانتظار مراجعة HR", "أكمل المسؤول المباشر النقاط وتقرير الموظف.")
@@ -12650,7 +12734,11 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                     "evaluation.manager_override" if manager_override else ("evaluation.manager_resubmit" if resubmission else "evaluation.manager_submit"),
                     "evaluation",
                     evaluation_id,
-                    {"from_status": evaluation["status"], "to_status": "in_review", "score": score, "manager_override": manager_override, "former_manager_employee_id": evaluation["manager_employee_id"]},
+                    {
+                        "from_status": evaluation["status"], "to_status": "in_review", "score": score,
+                        "manager_override": manager_override, "former_manager_employee_id": evaluation["manager_employee_id"],
+                        "previous_goal_points": previous_map, "new_goal_points": submitted_map,
+                    },
                 )
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
@@ -12659,37 +12747,141 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
             evaluation = self.evaluation_row(evaluation_id)
             if evaluation["employee_id"] == user.get("employee_id"):
                 raise APIError(403, "لا يمكن مراجعة تقييمك الشخصي.", "self_review_forbidden")
-            if int(evaluation["workflow_version"] or 1) < 2 or evaluation["status"] != "in_review":
-                raise APIError(409, "التقييم ليس بانتظار مراجعة الموارد البشرية.", "invalid_status")
+            if int(evaluation["workflow_version"] or 1) < 2:
+                raise APIError(409, "هذا السجل يستخدم مسار الاعتماد القديم.", "legacy_workflow")
+            approved_unpublished = evaluation["status"] == "approved" and not self.evaluation_is_published(evaluation)
+            if evaluation["status"] != "in_review" and not (approved_unpublished and is_system_admin(user)):
+                if evaluation["status"] == "approved" and self.evaluation_is_published(evaluation):
+                    raise APIError(409, "لا يمكن تعديل تقييم بعد تاريخ الإفصاح.", "evaluation_already_published")
+                raise APIError(409, "التقييم ليس في مرحلة قابلة لمراجعة النقاط.", "invalid_status")
             data = self.read_json()
             action = str(data.get("action", ""))
-            if action not in {"return", "approve"}:
-                raise APIError(422, "القرار يجب أن يكون return أو approve.", "validation_error")
+            if action not in {"save", "return", "approve"}:
+                raise APIError(422, "الإجراء يجب أن يكون save أو return أو approve.", "validation_error")
+            if approved_unpublished and action != "save":
+                raise APIError(409, "يمكن لمسؤول النظام حفظ تعديل النقاط قبل الإفصاح دون إنشاء اعتماد جديد.", "invalid_status")
             comment = optional_text(data, "comment", 3000)
             stamp = now_iso()
             manager_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["manager_employee_id"],)).fetchone()
             employee_user = self.db.execute("SELECT id FROM users WHERE employee_id=? AND active=1", (evaluation["employee_id"],)).fetchone()
+            goal_rows = self.db.execute(
+                """SELECT id,weight,manager_awarded_points,hr_awarded_points,awarded_points
+                     FROM evaluation_goals WHERE evaluation_id=? ORDER BY id""",
+                (evaluation_id,),
+            ).fetchall()
+            previous_map = {
+                int(goal["id"]): (float(goal["hr_awarded_points"]) if goal["hr_awarded_points"] is not None else None)
+                for goal in goal_rows
+            }
+            hr_points: dict[int, float] | None = None
+            if action in {"save", "approve"}:
+                submitted_goals = data.get("goals")
+                if submitted_goals is None and action == "approve":
+                    # Backward compatibility: an approval without an explicit
+                    # score sheet initializes HR points from the saved HR draft,
+                    # then from the manager stage.
+                    hr_points = {
+                        int(goal["id"]): float(
+                            goal["hr_awarded_points"]
+                            if goal["hr_awarded_points"] is not None
+                            else goal["manager_awarded_points"]
+                            if goal["manager_awarded_points"] is not None
+                            else goal["awarded_points"]
+                        )
+                        for goal in goal_rows
+                        if (
+                            goal["hr_awarded_points"] is not None
+                            or goal["manager_awarded_points"] is not None
+                            or goal["awarded_points"] is not None
+                        )
+                    }
+                else:
+                    if not isinstance(submitted_goals, list) or len(submitted_goals) != len(goal_rows):
+                        raise APIError(422, "أدخل نقاط الموارد البشرية لكل هدف.", "goal_scores_required")
+                    hr_points = {}
+                    for item in submitted_goals:
+                        if not isinstance(item, dict):
+                            raise APIError(422, "بيانات النقاط غير صالحة.", "validation_error")
+                        goal_id = as_int(item.get("id"), "goal_id", 1)
+                        if goal_id in hr_points:
+                            raise APIError(422, "تكرر الهدف في كشف نقاط الموارد البشرية.", "duplicate_goal")
+                        raw_points = item.get("hr_awarded_points", item.get("awarded_points"))
+                        hr_points[goal_id] = as_float(raw_points, "hr_awarded_points", 0, 100)
+                expected_ids = {int(goal["id"]) for goal in goal_rows}
+                if not goal_rows or hr_points is None or set(hr_points) != expected_ids:
+                    raise APIError(422, "كشف النقاط لا يطابق أهداف التقييم.", "goal_mismatch")
+                for goal in goal_rows:
+                    if hr_points[int(goal["id"])] > float(goal["weight"]) + 0.000001:
+                        raise APIError(422, "نقاط الموارد البشرية لا يمكن أن تتجاوز وزن الهدف.", "points_exceed_weight", {
+                            "goal_id": goal["id"], "weight": goal["weight"],
+                        })
+            previous_total = round(sum(float(value) for value in previous_map.values() if value is not None), 2)
             with self.db:
                 if action == "return":
+                    if evaluation["status"] != "in_review":
+                        raise APIError(409, "لا يمكن إعادة تقييم معتمد من هذه الشاشة.", "invalid_status")
                     if not comment:
                         raise APIError(422, "تعليق الإعادة مطلوب.", "comment_required")
                     self.db.execute("UPDATE evaluations SET status='returned',hr_reviewed_by=?,hr_comment=?,updated_at=? WHERE id=?", (user["id"], comment, stamp, evaluation_id))
                     if manager_user:
                         create_internal_notification(self.db, user["id"], [manager_user["id"]], "أعيد التقييم من HR", comment)
                     audit(self.db, user["id"], "evaluation.hr_return", "evaluation", evaluation_id, {"from_status": "in_review", "to_status": "returned", "comment": comment})
+                elif action == "save":
+                    assert hr_points is not None
+                    for goal_id, points in hr_points.items():
+                        if approved_unpublished:
+                            self.db.execute(
+                                "UPDATE evaluation_goals SET hr_awarded_points=?,awarded_points=?,updated_at=? WHERE id=? AND evaluation_id=?",
+                                (points, points, stamp, goal_id, evaluation_id),
+                            )
+                        else:
+                            self.db.execute(
+                                "UPDATE evaluation_goals SET hr_awarded_points=?,updated_at=? WHERE id=? AND evaluation_id=?",
+                                (points, stamp, goal_id, evaluation_id),
+                            )
+                    score = round(sum(hr_points.values()), 2)
+                    if approved_unpublished:
+                        self.db.execute(
+                            "UPDATE evaluations SET weighted_score=?,rating=?,hr_reviewed_by=?,hr_comment=?,updated_at=? WHERE id=?",
+                            (score, self.evaluation_rating(score), user["id"], comment, stamp, evaluation_id),
+                        )
+                        audit(self.db, user["id"], "evaluation.admin_prepublication_score_edit", "evaluation", evaluation_id, {
+                            "status": "approved", "disclosure_date": evaluation["disclosure_date"],
+                            "previous_total": previous_total, "new_total": score,
+                            "previous_goal_points": previous_map, "new_goal_points": hr_points,
+                        })
+                    else:
+                        self.db.execute(
+                            "UPDATE evaluations SET hr_reviewed_by=?,hr_comment=?,updated_at=? WHERE id=?",
+                            (user["id"], comment, stamp, evaluation_id),
+                        )
+                        audit(self.db, user["id"], "evaluation.hr_score_save", "evaluation", evaluation_id, {
+                            "status": "in_review", "previous_total": previous_total, "new_total": score,
+                            "previous_goal_points": previous_map, "new_goal_points": hr_points,
+                        })
                 else:
+                    assert hr_points is not None
                     disclosure = parse_date(data.get("disclosure_date"), "disclosure_date")
                     if disclosure < local_now().date():
                         raise APIError(422, "تاريخ الإفصاح لا يمكن أن يكون في الماضي.", "invalid_disclosure_date")
-                    goals = self.db.execute("SELECT awarded_points FROM evaluation_goals WHERE evaluation_id=?", (evaluation_id,)).fetchall()
-                    if not goals or any(goal["awarded_points"] is None for goal in goals):
-                        raise APIError(409, "لم يكتمل كشف نقاط المسؤول.", "scores_incomplete")
-                    score = round(sum(float(goal["awarded_points"]) for goal in goals), 2)
+                    for goal_id, points in hr_points.items():
+                        self.db.execute(
+                            """UPDATE evaluation_goals
+                                  SET hr_awarded_points=?,awarded_points=?,updated_at=?
+                                WHERE id=? AND evaluation_id=?""",
+                            (points, points, stamp, goal_id, evaluation_id),
+                        )
+                    score = round(sum(hr_points.values()), 2)
                     self.db.execute("UPDATE evaluations SET status='approved',weighted_score=?,rating=?,hr_reviewed_by=?,hr_comment=?,disclosure_date=?,finalized_at=?,updated_at=? WHERE id=?", (score, self.evaluation_rating(score), user["id"], comment, disclosure.isoformat(), stamp, stamp, evaluation_id))
                     available_at = datetime.combine(disclosure, time.min, UAE_TZ).astimezone(timezone.utc).isoformat(timespec="seconds")
                     if employee_user:
                         create_internal_notification(self.db, user["id"], [employee_user["id"]], "نتيجة التقييم السنوي", "أصبحت نتيجة تقييمك متاحة في صفحة التقييم السنوي.", available_at)
-                    audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {"from_status": "in_review", "to_status": "approved", "score": score, "disclosure_date": disclosure.isoformat(), "comment": comment})
+                    audit(self.db, user["id"], "evaluation.hr_approve", "evaluation", evaluation_id, {
+                        "from_status": "in_review", "to_status": "approved", "score": score,
+                        "previous_total": previous_total, "new_total": score,
+                        "previous_goal_points": previous_map, "new_goal_points": hr_points,
+                        "disclosure_date": disclosure.isoformat(), "comment": comment,
+                    })
             self.send_json(200, self.evaluation_payload(evaluation_id))
 
         def api_evaluation_return(self, evaluation_id: int, forced_target: str | None = None) -> None:
@@ -12742,7 +12934,9 @@ def make_handler(db_path: Path, static_root: Path = APP_DIR) -> type[BaseHTTPReq
                 self.db.execute("DELETE FROM evaluation_approvals WHERE evaluation_id=?", (evaluation_id,))
                 if target == "employee":
                     self.db.execute(
-                        "UPDATE evaluation_goals SET awarded_points=NULL,updated_at=? WHERE evaluation_id=?",
+                        """UPDATE evaluation_goals
+                              SET manager_awarded_points=NULL,hr_awarded_points=NULL,awarded_points=NULL,updated_at=?
+                            WHERE evaluation_id=?""",
                         (stamp, evaluation_id),
                     )
                     self.db.execute(

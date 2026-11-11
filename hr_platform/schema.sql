@@ -648,6 +648,8 @@ CREATE TABLE IF NOT EXISTS evaluation_goals (
   evidence_note TEXT NOT NULL DEFAULT '',
   evidence_file_name TEXT NOT NULL DEFAULT '',
   evidence_file_data TEXT,
+  manager_awarded_points REAL,
+  hr_awarded_points REAL,
   awarded_points REAL,
   employee_comment TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,

@@ -826,6 +826,19 @@
     'تعذر تحميل مؤشرات التقييم':'Evaluation indicators could not be loaded','إعادة المحاولة':'Try again'
   });
 
+  Object.assign(english, {
+    'نقاط تقييمي الذاتي':'My self-score','نقاط الموظف':'Employee self-score','نقاط المشرف':'Supervisor score','مجموع نقاط المشرف':'Supervisor score total',
+    'محسوب آلياً':'Calculated automatically','من {weight}':'Out of {weight}','مراجعة النقاط النهائية':'Final score review',
+    'مقارنة مراحل التقييم':'Evaluation stage comparison','راجع مصدر كل نقطة وعدّل نقاط الموارد البشرية قبل الحفظ أو الاعتماد.':'Review the source of every point and adjust the HR score before saving or approval.',
+    'غير منشور — قابل للتعديل حتى الإفصاح':'Unpublished — editable until disclosure','الهدف':'Goal',
+    'تقييم الموظف':'Employee self-score','تقييم المشرف':'Supervisor score','تقييم الموارد البشرية / النهائي':'HR / final score',
+    'محفوظ من مرحلة المشرف':'Preserved from the supervisor stage','المجموع النهائي المباشر':'Live final total',
+    'ملاحظات الموارد البشرية':'HR review notes','أضف ملاحظات التدقيق أو سبب تعديل النقاط…':'Add audit notes or explain score changes…',
+    'تاريخ الإفصاح عن النتائج':'Results disclosure date','حفظ بدون اعتماد':'Save without approval','إعادة للمشرف':'Return to supervisor',
+    'اعتماد وجدولة الإفصاح':'Approve and schedule disclosure','تم حفظ نقاط الموارد البشرية بدون اعتماد':'HR scores saved without approval',
+    'اعتمدت النتيجة وجُدول الإفصاح':'The result was approved and disclosure was scheduled'
+  });
+
   window.HR_I18N = { t: translate, translate, setLocale, apply, get locale() { return locale; }, formatDate, formatNumber, formatCurrency, storageKey: STORAGE_KEY, resources: { ar: {}, en: english } };
   document.addEventListener('click', event => { const button = event.target.closest('[data-locale]'); if (button) setLocale(button.dataset.locale); });
   document.addEventListener('DOMContentLoaded', () => {
